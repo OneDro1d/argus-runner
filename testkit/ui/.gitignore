@@ -1,0 +1,9 @@
+# Vendored UI test kit — never commit secrets or captured sessions.
+node_modules/
+.env
+.env.test
+playwright/.auth/
+playwright-report/
+test-results/
+# The spec's own evidence (assertions.json, Playwright's results.json) — rewritten every UI scenario.
+argus-out/

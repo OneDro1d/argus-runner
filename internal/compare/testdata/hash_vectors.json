@@ -1,0 +1,92 @@
+[
+  {
+    "name": "status-and-body",
+    "status_bytes": "200",
+    "headers_bytes": "",
+    "body_bytes": "{\"a\":1,\"b\":[1,2]}",
+    "selected": {
+      "status": true,
+      "headers": false,
+      "body": true
+    },
+    "status_part": "87f32b8f1ed395cdea3f78088c618fd266158412ad8b9f41a5df887d200a988d",
+    "headers_part": "",
+    "body_part": "8aa5dc1237e5649fbeb493b57962ac276c9ad664ff2183bf108c885d808447af",
+    "hash": "bedfbe71287fbadf358366792f8a9eb75c3f1fa558b0f1d7f331808cc84c5f34"
+  },
+  {
+    "name": "status-only",
+    "status_bytes": "418",
+    "headers_bytes": "",
+    "body_bytes": "",
+    "selected": {
+      "status": true,
+      "headers": false,
+      "body": false
+    },
+    "status_part": "54d0dab9eebd1e4db83950027833f5be6f58b6a7c2d779083926fcc260e87f2f",
+    "headers_part": "",
+    "body_part": "",
+    "hash": "938fca1a2f8bd64276a2c75b54e2c6c124b5b03b86e622181dc6c553d4dbe31b"
+  },
+  {
+    "name": "all-three",
+    "status_bytes": "200",
+    "headers_bytes": "{\"content-type\":\"application/json\"}",
+    "body_bytes": "{\"ok\":true}",
+    "selected": {
+      "status": true,
+      "headers": true,
+      "body": true
+    },
+    "status_part": "87f32b8f1ed395cdea3f78088c618fd266158412ad8b9f41a5df887d200a988d",
+    "headers_part": "f905a795489621e5c24addbf5de7bbdfb54d956531507261c9a7af1c4208f680",
+    "body_part": "de5f63d2f64da710ce90d56f79c2ca46af55da1272a8ec40c76b9d2a808efce3",
+    "hash": "6659054b5555b9876632108f25ca7dc8751d8eea8fea9dbfdeb41e18ca2f7803"
+  },
+  {
+    "name": "body-only-text",
+    "status_bytes": "",
+    "headers_bytes": "",
+    "body_bytes": "hello\nworld",
+    "selected": {
+      "status": false,
+      "headers": false,
+      "body": true
+    },
+    "status_part": "",
+    "headers_part": "",
+    "body_part": "84fbd71240f44b20d36fe744968078619e3f2e03be1f1029e8ef527ee25e0141",
+    "hash": "2be0fee744da228dbd9578140148ec39ff6de446939544836cbdbc3abf4bbb92"
+  },
+  {
+    "name": "empty-body-selected",
+    "status_bytes": "204",
+    "headers_bytes": "",
+    "body_bytes": "",
+    "selected": {
+      "status": true,
+      "headers": false,
+      "body": true
+    },
+    "status_part": "39c6043d22f28ee75faf3744a1d464604e42473153f7a2a212203ba3c1019466",
+    "headers_part": "",
+    "body_part": "fc3bf30660759e10372382955474c2191bc877f0d9413da8d1b5b6fc8b001a57",
+    "hash": "cc22caa14584e8709a048850ebac274a6f9c8907bba470a25a3188f266ba9e14"
+  },
+  {
+    "name": "nothing-selected",
+    "status_bytes": "",
+    "headers_bytes": "",
+    "body_bytes": "",
+    "selected": {
+      "status": false,
+      "headers": false,
+      "body": false
+    },
+    "status_part": "",
+    "headers_part": "",
+    "body_part": "",
+    "hash": "d646c698d29f26a0ea13a692d9e5fcf6fb32dcb3f5484dc11720aa0242efe23c"
+  }
+]

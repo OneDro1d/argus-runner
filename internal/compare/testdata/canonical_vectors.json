@@ -1,0 +1,562 @@
+[
+ {
+  "name": "keys-sorted-by-byte-order",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJiIjoxLCJhIjp7ImQiOjIsImMiOlszLDIsMV19LCJCIjowfQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "{\"B\":0,\"a\":{\"c\":[3,2,1],\"d\":2},\"b\":1}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "43975898248c2f31747427bc36969bc4fbe4d03a72b7d495046a5d5426408ebb",
+  "expect_values": []
+ },
+ {
+  "name": "numbers-shortest-and-big-integers",
+  "status": 200,
+  "headers": {},
+  "body_b64": "WzEuMCwgMWUyLCAwLjEwLCAxMjM0NTY3ODkwMTIzNDU2Nzg5MCwgOTAwNzE5OTI1NDc0MDk5MywgLTAsIDEuNWUzMDAsIDAuMDAwMDAxLCAxRS03LCAxMDAwMDAwMDAwMDAwMDAwMDAwMDAsIDFlMjEsIDkwMDcxOTkyNTQ3NDA5OTIsIDAuMWUxXQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "[1,100,0.1,12345678901234567890,9007199254740993,0,1.5e+300,0.000001,1e-7,100000000000000000000,1e+21,9007199254740992,1]",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "38a686900f619cba8e796d78d317cd1ebe2661a5986740c496577ceb7cab9607",
+  "expect_values": []
+ },
+ {
+  "name": "null-is-not-absent-null",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJhIjpudWxsfQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "{\"a\":null}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "8b43d8c30a7c520abbec0621c3b4fa0ca50b2b490250bdae2b11bbf37cac4817",
+  "expect_values": []
+ },
+ {
+  "name": "null-is-not-absent-absent",
+  "status": 200,
+  "headers": {},
+  "body_b64": "e30=",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "{}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "dfaf0085761d386ccab04294a968946aa20bb3f61103a4a874cdac2db0f71d23",
+  "expect_values": []
+ },
+ {
+  "name": "string-escapes",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJzIjoibGluZTFcbmxpbmUyXHRcInFcIiBcdTAwZTkgXHUwMDAxIFx1MDAxZiA8Yj4gXC8gXFwgXHUyMDI4In0=",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "{\"s\":\"line1\\nline2\\t\\\"q\\\" é \\u0001 \\u001f <b> / \\\\  \"}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "72b1eb99566471ec3146ff7d582b8564946362dc3e7ab7e136f1a29c31965bdd",
+  "expect_values": []
+ },
+ {
+  "name": "mask-leaf-and-wildcard",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJpZCI6NywibmFtZSI6IngiLCJpdGVtcyI6W3siY3JlYXRlZEF0IjoidDEiLCJ2IjoxfSx7ImNyZWF0ZWRBdCI6InQyIiwidiI6Mn1dfQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Mask",
+    "value": "$.id; $.items[*].createdAt"
+   }
+  ],
+  "expect_body": "{\"id\":\"<masked>\",\"items\":[{\"createdAt\":\"<masked>\",\"v\":1},{\"createdAt\":\"<masked>\",\"v\":2}],\"name\":\"x\"}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 3,
+  "expect_hash": "0e84f1f2b752b5077f2b1b90d35d85e09a3496adf9cf221837ee34f6b199b698",
+  "expect_values": []
+ },
+ {
+  "name": "mask-subtree",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJtZXRhIjp7ImEiOjEsImIiOlsxLDJdfSwidiI6MX0=",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Mask",
+    "value": "$.meta"
+   }
+  ],
+  "expect_body": "{\"meta\":\"<masked>\",\"v\":1}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 1,
+  "expect_hash": "6c15dcdeafb744a84386ddca34658a73e2e65119a2a66e127a477955c483d17e",
+  "expect_values": []
+ },
+ {
+  "name": "mask-absent-path-stays-absent",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJ2IjoxfQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Mask",
+    "value": "$.id"
+   }
+  ],
+  "expect_body": "{\"v\":1}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "422ff20731d404f5e0ccb7834cb46ee96038cd0ccad1db3492e2d15479a1886c",
+  "expect_values": []
+ },
+ {
+  "name": "mask-index",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJhIjpbMTAsMjAsMzBdfQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Mask",
+    "value": "$.a[1]"
+   }
+  ],
+  "expect_body": "{\"a\":[10,\"<masked>\",30]}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 1,
+  "expect_hash": "6403890ca3cacfb5d5eea79e971d91977b9dd22c1653798f094a3dd1608e7f3c",
+  "expect_values": []
+ },
+ {
+  "name": "real-value-equal-to-the-mask-token",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJhIjoiPG1hc2tlZD4ifQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "{\"a\":\"\\u003cmasked>\"}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "0517f041f8d4cab6d1261d22c873eff1781fa044609881382d0adda045c035c9",
+  "expect_values": []
+ },
+ {
+  "name": "unordered-numbers",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJpdGVtcyI6WzMsMSwyXX0=",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Unordered",
+    "value": "$.items"
+   }
+  ],
+  "expect_body": "{\"items\":[1,2,3]}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "9e46cfe06b5cec4d5590d7b1f387d22e91c07d15d24a0659f6d90920fbb91fac",
+  "expect_values": []
+ },
+ {
+  "name": "unordered-objects-sorted-after-masking",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJpdGVtcyI6W3siaWQiOjksImsiOiJiIn0seyJpZCI6MSwiayI6ImEifV19",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Unordered",
+    "value": "$.items"
+   },
+   {
+    "key": "Mask",
+    "value": "$.items[*].id"
+   }
+  ],
+  "expect_body": "{\"items\":[{\"id\":\"<masked>\",\"k\":\"a\"},{\"id\":\"<masked>\",\"k\":\"b\"}]}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 2,
+  "expect_hash": "9f707d5ac5b5252bd7cdac98f51af4b8b2542f5a68274f64b8423d4d4d631366",
+  "expect_values": []
+ },
+ {
+  "name": "array-order-kept-when-not-declared",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJpdGVtcyI6WzMsMSwyXX0=",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "{\"items\":[3,1,2]}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "e2f1a41984b3bb10fc8e0866c326086560569dcaa399e29bbbfbc59b8c8ebb9a",
+  "expect_values": []
+ },
+ {
+  "name": "headers-declared-only",
+  "status": 200,
+  "headers": {
+   "Content-Type": [
+    "application/json "
+   ],
+   "X-Other": [
+    "y"
+   ]
+  },
+  "body_b64": "eyJhIjoxfQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Output",
+    "value": "status, body, header:Content-Type"
+   }
+  ],
+  "expect_body": "{\"a\":1}",
+  "expect_headers": "{\"content-type\":\"application/json\"}",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "13bd85c37afefad357a533cabb8622c9f655d9e8f6dda9fe91189cbcd92f8192",
+  "expect_values": []
+ },
+ {
+  "name": "header-masked",
+  "status": 200,
+  "headers": {
+   "date": [
+    "Mon"
+   ]
+  },
+  "body_b64": "eyJhIjoxfQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Output",
+    "value": "status, body, header:Date"
+   },
+   {
+    "key": "Mask",
+    "value": "header:Date"
+   }
+  ],
+  "expect_body": "{\"a\":1}",
+  "expect_headers": "{\"date\":\"<masked>\"}",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 1,
+  "expect_hash": "2367268fe0da3db74bc732c7ebb7cd98b7eb88198ecc130eab5d7d3bc38638d9",
+  "expect_values": []
+ },
+ {
+  "name": "header-absent-is-omitted",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJhIjoxfQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Output",
+    "value": "body, header:Etag"
+   }
+  ],
+  "expect_body": "{\"a\":1}",
+  "expect_headers": "{}",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "2a71bb321c53cc2604ec3ab1609d732d52afb50aa052a697d5603eaefca9814e",
+  "expect_values": []
+ },
+ {
+  "name": "text-crlf-normalised",
+  "status": 200,
+  "headers": {},
+  "body_b64": "YQ0KYg0K",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "a\nb\n",
+  "expect_headers": "",
+  "expect_body_kind": "text",
+  "expect_masks_applied": 0,
+  "expect_hash": "b4122e762294907cb6a9bccd0fd7191786f682dd73a2878cef9a17d2a0c6d8fb",
+  "expect_values": []
+ },
+ {
+  "name": "text-lone-cr-kept",
+  "status": 200,
+  "headers": {},
+  "body_b64": "YQ1i",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "a\rb",
+  "expect_headers": "",
+  "expect_body_kind": "text",
+  "expect_masks_applied": 0,
+  "expect_hash": "6f10edecb3b3cab9578db6ee115355fb578bcb332dc71d99049a9e5014052170",
+  "expect_values": []
+ },
+ {
+  "name": "empty-body",
+  "status": 200,
+  "headers": {},
+  "body_b64": "",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "",
+  "expect_headers": "",
+  "expect_body_kind": "empty",
+  "expect_masks_applied": 0,
+  "expect_hash": "8119c70b754d7f52051bfc62be7378bc4ddc3531346d88b35b3aa426a7459602",
+  "expect_values": []
+ },
+ {
+  "name": "duplicate-keys-are-text",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJhIjoxLCJhIjoyfQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "{\"a\":1,\"a\":2}",
+  "expect_headers": "",
+  "expect_body_kind": "text",
+  "expect_masks_applied": 0,
+  "expect_hash": "41dd77f798a7cedd39d198ac23ff92ecfb46f6097af437b64bf62d25bee78135",
+  "expect_values": []
+ },
+ {
+  "name": "bom-is-text",
+  "status": 200,
+  "headers": {},
+  "body_b64": "77u/eyJhIjoxfQ==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "﻿{\"a\":1}",
+  "expect_headers": "",
+  "expect_body_kind": "text",
+  "expect_masks_applied": 0,
+  "expect_hash": "645cdcb303b56b9deaf015364c0d69165488c408e569ac9b67d711ca384a3c99",
+  "expect_values": []
+ },
+ {
+  "name": "trailing-bytes-are-text",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJhIjoxfSB4",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "{\"a\":1} x",
+  "expect_headers": "",
+  "expect_body_kind": "text",
+  "expect_masks_applied": 0,
+  "expect_hash": "58e91d82b5697e33ecd998925c13996b9018ab1b4dd3355c239e92129fef9e0c",
+  "expect_values": []
+ },
+ {
+  "name": "two-values-are-text",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJhIjoxfXsiYiI6Mn0=",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "{\"a\":1}{\"b\":2}",
+  "expect_headers": "",
+  "expect_body_kind": "text",
+  "expect_masks_applied": 0,
+  "expect_hash": "676c2465e29a30d4c34592cfc507f26644693cc0a774350e35c7fa50b0b77cd8",
+  "expect_values": []
+ },
+ {
+  "name": "whitespace-around-json-is-json",
+  "status": 200,
+  "headers": {},
+  "body_b64": "IAp7ImEiIDogMX0K",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "{\"a\":1}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "7642f42ad220781c64c970288bc4892806a16ea2b4add429585eb5fce5997a4d",
+  "expect_values": []
+ },
+ {
+  "name": "top-level-scalar-is-json",
+  "status": 200,
+  "headers": {},
+  "body_b64": "ICA0MiA=",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   }
+  ],
+  "expect_body": "42",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "15518b03efbfce79868be5a4b3a9d9b02c3f7ae9526b037ec3bd710bfb27bb8c",
+  "expect_values": []
+ },
+ {
+  "name": "status-only",
+  "status": 418,
+  "headers": {},
+  "body_b64": "aWdub3JlZA==",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Output",
+    "value": "status"
+   }
+  ],
+  "expect_body": "",
+  "expect_headers": "",
+  "expect_body_kind": "",
+  "expect_masks_applied": 0,
+  "expect_hash": "938fca1a2f8bd64276a2c75b54e2c6c124b5b03b86e622181dc6c553d4dbe31b",
+  "expect_values": []
+ },
+ {
+  "name": "tolerance-leaves-leave-the-hash",
+  "status": 200,
+  "headers": {},
+  "body_b64": "eyJ0b3RhbCI6MTAuMDA0LCJuYW1lIjoieCIsInJhdGUiOjAuNX0=",
+  "rules": [
+   {
+    "key": "Reference",
+    "value": "measured"
+   },
+   {
+    "key": "Tolerance",
+    "value": "$.total abs 0.01; $.rate rel 0.001"
+   }
+  ],
+  "expect_body": "{\"name\":\"x\",\"rate\":\"<tolerance>\",\"total\":\"<tolerance>\"}",
+  "expect_headers": "",
+  "expect_body_kind": "json",
+  "expect_masks_applied": 0,
+  "expect_hash": "264fc17605e1ab44dd66f2342d9b00062689e198c56ec90264948624d94cdd81",
+  "expect_values": [
+   {
+    "path": "$.rate",
+    "rule": 0,
+    "value": 0.5
+   },
+   {
+    "path": "$.total",
+    "rule": 1,
+    "value": 10.004
+   }
+  ]
+ }
+]

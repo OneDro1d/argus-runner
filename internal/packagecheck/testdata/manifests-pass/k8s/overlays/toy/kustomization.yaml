@@ -1,0 +1,6 @@
+resources:
+  - ../../base
+images:
+  - name: ghcr.io/example/toy-control
+    newName: registry.example/toy-control
+    digest: sha256:2222222222222222222222222222222222222222222222222222222222222b

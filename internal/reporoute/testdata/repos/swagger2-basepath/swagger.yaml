@@ -1,0 +1,9 @@
+swagger: "2.0"
+info:
+  title: legacy
+  version: "1.0"
+basePath: /v1
+paths:
+  /widgets:
+    get:
+      summary: list widgets

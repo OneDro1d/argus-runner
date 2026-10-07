@@ -1,0 +1,767 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# Argus update (D-ONBOARD.8 / F14, UC150-UC153) — move ONE instance's executor onto a different
+# image, verify it came back, and PUT IT BACK BY ITSELF if it did not.
+#
+# Update is NOT teardown. The SUT, the obs volumes, the argus-config, the token pair, the machine
+# identity, the cloud registration and the run history all survive (UC152). A SUT redeploy is not a
+# suite update either — that is the operator's own `docker compose up` on their SUT (UC153).
+#
+# Usage:
+#   onboarding/update.sh --instance-id <id> [--image <ref>] [--tier compose|k3d|aks|managed]
+#   onboarding/update.sh --instance-id <id> --rollback          # back to the recorded previous image
+#   onboarding/update.sh --instance-id <id> --pin <ref>         # hold on a known-good image
+#   onboarding/update.sh --router                               # move ONLY the machine router (VR6-R3)
+#
+# UPGRADE ORDER: control plane -> local router -> executors. Not a convention: the control plane holds
+# the version floors that judge the other two and refuses to start without them, so raising it first is
+# the only order in which its judgement means anything. The router and the executors are unordered
+# relative to each other — same image, neither judges the other.
+#
+#   --router                              move the machine router alone, with NO --instance-id. This is
+#                                         the only way to update the router on a machine that has zero
+#                                         instances — which is the machine most likely to have a stale
+#                                         one. Takes --image/--pin, or --control-plane + --token.
+#   --control-plane <URL> --token <PAT>   ask the CP for its RECOMMENDED image, and refuse to update
+#                                         while a run is in flight
+#   --force                               proceed when the in-flight check could not be performed
+#   --kube-context / --kubeconfig         k3d/aks only
+#
+# ── WHAT CP-M3-III-70 CHANGED, and why each one mattered ─────────────────────────────────────────
+# The Stage III map of this script found six defects. Four of them were in the ROLLBACK — the part an
+# operator relies on precisely when everything else has gone wrong:
+#
+#   1. THE BREADCRUMB DESTROYED ITSELF. `docker inspect … > .image-prev.<id>` truncates the file via
+#      shell redirection BEFORE docker runs, so whenever the container could not be inspected
+#      (stopped, renamed, already replaced) the previous-image record was silently emptied — and the
+#      next `--rollback` died with "no recorded previous image". It is now written atomically, and
+#      only after the current image has actually been read.
+#   2. ROLLBACK OVERWROTE ITS OWN ESCAPE ROUTE. The breadcrumb write ran during `--rollback` too,
+#      recording the image being rolled AWAY FROM. A second `--rollback` therefore returned you to
+#      the bad image. Rollback never writes a breadcrumb now.
+#   3. `.image-prev.default` was READ but never WRITTEN — a dead path. This script is per-instance
+#      only (F14), so the instance id is always required and that path is gone.
+#   4. THE AKS TIER DID NOT EXIST HERE. `--tier` hard-rejected it while teardown.sh accepted it, so
+#      the managed tier — the one where a bad update is most expensive — had no update path at all.
+#   5. A ROLLOUT TIMEOUT ABORTED MID-ROLL under `set -e`, leaving a half-updated Deployment and NO
+#      rollback. Verification is now explicit and failure triggers the automatic revert.
+#   6. NOTHING REFUSED TO UPDATE A RUNNING INSTANCE. Recreating the executor mid-run destroys work
+#      that has not been reported yet.
+#
+# THE CENTRAL RULE: an update that cannot be VERIFIED is rolled back automatically, without being
+# asked. "Unconditional" means the operator never has to notice, decide, or be present.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+
+HERE="$(cd "$(dirname "$0")" && pwd)"; REPO="$(cd "$HERE/.." && pwd)"
+COMPOSE_DIR="$REPO/deploy/compose"
+IMAGE="" INSTANCE_ID="" TIER="" PIN="" ROLLBACK=0 FORCE=0 ROUTER_ONLY=0
+# VR7-U1: a DECLARED tier can contradict the estate; a DISCOVERED one cannot. Remembered before the
+# discovery block below assigns TIER, because after that the two are indistinguishable.
+TIER_DECLARED=""
+CONTROL_PLANE="" TOKEN="${ARGUS_CP_TOKEN:-}" KUBE_CONTEXT="" KUBECONFIG_ARG=""
+hostpath() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+say() { echo "$*"; }
+if [ -n "${KUBECONFIG:-}" ]; then export KUBECONFIG="$(hostpath "$KUBECONFIG")"; fi
+
+while [ $# -gt 0 ]; do case "$1" in
+  --image)         IMAGE="${2:-}"; [ -n "$IMAGE" ] || die "--image needs a reference"; shift 2;;
+  --instance-id)   INSTANCE_ID="${2:-}"; [ -n "$INSTANCE_ID" ] || die "--instance-id needs a name"; shift 2;;
+  --tier)          TIER="${2:-}"; TIER_DECLARED=1; shift 2;;
+  --pin)           PIN="${2:-}"; [ -n "$PIN" ] || die "--pin needs a reference"; shift 2;;
+  --rollback)      ROLLBACK=1; shift;;
+  # VR6-R3 (V23-020): move ONLY the machine router, with NO instance. Before this a machine with zero
+  # instances could not update its router at all — and it is the one most likely to hold a stale router,
+  # because nothing has touched it in a while.
+  --router)        ROUTER_ONLY=1; shift;;
+  --force)         FORCE=1; shift;;
+  --control-plane) CONTROL_PLANE="${2:-}"; shift 2;;
+  --token)         TOKEN="${2:-}"; shift 2;;
+  --kube-context)  KUBE_CONTEXT="${2:-}"; shift 2;;
+  --kubeconfig)    KUBECONFIG_ARG="${2:-}"; shift 2;;
+  -h|--help)       sed -n '2,45p' "$0"; exit 0;;
+  *) die "unknown arg: $1";;
+esac; done
+
+# F14: PER-INSTANCE ONLY. A fleet-wide update is not a thing this script does — one instance at a
+# time is what makes a failure recoverable and attributable.
+# F14: PER-INSTANCE ONLY for an instance update — one at a time is what makes a failure recoverable and
+# attributable, and that rule is unchanged. VR6-R3 adds ONE exception: --router touches no instance at
+# all, so requiring an instance id for it was the reason a zero-instance machine could not be served.
+[ "$ROUTER_ONLY" = 1 ] || [ -n "$INSTANCE_ID" ] || die "need --instance-id <id> (update is per-instance; there is no fleet-wide mode)"
+[ "$ROUTER_ONLY" = 1 ] && [ -n "$INSTANCE_ID" ] && die "--router moves only the machine router and takes no instance; drop --instance-id, or drop --router to update that instance (which moves the router too)"
+[ "$ROUTER_ONLY" = 1 ] && [ "$ROLLBACK" = 1 ] && die "--rollback reads the RECORDED previous image of an INSTANCE; there is no per-router breadcrumb, so it cannot be combined with --router. Name the image with --image <ref>."
+[ "$ROLLBACK" = 1 ] && [ -n "$PIN" ] && die "--pin and --rollback are mutually exclusive"
+[ "$ROLLBACK" = 1 ] && [ -n "$IMAGE" ] && die "--rollback goes to the RECORDED previous image; --image would contradict it"
+
+# VR-V7: where the machine router's state lives. ONE definition, shared with onboard.sh — see the
+# header of that file for why a second copy here would be catastrophic rather than merely untidy.
+[ -f "$HERE/lib/router-state.sh" ] || die "missing onboarding/lib/router-state.sh — this kit is incomplete; re-extract it with 'argus init'"
+. "$HERE/lib/router-state.sh"
+# SEC-4 (gate re-run): a bearer token must not reach curl's argv, where `ps` shows it to every
+# user on the machine. ONE definition, shared by all three scripts — see the file header.
+[ -f "$HERE/lib/auth-curl.sh" ] || die "missing onboarding/lib/auth-curl.sh — this kit is incomplete; re-extract it with 'argus init'"
+. "$HERE/lib/auth-curl.sh"
+# VR6-R3 (V23-020): the ONE sentence that announces a router version move, shared with onboard.sh.
+# Both move the router and neither said so — which is how V23-006 happened: the router auto-updated
+# during an onboard and two hypotheses died on the fact nobody had been told.
+[ -f "$HERE/lib/router-version.sh" ] || die "missing onboarding/lib/router-version.sh — this kit is incomplete; re-extract it with 'argus init'"
+. "$HERE/lib/router-version.sh"
+# VR10-U3 (V28-002): the ONE k3d import, shared with onboard.sh. This file used to carry its own
+# save-then-import one-liner; on a DIGEST reference (which is what the control plane hands it) the
+# saved archive names nothing, ctr imports blobs under no name and exits 0, and the script rolled the
+# Deployment believing the node had the image. The duplication was the root cause: the library saves
+# under a temp tag, retags on the node and READS THE NODE BACK to decide.
+[ -f "$HERE/lib/k3d-image.sh" ] || die "missing onboarding/lib/k3d-image.sh — this kit is incomplete; re-extract it with 'argus init'"
+. "$HERE/lib/k3d-image.sh"
+# VR7-U1 (V24-009 / SA §0.1): the RESOLVED TARGET banner + the wrong-cluster refusal. onboard.sh and
+# teardown.sh have printed it since VR6-S1; update.sh is now the script that receives PASTED commands
+# from the control plane, which is exactly the caller that has not chosen its own cluster.
+. "$HERE/lib/target-guard.sh"
+
+# 🚩 …AND IT IS CALLED. Round 7 gate, SH-3: this file SOURCED the guard and never invoked it, which is
+# a lib loaded and unused — the exact shape tests/onboarding/target-safety.test.sh was written to
+# catch, missed because its loop named only onboard.sh and teardown.sh.
+#
+# ⚠ HERE, at argument-parse time, on the DECLARED values. The contradiction this refuses is between
+# what the operator PASTED and what survived from an earlier command, so it must be judged before
+# tier discovery (below) overwrites TIER with something self-consistent and possibly wrong.
+#
+# The 4th argument says this caller proves its own target: the TIER_DECLARED block resolves the
+# cluster and refuses by NAME when the instance's namespace is not in it. Without that, `--tier
+# managed` — the spelling the control plane's own pasted command carries — would be refused for
+# naming no kubeconfig, which is precisely what VR7-U1 decided it must not have to do.
+check_target_consistency "$TIER" "$KUBE_CONTEXT" "$KUBECONFIG_ARG" 1 || exit 1
+
+ROUTER_COMPOSE="$COMPOSE_DIR/docker-compose.router.yml"
+
+# ⬆ MOVED EARLIER (VR6-R3). This block used to sit below the whole per-instance path, which made a
+# router-only run impossible: bash needs move_router DEFINED before it is called, and `--router` has to
+# run BEFORE the instance work — a run-in-flight check, a breadcrumb and an image resolution that all
+# key off INSTANCE_ID, which a router-only run does not have. Nothing in this block was changed by the
+# move; it depends only on say/die/hostpath and lib/router-state.sh, all of which are above.
+# ── THE ROUTER MOVES WITH THE EXECUTOR (VR-V7 / V17-010) ─────────────────────────────────────────
+#
+# Owner: "we should treat a router as a part of executor." It runs from the SAME image, talks to the
+# same control plane, and holds the automatic author token. Before this, the word "router" did not
+# appear in this file at all: every update left it behind, one version further adrift each time — and
+# the thing drifting is the credential holder every agent folder on the machine routes through.
+#
+# IT IS MACHINE-WIDE, NOT PER-INSTANCE, so this runs on every tier. A k3d or aks executor lives in a
+# cluster; the router serving that instance's agent folders is still a container on THIS machine.
+#
+# THREE FACTS ARE READ, NOT GUESSED, and each one has a specific failure behind it:
+#
+#   the STATE DIR  computed by the shared router_state_dir(), never read back from docker. `docker
+#                  inspect` reports the VM-side path (/mnt/c/...), not the host path compose was
+#                  handed; binding that back mounts an EMPTY directory and the router returns with no
+#                  folder table, no identity, and a green (healthy) — every agent stranded.
+#   the PORT       STICKY (VR-R3) and already written into every folder's .mcp.json. A router that
+#                  comes back on the default when the folders were told something else is invisible
+#                  to all of them. If it cannot be read we do NOT guess — we decline and say so.
+#   the MACHINE    VR-R1 is "one router per MACHINE per user" and the control plane keys on this name.
+#     IDENTITY     Recomputing it from whatever COMPUTERNAME/HOSTNAME this shell happens to carry is
+#                  exactly how V17-017 registered a new machine on every onboard.
+#
+# ARGUS_ROUTER_STATE is deliberately NOT among the pass-throughs: inside the container its value is
+# `/state`, and re-exporting it here would make router_state_dir() return `/state` as a HOST path.
+router_container() { docker ps "$@" --filter 'name=^/argus-router$' --format '{{.Names}}' 2>/dev/null | head -1 || true; }
+router_env() {
+  docker inspect argus-router --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | grep -E "^$1=" | tail -1 | cut -d= -f2- || true
+}
+router_healthy() {
+  local port="$1" deadline=$(( $(date +%s) + ${2:-90} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    curl -fsS -m 3 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && return 0
+    sleep 3
+  done
+  return 1
+}
+router_compose_up() {  # $1=image  $2=port  $3=machine-name  $4=host-alias  $5=cp-url
+  ARGUS_ROUTER_IMAGE="$1" \
+  ARGUS_ROUTER_STATE_HOST="$(hostpath "$(router_state_dir)")" \
+  ARGUS_ROUTER_PORT="$2" \
+  ARGUS_ROUTER_HOST="$3" \
+  ARGUS_ROUTER_HOST_ALIAS="${4:-host.docker.internal}" \
+  ARGUS_CP_URL="$5" \
+    docker compose -f "$(hostpath "$ROUTER_COMPOSE")" -p argus-router up -d >/dev/null 2>&1
+}
+
+move_router() {
+  local img="$1"
+  if [ ! -f "$ROUTER_COMPOSE" ]; then
+    say "    NOTE: $ROUTER_COMPOSE is not in this kit — the router was left as it is."
+    return 0
+  fi
+  if [ -z "$(router_container)" ]; then
+    if [ -z "$(router_container -a)" ]; then
+      say "    NOTE: no router container on this machine — nothing to move."
+    else
+      say "    NOTE: argus-router exists but is not running — left alone."
+      say "          Update does not START things that were not running (that is onboarding's job)."
+    fi
+    return 0
+  fi
+
+  local before port host halias cp
+  before="$(docker inspect argus-router --format '{{.Config.Image}}' 2>/dev/null || true)"
+  if [ -n "$before" ] && [ "$before" = "$img" ]; then
+    say "==> the machine router is already on $img — nothing to move."
+    return 0
+  fi
+  port="$(docker port argus-router 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -1 || true)"
+  if [ -z "$port" ]; then
+    say "!!  WARN: could not read the port argus-router is published on, so it was NOT moved."
+    say "          Guessing here is the dangerous option: the port is sticky and every agent folder's"
+    say "          .mcp.json already holds it, so a router brought back on the wrong one is invisible"
+    say "          to all of them. Move it yourself once you know the port."
+    return 0
+  fi
+  host="$(router_env ARGUS_ROUTER_HOST)"
+  halias="$(router_env ARGUS_ROUTER_HOST_ALIAS)"
+  cp="$(router_env ARGUS_CP_URL)"
+
+  say "==> moving the machine router onto $img (VR-V7: the router is part of the executor)"
+  say "    it holds the automatic author token for every agent folder here, so it does not stay behind"
+  if router_compose_up "$img" "$port" "$host" "$halias" "$cp" && router_healthy "$port" 90; then
+    say "    argus-router now on $img (port $port)"
+    return 0
+  fi
+
+  # The same unconditional-revert rule the executor gets, and for a stronger reason: this container is
+  # shared by every agent folder on the machine, so a router left down is a machine-wide outage.
+  say ""
+  say "!!  WARN: the ROUTER did not come back on $img — reverting argus-router to ${before:-its previous image}"
+  if [ -n "$before" ] && router_compose_up "$before" "$port" "$host" "$halias" "$cp" && router_healthy "$port" 90; then
+    say "    argus-router is serving again on $before."
+  else
+    say "!!  argus-router is NOT serving. Every agent folder on this machine routes through it."
+    say "    Bring it back with:"
+    say "    docker compose -f deploy/compose/docker-compose.router.yml -p argus-router up -d"
+  fi
+  say "    The EXECUTOR update itself was verified and stands."
+  return 0
+}
+
+# ── VR6-R3 (V23-020 Part 1) — `--router`: MOVE THE ROUTER, NOTHING ELSE ──────────────────────────
+#
+# Before this, three things could move the router and none of them was an ANSWER to "update my
+# router": onboard.sh did it as a side-effect of an onboard, this script did it as a side-effect of an
+# instance update, and there was no third. 🚨 So a machine with ZERO INSTANCES could not update its
+# router at all — and that is the machine most likely to be holding a stale one, because nothing has
+# touched it in a while.
+#
+# It exits before ALL the per-instance work below, which is the point: the run-in-flight check, the
+# breadcrumb and the image resolution all key off INSTANCE_ID, and with it empty they would name paths
+# like `env.` and namespace `argus-inst-`.
+if [ "$ROUTER_ONLY" = 1 ]; then
+  say "$ROUTER_UPGRADE_ORDER"
+  say ""
+  RTARGET="${PIN:-$IMAGE}"
+  if [ -z "$RTARGET" ] && [ -n "$CONTROL_PLANE" ] && [ -n "$TOKEN" ]; then
+    # ⚠ /api/routers, NOT /api/instances. On the machine this flag exists for, the instance listing is
+    # EMPTY — so resolving from there would fail in exactly the case that motivated the flag. The
+    # routers endpoint carries the same recommended_image (router and executor are the same image).
+    RINFO="$(auth_curl "$TOKEN" -s --max-time 20 "$CONTROL_PLANE/api/routers" 2>/dev/null || true)"
+    # ⚠ NO SED BACKREFERENCE HERE, deliberately. The equivalent line further down uses one, and while
+    # editing this file through layered tooling the `\1` was silently eaten twice — leaving
+    # `s/.../ /p`, which replaces the match with NOTHING and empties RTARGET without any error. grep -o
+    # plus cut expresses the same extraction with no escape sequence to lose.
+    RTARGET="$(printf '%s' "${RINFO:-}" | grep -o '"recommended_image": *"[^"]*"' | head -1 | cut -d'"' -f4)"
+    [ -n "$RTARGET" ] && say "==> target: $RTARGET (the control plane's recommended image)"
+  fi
+  [ -n "$RTARGET" ] || die "no image to move the router to — pass --image <ref>, or --control-plane + --token so the recommended image can be fetched. (A control plane that publishes no recommended image gives this script nothing to move to; it will not compose a reference out of whatever it can find.)"
+
+  RBEFORE="$(docker inspect argus-router --format '{{.Config.Image}}' 2>/dev/null || true)"
+  move_router "$RTARGET"
+  RC=$?
+  RAFTER="$(docker inspect argus-router --format '{{.Config.Image}}' 2>/dev/null || true)"
+  # ⚠ READ BACK, never assumed. move_router declines in several cases it reports itself — no container,
+  # a port it could not read — and announcing a move it did not make is the V23-006 defect inverted.
+  say "==> $(router_move_line "$RBEFORE" "$RAFTER")"
+  exit $RC
+fi
+
+
+
+ENV_FILE="$COMPOSE_DIR/env.$INSTANCE_ID"
+PREV_FILE="$COMPOSE_DIR/.image-prev.$INSTANCE_ID"
+NS="argus-inst-$INSTANCE_ID"
+PROJECT="argus-inst-$INSTANCE_ID"
+
+kube() {
+  local a=()
+  [ -n "$KUBECONFIG_ARG" ] && a+=(--kubeconfig "$(hostpath "$KUBECONFIG_ARG")")
+  [ -n "$KUBE_CONTEXT" ] && a+=(--context "$KUBE_CONTEXT")
+  kubectl "${a[@]}" "$@"
+}
+is_k8s() { [ "$TIER" = k3d ] || [ "$TIER" = aks ] || [ "$TIER" = managed ]; }
+
+# ── TIER FROM THE RECORD, not from a flag's default ──────────────────────────────────────────────
+# The old default was "compose" whatever the instance actually was, so a k3d instance updated without
+# --tier silently took the compose path and did nothing useful. Ask the estate instead: a compose
+# instance has a compose project, a k8s instance has a namespace. An explicit --tier still wins.
+if [ -z "$TIER" ]; then
+  if docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null | grep -q .; then
+    TIER=compose
+  elif kube get ns "$NS" >/dev/null 2>&1; then
+    # k3d and aks differ only in which cluster the context points at; the update itself is identical.
+    TIER=k3d
+    case "${KUBE_CONTEXT}${KUBECONFIG_ARG}" in *example*|*aks*) TIER=aks;; esac
+  else
+    die "cannot tell which tier '$INSTANCE_ID' is on — no compose project '$PROJECT' and no namespace '$NS'. Pass --tier, and check you are pointed at the right cluster."
+  fi
+  say "==> tier: $TIER (discovered from the instance)"
+fi
+# `managed` is accepted because it is the word the CONTROL PLANE stores (federation.ValidTier is
+# compose|k3d|managed) and the update command it hands back therefore carries it. WireTier folds
+# aks/eks/gke down to `managed` at registration, deliberately, so the CP does not know which flavour
+# this cluster is — and it must not invent one. VR7-U1 / SA §0.9: without this the pasted command died
+# at flag-parse, which is exactly the half-built command the whole area exists to prevent.
+# It behaves identically to `aks`: k3d and a managed cluster differ only in which context is pointed
+# at, and the update itself is the same (see the discovery comment above).
+case "$TIER" in compose|k3d|aks|managed) ;; *) die "--tier must be 'compose', 'k3d', 'aks' or 'managed' (got '$TIER')";; esac
+
+# ── VR7-U1 (V24-009 / SA §0.1) — SAY WHICH TARGET WAS RESOLVED, AND REFUSE A DECLARED ONE THAT IS
+#    NOT THERE ───────────────────────────────────────────────────────────────────────────────────
+#
+# The control plane now hands back this command for k3d and managed instances too, and it CANNOT name
+# the cluster: `instances` has no kube-context column and adding one is a migration this round ruled
+# out. So the command declares its TIER and carries no context — which means kubectl uses whatever the
+# operator last selected.
+#
+# 🚩 THAT IS THE VR6-S1 HAZARD EXACTLY, and it is why onboard.sh and teardown.sh already print this
+# banner. update.sh did not, and it is the script that now receives pasted commands.
+#
+# TWO THINGS HAPPEN HERE, and they are different:
+#   * the banner PRINTS the three values that make up the target (VR6-D1: print, never prompt — a
+#     confirmation inside a flow people paste is one they learn to answer without reading).
+#   * a DECLARED tier is CHECKED. A discovered tier cannot contradict anything — it was read off the
+#     estate — but a declared one can, and that is the whole value of the control plane declaring it.
+kube_context_name() {
+  if [ -n "$KUBE_CONTEXT" ]; then printf '%s' "$KUBE_CONTEXT"; return; fi
+  local a=() c
+  [ -n "$KUBECONFIG_ARG" ] && a+=(--kubeconfig "$(hostpath "$KUBECONFIG_ARG")")
+  c="$(kubectl "${a[@]}" config current-context 2>/dev/null || true)"
+  printf '%s' "${c:-<unknown>}"
+}
+if [ -n "$TIER_DECLARED" ]; then
+  if is_k8s; then
+    if ! kube get ns "$NS" >/dev/null 2>&1; then
+      print_resolved_target "$INSTANCE_ID" "$TIER" "$(kube_context_name)" "$PROJECT"
+      die "this command declares --tier $TIER, but the cluster it resolved to has no namespace '$NS'.
+       cluster: '$(kube_context_name)'$([ -n "$KUBE_CONTEXT" ] || printf ' — INHERITED from your current kube-context, because this command names none')
+       Nothing was changed. Either select the context that reaches this instance's cluster, or pass
+       --kube-context / --kubeconfig explicitly. Since 0.3.29 the control plane records the context you
+       onboarded with and the Environments page's update block names it; an instance onboarded earlier
+       carries the <KUBE_CONTEXT> placeholder for you to fill (re-onboarding records it)."
+    fi
+  elif ! docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" 2>/dev/null | grep -q .; then
+    print_resolved_target "$INSTANCE_ID" "$TIER" "" "$PROJECT"
+    die "this command declares --tier compose, but there is no compose project '$PROJECT' on this
+       machine. Nothing was changed. Check you are on the machine this instance was onboarded from."
+  fi
+fi
+print_resolved_target "$INSTANCE_ID" "$TIER" "$(is_k8s && kube_context_name || true)" "$PROJECT"
+
+# ── READING THE INSTANCE ─────────────────────────────────────────────────────────────────────────
+current_image() {
+  if is_k8s; then
+    kube -n "$NS" get deploy executor -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true
+  else
+    local c; c="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=executor" 2>/dev/null | head -1 || true)"
+    [ -n "$c" ] && docker inspect "$c" --format '{{.Config.Image}}' 2>/dev/null || true
+  fi
+}
+
+# executor_version asks the RUNNING BINARY what it is (CP-M3-III-68 made that a real answer rather
+# than the constant 0.1.0). This is the before/after signal: an update that does not change it did
+# not do anything, and an update after which it cannot be read did not come back.
+executor_version() {
+  if is_k8s; then
+    kube -n "$NS" exec deploy/executor -- argus version 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -1 || true
+  else
+    local c; c="$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=executor" 2>/dev/null | head -1 || true)"
+    [ -n "$c" ] && docker exec "$c" argus version 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -1 || true
+  fi
+}
+
+# healthy: the executor is up AND SERVING. Waits, because a recreate is not instant.
+#
+# DELIBERATELY NOT "argus version answers". The first live run of this script proved why: the
+# instance was on an image that predates the `version` subcommand, so the check failed on the
+# ROLLBACK too and the script announced "the rollback ALSO failed" about an executor that was up and
+# serving. A health check must not depend on a FEATURE the image may not have — that turns every
+# older image into a false emergency. /healthz is served by every M3 executor.
+healthy() {
+  local deadline=$(( $(date +%s) + ${1:-120} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if is_k8s; then
+      # The readiness probe IS the health check, and it is image-agnostic by construction.
+      local ready; ready="$(kube -n "$NS" get deploy executor -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
+      if [ -n "$ready" ] && [ "$ready" -ge 1 ] 2>/dev/null; then return 0; fi
+    else
+      local c; c="$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=executor" 2>/dev/null | head -1 || true)"
+      if [ -n "$c" ]; then
+        # Running is necessary but not sufficient — a container can be up and dying in a loop.
+        if [ -n "$MCP_PORT" ] && [ -n "$RUNNER_TOKEN" ]; then
+          auth_curl "$RUNNER_TOKEN" -fsS -m 5 "http://localhost:$MCP_PORT/healthz" >/dev/null 2>&1 && return 0
+        else
+          # No port/token to probe with: require the container to STAY up rather than merely be up
+          # at one instant, so a crash-loop cannot pass for health.
+          sleep 6
+          local still; still="$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=executor" 2>/dev/null | head -1 || true)"
+          local restarts; restarts="$(docker inspect "$c" --format '{{.RestartCount}}' 2>/dev/null || echo 0)"
+          if [ -n "$still" ] && [ "${restarts:-0}" -le 1 ] 2>/dev/null; then return 0; fi
+        fi
+      fi
+    fi
+    sleep 5
+  done
+  return 1
+}
+
+# The /healthz probe credentials come from the instance's own env file. Values are never echoed.
+MCP_PORT="" RUNNER_TOKEN=""
+if [ -f "$ENV_FILE" ]; then
+  MCP_PORT="$(grep -E '^ARGUS_MCP_PORT=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  RUNNER_TOKEN="$(grep -E '^ARGUS_RUNNER_TOKEN=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+fi
+
+BEFORE_IMAGE="$(current_image)"
+[ -n "$BEFORE_IMAGE" ] || die "no executor found for '$INSTANCE_ID' on the $TIER tier — onboard it first (update is not onboarding)"
+BEFORE_VERSION="$(executor_version)"
+say "==> before: image $BEFORE_IMAGE"
+say "            version ${BEFORE_VERSION:-<unreadable>}"
+
+# classify_run_state turns (exit code, stdout) from `argus runner-state` into ONE verdict.
+#
+# ⛔ THREE CASES, NOT TWO — SA §0.10. "Executor down -> refuse" does not cover an executor whose IMAGE
+# PREDATES the subcommand, which fails identically to a stopped container. Under a two-case rule the
+# ENTIRE EXISTING ESTATE would need --force to reach the very build that fixes V27-001.
+#
+# ⚠ THIS FILE ALREADY LEARNED THIS ONCE, in healthy()'s own comment: "the instance was on an image that
+# predates the `version` subcommand, so the check failed on the ROLLBACK too... A health check must not
+# depend on a FEATURE the image may not have — that turns every older image into a false emergency."
+#
+#   exit 0 + a running_run_id  -> RUNNING <id>   the fence is set; refuse
+#   exit 0 + an empty one      -> CLEAR          the ordinary healthy case; proceed
+#   exit 2 (unknown command)   -> OLD_IMAGE      predates the subcommand; proceed WITH A NOTE
+#   anything else              -> UNREACHABLE    dead container, or an unreadable answer; REFUSE
+#
+# ⛔ AND AN UNREADABLE exit-0 ANSWER IS *NOT* CLEAR. "Clear" is the permissive verdict; an absent answer
+# and an empty one are different facts and only one of them may permit an update.
+#
+# A pure function on purpose: it touches no docker, no cluster and no globals, so the three cases can be
+# EXECUTED in a test rather than pattern-matched in the source. An earlier guard in this round passed
+# against polarity-inverted code, so shape assertions are not trusted here.
+classify_run_state() {
+  _rc="$1"; _out="$2"
+  # exit 2 is main.go's `default: emitErr(exitUsage, "unknown command %q")` — the old-image signal.
+  if [ "$_rc" = 2 ]; then printf 'OLD_IMAGE\n'; return 0; fi
+  if [ "$_rc" != 0 ]; then printf 'UNREACHABLE\n'; return 0; fi
+  case "$_out" in
+    *'"running_run_id"'*) ;;
+    # exit 0 that never mentioned the field: a proxy, a truncated pipe, or a build that answers
+    # differently. Not an empty fence.
+    *) printf 'UNREACHABLE\n'; return 0 ;;
+  esac
+  _id="$(printf '%s' "$_out" | grep -o '"running_run_id": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+  if [ -n "$_id" ]; then printf 'RUNNING %s\n' "$_id"; else printf 'CLEAR\n'; fi
+}
+
+
+# ── REFUSE TO UPDATE A RUNNING INSTANCE ──────────────────────────────────────────────────────────
+# Recreating the executor mid-run destroys work that has not been reported yet. The control plane is
+# the only thing that knows: it holds the W1 fence and the ledger.
+[ -z "$CONTROL_PLANE" ] && [ -f "$ENV_FILE" ] && CONTROL_PLANE="$(grep -E '^ARGUS_CP_URL=' "$ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+RUN_CHECKED=0
+# ⛔ THE CONTROL PLANE IS ASKED ONCE, HERE, NOT INSIDE THE FENCE BRANCH. Its answer carries TWO things:
+# whether a run is in flight, and the digest-pinned recommended_image. Fetching it only while the fence
+# still needed answering meant that the moment the executor channel replied — CLEAR every bit as much
+# as OLD_IMAGE — INFO was empty and `update.sh` with no --image died with "no image to update to".
+# F13's whole point is that updating an executor should need no argument at all.
+INFO=""
+if [ -n "$CONTROL_PLANE" ] && [ -n "$TOKEN" ]; then
+  INFO="$(auth_curl "$TOKEN" -s --max-time 20 "$CONTROL_PLANE/api/instances" 2>/dev/null || true)"
+fi
+
+# ── VR9-C1 (V27-001): ASK THE EXECUTOR, WHICH NEEDS NO CREDENTIAL FROM THE OPERATOR ───────────────
+#
+# 🚨 THIS CHECK USED TO BE UNREACHABLE FROM THE COMMAND THE PRODUCT ITSELF RENDERS. HostUpdateCommand
+# emits --instance-id --tier --image and NEVER a credential, and the token path below then refuses.
+# Reproduced 3/3 by the owner across both tiers on a freshly deployed 0.3.27 estate; broken since
+# 2026-08-06. The defect is "it has never worked FROM A CLEAN SHELL" — in a shell that happens to
+# export ARGUS_CP_TOKEN it already worked, which is why it survived so long.
+#
+# ⛔ THE THREE OBVIOUS FIXES ARE EACH FORBIDDEN. `--token <value>` in the rendered command is SEC-4
+# (argv is world-readable via `ps`, replayed by `docker inspect`); an `export ARGUS_CP_TOKEN=…`
+# printed beside it is a template the operator must repair, which VR5-U3 forbids; softening the guard
+# is refused, because it protects results computed and never reported.
+#
+# So the executor answers for itself: it mints a JWT from the Ed25519 machine identity ALREADY in its
+# environment and asks the control plane. Nothing new is passed in, nothing lands on a command line.
+if [ "$RUN_CHECKED" = 0 ]; then
+  RS_OUT=""; RS_RC=1
+  if is_k8s; then
+    # ⛔ GUARDED. `VAR="$(cmd)"` under `set -euo pipefail` KILLS THE SCRIPT when cmd fails, so an
+    # executor whose image has no `runner-state` never reached the OLD_IMAGE arm below — it exited 2
+    # with NO MESSAGE AT ALL. That is every executor deployed before this build. An `if` is the one
+    # form that both suspends errexit and preserves the status.
+    if RS_OUT="$(kube -n "$NS" exec deploy/executor -- argus runner-state 2>/dev/null)"; then RS_RC=0; else RS_RC=$?; fi
+  else
+    RS_C="$(docker ps -q --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=executor" 2>/dev/null | head -1 || true)"
+    if [ -n "$RS_C" ]; then
+      if RS_OUT="$(docker exec "$RS_C" argus runner-state 2>/dev/null)"; then RS_RC=0; else RS_RC=$?; fi
+    fi
+  fi
+  RS_VERDICT="$(classify_run_state "$RS_RC" "$RS_OUT")"
+  case "$RS_VERDICT" in
+    RUNNING\ *)
+      RUN_CHECKED=1
+      die "instance '$INSTANCE_ID' is RUNNING ${RS_VERDICT#RUNNING } right now — updating would destroy results that have not been reported yet. Wait for it, or cancel it." ;;
+    CLEAR)
+      RUN_CHECKED=1
+      say "==> no run in flight (the executor asked the control plane with its own machine identity)" ;;
+    OLD_IMAGE)
+      # ⛔ RUN_CHECKED IS LEFT AT 0 ON PURPOSE so the control-plane check below STILL RUNS. Setting it
+      # to 1 here short-circuited that check — and since every executor deployed before this build
+      # answers OLD_IMAGE, the round REMOVED the fence from the entire estate while printing a note
+      # that mentioned only the new check.
+      # The reason not to DIE here ("the estate would need --force") is sound, and it is NOT a reason
+      # to skip a check that already worked. Proceed-unverified is the LAST resort, not the second.
+      # ⛔ THE MESSAGE TELLS THE TRUTH ABOUT WHAT WILL ACTUALLY BE TRIED. A first version said flatly
+      # "the CONTROL PLANE is asked instead" — but that check needs $TOKEN, and the command the product
+      # itself prints carries none. On every currently-deployed executor the operator therefore read
+      # "the control plane is asked", then "the executor could not be reached" (it WAS reached, and
+      # answered), then advice to start an executor that was already running. Three sentences, all
+      # false, describing one honest refusal.
+      if [ -n "$INFO" ]; then
+        say "    NOTE: this executor's image predates the in-flight check, so the CONTROL PLANE is"
+        say "          asked instead. The image being installed carries the check."
+      else
+        say "    NOTE: this executor answered, but its image predates the in-flight check — it cannot"
+        say "          tell whether a run is in flight. Pass --token so the control plane can be asked,"
+        say "          or --force to accept the risk. The image being installed carries the check."
+      fi ;;
+    *)
+      # UNREACHABLE — a dead container, or an answer that could not be read. §0.4: "down" is NOT
+      # evidence the fence is clear; an executor down MID-RUN is exactly where unreported results are.
+      : ;;
+  esac
+fi
+
+if [ "$RUN_CHECKED" = 0 ] && [ -n "$INFO" ]; then
+  if printf '%s' "$INFO" | grep -q '"instance_id"'; then
+    RUN_CHECKED=1
+    RUNNING="$(printf '%s' "$INFO" | tr '{' '\n' | grep "\"instance_id\": *\"$INSTANCE_ID\"" | sed -n 's/.*"running_run_id": *"\([^"]*\)".*/\1/p' | head -1 || true)"
+    if [ -n "$RUNNING" ]; then
+      die "instance '$INSTANCE_ID' is RUNNING $RUNNING right now — updating would destroy results that have not been reported yet. Wait for it, or cancel it."
+    fi
+    say "==> no run in flight (checked with the control plane)"
+  fi
+fi
+if [ "$RUN_CHECKED" = 0 ]; then
+  # Absence of a check is NOT absence of a run. Say which one this is — and say it ACCURATELY.
+  #
+  # ⛔ THE OLD TEXT NAMED ONE CAUSE FOR TWO SITUATIONS. It said "the executor could not be reached"
+  # even when the executor HAD answered and simply ran an image predating `runner-state` — which is
+  # every machine deployed before this build. The operator was then told to "start the executor",
+  # advice that is inert for an executor already running. A wrong diagnosis costs more than none: it
+  # sends someone to fix a thing that is not broken.
+  say "    WARN: could NOT check whether a run is in flight."
+  if [ "${RS_VERDICT:-}" = OLD_IMAGE ]; then
+    say "          The executor answered, but its image predates the in-flight check, and no --token"
+    say "          was given for the control plane to be asked instead."
+  else
+    say "          The executor could not be reached, so it could not ask the control plane — and a"
+    say "          stopped executor is NOT evidence that no run is in flight. An executor that went"
+    say "          down MID-RUN is exactly where results that were computed and never reported live."
+  fi
+  say "          Recreating it now destroys them."
+  if [ "${RS_VERDICT:-}" = OLD_IMAGE ]; then
+    [ "$FORCE" = 1 ] || die "refusing to update unverified — pass --token so the control plane can be asked, or --force to accept the risk"
+  else
+    [ "$FORCE" = 1 ] || die "refusing to update unverified — start the executor so it can check, or pass --token to check from here, or --force to accept the risk"
+  fi
+  say "          --force given; proceeding anyway."
+fi
+
+# ── WHICH IMAGE ──────────────────────────────────────────────────────────────────────────────────
+if [ "$ROLLBACK" = 1 ]; then
+  TARGET="$(cat "$PREV_FILE" 2>/dev/null || true)"
+  [ -n "$TARGET" ] || die "no recorded previous image for '$INSTANCE_ID' — nothing to roll back to (expected $PREV_FILE)"
+  say "==> rollback: reverting to $TARGET"
+else
+  TARGET="${PIN:-$IMAGE}"
+  # F13: the control plane publishes a DIGEST-PINNED recommendation; use it when the operator did not
+  # name an image, so "update this executor" needs no argument at all.
+  if [ -z "$TARGET" ] && [ -n "$CONTROL_PLANE" ] && [ -n "$TOKEN" ]; then
+    TARGET="$(printf '%s' "${INFO:-}" | sed -n 's/.*"recommended_image": *"\([^"]*\)".*/\1/p' | head -1 || true)"
+    [ -n "$TARGET" ] && say "==> target: $TARGET (the control plane's recommended image)"
+  fi
+  [ -n "$TARGET" ] || die "no image to update to — pass --image <ref>, or --control-plane + --token so the recommended image can be fetched"
+fi
+
+# ── IDEMPOTENT ───────────────────────────────────────────────────────────────────────────────────
+if [ "$TARGET" = "$BEFORE_IMAGE" ]; then
+  say "==> already on $TARGET — nothing to do (update is idempotent)."
+  exit 0
+fi
+
+# ── THE BREADCRUMB ───────────────────────────────────────────────────────────────────────────────
+# Written ONLY on a forward update, ONLY after the current image has actually been read, and
+# ATOMICALLY. Each of those three is one of the defects above: a rollback that records the image it
+# is fleeing overwrites its own escape route, and a shell redirection truncates the file before
+# docker has said anything.
+if [ "$ROLLBACK" = 0 ]; then
+  printf '%s\n' "$BEFORE_IMAGE" > "$PREV_FILE.tmp" && mv -f "$PREV_FILE.tmp" "$PREV_FILE"
+  say "==> recorded rollback point: $BEFORE_IMAGE"
+fi
+
+# ── APPLY ────────────────────────────────────────────────────────────────────────────────────────
+apply_image() {
+  local img="$1"
+  if is_k8s; then
+    if [ "$TIER" = k3d ]; then
+      # V28-002 / V28-020: the nodes import from THIS machine; they do not pull for themselves (2.4 MB/s
+      # measured, vs a 180 s health budget). So the image must be here first — pull, never fall through.
+      docker image inspect "$img" >/dev/null 2>&1 || docker pull "$img" >/dev/null \
+        || die "could not pull $img onto this machine — run 'docker login ghcr.io' and re-run. The k3d nodes import the image from here; letting them pull it themselves takes minutes and the update would roll back."
+      # The library returns 1 only on a VERIFIED miss (it reads the node back and prints which step
+      # failed); a 1 here is what makes the caller's rollback branch real — the old one-liner's exit
+      # code was 0 whether or not anything had been imported.
+      k3d_import_image "${KUBE_CONTEXT:-k3d-argus}" "$img" || return 1
+    fi
+    kube -n "$NS" set image deploy/executor "executor=$img" >/dev/null 2>&1 || return 1
+  else
+    [ -f "$ENV_FILE" ] || die "no $ENV_FILE — run onboarding first (nothing to update)"
+    if grep -q '^ARGUS_MCP_IMAGE=' "$ENV_FILE"; then
+      sed -i.bak "s|^ARGUS_MCP_IMAGE=.*|ARGUS_MCP_IMAGE=$img|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+    else
+      echo "ARGUS_MCP_IMAGE=$img" >> "$ENV_FILE"
+    fi
+    local ARGS=(-f "$(hostpath "$COMPOSE_DIR/docker-compose.yaml")" -f "$(hostpath "$COMPOSE_DIR/docker-compose.byo.yml")")
+    [ -f "$COMPOSE_DIR/docker-compose.byo-m3.yml" ] && ARGS+=(-f "$(hostpath "$COMPOSE_DIR/docker-compose.byo-m3.yml")")
+    ARGS+=(--env-file "$(hostpath "$ENV_FILE")" -p "$PROJECT")
+    # ONLY the executor. Never the SUT, never obs, never their volumes (UC152/UC153).
+    docker compose "${ARGS[@]}" up -d --no-deps --force-recreate executor >/dev/null 2>&1 || return 1
+  fi
+  return 0
+}
+
+say "==> updating '$INSTANCE_ID' ($TIER) onto $TARGET"
+APPLY_OK=1
+apply_image "$TARGET" || APPLY_OK=0
+
+# ── VERIFY, AND REVERT BY OURSELVES IF IT DID NOT COME BACK ──────────────────────────────────────
+VERIFIED=0
+if [ "$APPLY_OK" = 1 ] && healthy 180; then
+  VERIFIED=1
+fi
+
+if [ "$VERIFIED" = 0 ]; then
+  say ""
+  say "!!  the executor did NOT come back healthy on $TARGET — rolling back to $BEFORE_IMAGE"
+  say "    (unconditional: you do not have to ask, and you do not have to be here)"
+  if apply_image "$BEFORE_IMAGE" && healthy 180; then
+    say "==> ROLLED BACK to $BEFORE_IMAGE — the instance is serving again."
+    say "    version now: $(executor_version)"
+    die "update to $TARGET FAILED and was reverted; the instance is unchanged"
+  fi
+  die "update to $TARGET FAILED and the ROLLBACK to $BEFORE_IMAGE ALSO failed — this instance needs hands. Its identity, registration and history are still intact; teardown+re-onboard is the recovery."
+fi
+
+# ── AFTER ────────────────────────────────────────────────────────────────────────────────────────
+AFTER_IMAGE="$(current_image)"
+AFTER_VERSION="$(executor_version)"
+say ""
+say "==> after:  image $AFTER_IMAGE"
+say "            version ${AFTER_VERSION:-<unreadable>}"
+if [ -n "$BEFORE_VERSION" ] && [ "$BEFORE_VERSION" = "$AFTER_VERSION" ]; then
+  # Not a failure — two images can legitimately carry one version — but it is worth saying, because
+  # before CP-M3-III-68 this was ALWAYS true and made every update unverifiable.
+  say "    NOTE: the reported version did not change ($AFTER_VERSION). The image did."
+fi
+# VR-V7. DELIBERATELY HERE and not earlier: the router is the machine's shared credential holder, and
+# moving it on the back of an update that did not land would spread one instance's bad image to every
+# folder on the machine. Everything above has already proved the executor came back.
+#
+# VR7-U1 (V24-009): …AND THAT SENTENCE ALSO FORBIDS THE OTHER DIRECTION. A rollback is one instance's
+# image spread machine-wide; so is an update to anything older than the router already runs. The
+# decision is taken by lib/router-version.sh so it is one rule with one explanation.
+ROUTER_NOW="$(docker inspect argus-router --format '{{.Config.Image}}' 2>/dev/null || true)"
+case "$(router_skew_decision "$TARGET" "${ROUTER_NOW:-}" "$ROLLBACK")" in
+  keep-rollback)
+    say "==> the machine router was NOT moved: this was a rollback, and it is not a step forward."
+    say "    It is shared by every agent folder on this machine, and rolling ONE instance back must"
+    say "    not roll the machine back. Move it deliberately with:  update.sh --router --image <ref>"
+    ;;
+  keep-newer)
+    say "==> the machine router stays on $(image_version "$ROUTER_NOW") — NEWER than this update's $(image_version "$TARGET")."
+    say "    It is machine-wide, so it runs the highest version any instance here needs, never a lower"
+    say "    one. This instance is updated; nothing else on the machine was disturbed."
+    ;;
+  move-uncomparable)
+    say "==> NOTE: could not compare the router's version with this update's — one of the two images"
+    say "          carries no version label (a local build, or a ref this host has never pulled), so"
+    say "          the never-go-backwards rule could not be applied. Moving it, as before."
+    move_router "$TARGET"
+    ;;
+  # 🚩 THE ARM THAT WAS MISSING (gate re-run). router_skew_decision has returned `move-no-router`
+  # since CP-V24-41 — including for a ROLLBACK, because with no router there is nothing to drag
+  # backwards — and this case had no label for it. It fell to `*)`, whose rollback NOTE then
+  # announced a move that cannot happen, with two blank version interpolations, three lines above
+  # move_router printing "nothing to move".
+  #
+  # 🚨 THE TEST THAT SHOULD HAVE CAUGHT IT ASSERTED THE WRONG THING. router-skew-is-a-max.test.sh
+  # pins the WORD the library returns for exactly this input. Nothing ran the dispatch. That is the
+  # W-2 lesson — a restatement of a contract is not the contract — repeated one commit after fixing
+  # it, and it is why this arm is explicit rather than folded into `*)`.
+  move-no-router)
+    move_router "$TARGET"   # says "nothing to move" itself, and starts nothing
+    ;;
+  *)
+    # VR7-U1 / round 7 gate (SH-4): a rollback CAN legitimately reach here, and it is surprising
+    # enough to name. The router is below this instance even after the retreat — an older onboard
+    # lowered it — so moving it up is the max() rule, not the retreat the keep-rollback branch guards.
+    if [ "$ROLLBACK" = 1 ]; then
+      say "==> NOTE: this is a rollback and the machine router IS being moved — up, not back."
+      say "          It sits on $(image_version "$ROUTER_NOW") and this instance is rolling back to"
+      say "          $(image_version "$TARGET"), which is still HIGHER. The router runs the highest"
+      say "          version any instance on this machine needs, so leaving it behind would strand it"
+      say "          below an instance running here."
+    fi
+    move_router "$TARGET"
+    ;;
+esac
+
+say "==> done. Identity, registration, tokens, volumes, run history and the SUT are UNCHANGED."
+# ⚠ AND SO IS EVERYTHING ELSE THIS SCRIPT DOES NOT TOUCH, WHICH IS THE PROBLEM.
+#
+# Measured on the owner's own machine: an instance updated to 0.3.31 still had obs containers from
+# three days earlier, a kit from before the release, and skills older still — and nothing reported
+# it. This script moves the executor and the router. It does not move the kit, the skills, the
+# agent config, the Grafana objects or the obs stack, and it writes no record of what IS installed.
+say ""
+say "    ⚠ THIS SCRIPT MOVES THE EXECUTOR AND THE ROUTER — NOT the kit, the skills, the agent"
+say "      config, the Grafana objects or the obs stack. Those stay on the version they were"
+say "      installed at, and until now nothing said so."
+say "      The UPDATE BLOCK on the Environments page moves all of them, all or nothing, and"
+say "      records what it left behind. Use it in preference to this script."
+# V31-001 (VR13-UP) / 1-SHIM — ⛔ THE DEAD COMMAND IS NO LONGER ADVERTISED.
+#
+# This line taught every operator to roll back by re-running this script. That path moves the
+# EXECUTOR and nothing else, so it leaves the kit, the skills, the agent config and the obs stack
+# on whatever version they were — the mixed state this release exists to remove. The rollback that
+# puts an instance BACK, whole, is the block on the Environments page: it is rendered per instance
+# with every value already filled in, it targets the recorded previous image, and it undoes each
+# step in reverse if any of them fails.
+if [ "$ROLLBACK" = 0 ]; then
+  say "    To roll this instance back, use the ROLLBACK BLOCK on the Environments page for it."
+  say "    It puts every artefact back, not just the executor — which is what this script moves."
+fi
+exit 0

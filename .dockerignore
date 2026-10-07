@@ -1,0 +1,13 @@
+.git
+results
+argus
+**/*.log
+**/.DS_Store
+**/node_modules
+.env
+.env.*
+testkit/ui/argus-out
+testkit/ui/test-results
+testkit/ui/playwright-report
+testkit/ui/.env*
+testkit/ui/playwright/.auth

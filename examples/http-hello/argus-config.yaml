@@ -1,0 +1,15 @@
+# The smallest useful OneDroid Argus config: one service with an HTTP API and nothing else.
+# Replace base_url with your service's address AS THE RUNNER SEES IT (not as your laptop sees it).
+project:
+  name: hello-api
+
+targets:
+  http:
+    base_url: http://hello-api:8080
+
+scenarios:
+  timeout_default: 20s
+
+observability:
+  loki:
+    url: http://loki:3100

@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Argus CLEANUP (sql) template — VR12-C2 / V29-015.
+
+     Runs ONE scenario `## CLEANUP` ```sql block against the SAME database the suite already
+     targets: db.url / db.user / db.password come from argus-config `targets.database`, exactly
+     as database-state.jmx reads them. NO NEW CONFIGURATION — that is a requirement of the row,
+     not a convenience.
+
+     ⛔ WHY THIS IS A SEPARATE TEMPLATE AND NOT A REUSE OF database-state.jmx: that template
+     fires the scenario's HTTP trigger first, waits for an async insert, and evaluates the
+     scenario's EXPECT. A cleanup must do NONE of those things — it must not re-trigger the SUT,
+     and it must not be judged against the scenario's assertions. Its only verdict is "did the
+     statement execute".
+
+     ⛔ NO OUTPUT IS CAPTURED, BY DESIGN. A cleanup's output would land in report.json, which is
+     fetched by agents and pasted into chat, and this project has leaked live tokens twice by
+     printing a structure and filtering top-level keys. The runner keeps the exit status and the
+     duration and nothing else (VR12-C2's own wording offers exactly this alternative to
+     scrubbing by value).
+
+     ⛔ "ALREADY GONE" IS A SUCCESS. `queryType=Update` on a DELETE that matches zero rows returns
+     0 and succeeds. A cleanup that went red for finding nothing would turn every green run red —
+     the classic way a safety net gets switched off. -->
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Argus: CLEANUP (sql)" enabled="true">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments"><collectionProp name="Arguments.arguments"/></elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="cleanup ${__P(scenario.id,unknown)}" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">${__P(load.users,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(load.ramp,0)}</stringProp>
+        <stringProp name="ThreadGroup.scheduler">${__P(load.scheduler,false)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(load.duration,0)}</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${__P(load.loops,1)}</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <JDBCDataSource guiclass="TestBeanGUI" testclass="JDBCDataSource" testname="orders-db" enabled="true">
+          <stringProp name="dataSource">cleanupPool</stringProp>
+          <stringProp name="dbUrl">${__P(db.url,)}</stringProp>
+          <stringProp name="driver">org.postgresql.Driver</stringProp>
+          <stringProp name="username">${__P(db.user,)}</stringProp>
+          <stringProp name="password">${__P(db.password,)}</stringProp>
+          <stringProp name="poolMax">1</stringProp>
+          <stringProp name="timeout">10000</stringProp>
+          <stringProp name="connectionAge">5000</stringProp>
+          <stringProp name="trimInterval">60000</stringProp>
+          <boolProp name="autocommit">true</boolProp>
+          <boolProp name="keepAlive">true</boolProp>
+          <boolProp name="preinit">false</boolProp>
+          <stringProp name="transactionIsolation">DEFAULT</stringProp>
+          <stringProp name="checkQuery"></stringProp>
+          <stringProp name="connectionProperties"></stringProp>
+          <stringProp name="initQuery"></stringProp>
+        </JDBCDataSource>
+        <hashTree/>
+
+        <JDBCSampler guiclass="TestBeanGUI" testclass="JDBCSampler" testname="${__P(scenario.id,unknown)}-cleanup" enabled="true">
+          <stringProp name="dataSource">cleanupPool</stringProp>
+          <!-- Update Statement covers DELETE/UPDATE/INSERT and returns an affected-row count. A
+               cleanup that deletes nothing returns 0 and SUCCEEDS. The default is a statement that
+               is valid everywhere and changes nothing, so a template invoked with no cleanup.sql
+               property is a no-op rather than an error. -->
+          <stringProp name="queryType">Update Statement</stringProp>
+          <stringProp name="query">${__P(cleanup.sql,DELETE FROM information_schema.tables WHERE 1=0)}</stringProp>
+          <stringProp name="queryArguments"></stringProp>
+          <stringProp name="queryArgumentsTypes"></stringProp>
+          <stringProp name="variableNames"></stringProp>
+          <stringProp name="resultVariable"></stringProp>
+          <stringProp name="queryTimeout">${__P(cleanup.timeout.s,30)}</stringProp>
+          <stringProp name="resultSetMaxRows">0</stringProp>
+          <stringProp name="resultSetHandler">Count Records</stringProp>
+        </JDBCSampler>
+        <hashTree/>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

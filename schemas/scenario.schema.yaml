@@ -1,0 +1,182 @@
+# scenario.schema.yaml — the argus scenario contract (Argus-authored)
+#
+# Derived faithfully from argus `scripts/parse_scenario.py` (the parsed dict) +
+# `docs/SCENARIO-FORMAT.md`. We do NOT invent a new structure — we add only the
+# vision `references` field (DF-DEC-008). This schema is what `validate-scenario`
+# (VR-A10) enforces and what `write-scenario` (VR-A11) guarantees on disk.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# ⭐ VR12-S1 (V30-003) — THE MARKDOWN LISTS. Added 2026-09-11.
+#
+# Everything below `$schema` constrains the PARSED OBJECT. That is why an undefined `## Notes`
+# heading could never be caught here: it never becomes a property at all, so `additionalProperties:
+# false` has nothing to refuse. The closed list of markdown SECTIONS was written down in no
+# machine-readable place whatsoever.
+#
+# ⛔ THE CONSEQUENCE THAT MAKES THIS A DEFECT AND NOT TIDINESS: A TYPO IN A DEFINED NAME DELETES A
+# SECTION IN SILENCE. `## TIMEOUT` mistyped falls back to 10s. `## CLEANUP` mistyped means a
+# scenario that promised to clean up simply will not. `## VERIFY`, `## References` — silent.
+#
+# ⛔ THESE THREE LISTS ARE LOADED BY THE VALIDATOR (`internal/scenario/schema.go`, go:embed) and are
+# the SINGLE SOURCE OF TRUTH. A drift test fails if the Go code and this file disagree.
+x-markdown:
+  # The `## ` sections. Anything else is refused, naming the heading and the nearest match.
+  sections:
+    - {name: Metadata,   required: true}
+    - {name: TRIGGER,    required: true}
+    - {name: VERIFY,     required: false}   # conditional — VR12-VF1/VF2 decide per scenario
+    - {name: EXPECT,     required: true}
+    - {name: TIMEOUT,    required: true}    # ⭐ was silently optional; VR12-TO1
+    - {name: CLEANUP,    required: true}    # VR12-C1
+    - {name: References, required: false}
+    - {name: LOAD,       required: false}   # AC-11 mode 2 — absent = the one-thread/one-loop default
+    - {name: COMPARE,    required: false}   # — what "the same output" means; absent = nothing is compared
+  # The `### ` sub-sections of `## EXPECT` (VR12-E1).
+  expect_subsections: [Runnable, Non-runnable]
+  # The `**Key**` list of `## Metadata` (VR12-M1). ⚠ `Priority` is REMOVED — parsed, carried, and
+  # read by nothing that decides anything; `specs/06:71` already expresses priority as a TAG.
+  metadata_keys:
+    - {name: ID,     required: true}
+    - {name: Layer,  required: true}
+    - {name: Tags,   required: true}        # ⭐ now required — it carries the dispatch tag
+    - {name: Target, required: false}
+  # Exactly ONE of these must appear in `**Tags**` (VR12-M3/M4). Dispatch is by TAG and nothing
+  # validated one, so `Tags: chian` silently routed a chain scenario to JMeter — it changed which
+  # ENGINE ran the test, in silence.
+  dispatch_tags: [chain, mcp, ui, http]
+  # The METHOD verbs a `## TRIGGER` line may use (VR12-T1). Kept identical to `trigger.method`.
+  methods: [GET, POST, PUT, PATCH, DELETE]
+
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://onedroid.ai/schemas/scenario.schema.yaml"
+title: "Argus scenario (parsed)"
+type: object
+additionalProperties: false
+required: [id, layers, trigger, expect]
+properties:
+  id:
+    type: string
+    pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    # VR12-S1: this MUST stay identical to internal/scenario/validate.go `idFormat`.
+    # It carried the RETIRED uppercase grammar (VR10-S4 relaxed it in round 10) until 2026-09-10 —
+    # latent, since all 119 shipped ids happen to be uppercase, but it would have refused the
+    # lowercase/underscore ids the validator explicitly accepts. It survived because
+    # TestOldIDGrammarIsGoneFromTheTree walked internal/ skills/ specs/ examples/ and NOT schemas/.
+    description: "Metadata **ID**. Unique across all scenarios. Letters, digits, _ and -; starts alphanumeric; max 64."
+  layers:
+    type: array
+    minItems: 1
+    items:
+      enum:
+        - "HTTP Ingestion"
+        - "Message Flow"
+        - "Database State"
+        - "External Delivery"
+        - "Error Path"
+        - "Rate Limiting"
+        - "Permissions"
+        - "Web UI"          # VR12-S1: internal/scenario/parse.go CanonicalLayers has EIGHT; this list had seven
+        - "AMQP Load"       # the ninth; its own template, ## LOAD fields and verdict
+        - "HTTP Load"       # the tenth; the stepped HTTP ramp, its own ## LOAD fields and verdict
+    description: "Metadata **Layer**, split on '->' for multi-layer chains. Strings = preflight.py LAYER_TO_CONFIG keys (DF-DEC-005)."
+  # VR12-M2: `priority` REMOVED. Parsed, carried into AsParsedMap, surfaced in exactly one place
+  # (author__list_scenarios) and read by nothing that decides anything — no UI, no template, no
+  # dashboard, no runner logic, no filter, no ordering.
+  tags:
+    type: array
+    items: { type: string }
+    description: "Metadata **Tags** (comma-separated in markdown). ⭐ REQUIRED since VR12-M3: it carries the one dispatch tag."
+  target:
+    type: string
+    # VR12-S1: AsParsedMap (internal/scenario/parse.go) EMITS `target`, and additionalProperties is false —
+    # so every parsed scenario carrying a **Target** violated this schema. Added by VR10-S3, never declared here.
+    description: "Metadata **Target** (optional). The NAME of a configured target; its meaning is per-layer (TargetKind)."
+  trigger:
+    type: object
+    additionalProperties: false
+    minProperties: 1
+    properties:
+      method: { enum: [GET, POST, PUT, PATCH, DELETE] }
+      url: { type: string, description: "may contain ${VAR} references" }
+      payload: { type: string, description: "JSON code block (string form)" }
+    description: "## TRIGGER — method+URL and/or payload."
+  verify:
+    type: object
+    additionalProperties: false
+    properties:
+      sql: { type: string }
+      http: { type: string }
+      description: { type: string }
+    description: "## VERIFY — one of sql / http / free-text description."
+  expect:
+    type: array
+    minItems: 1
+    items: { type: string }
+    description: "## EXPECT — one assertion per '- ' bullet."
+  timeout:
+    type: string
+    pattern: "^[0-9]+(ms|s)$"
+    default: "10s"
+    description: "## TIMEOUT — falls back to config timeout_default."
+  cleanup:
+    type: object
+    additionalProperties: false
+    properties:
+      # ⭐ VR12-C1: EVERY declared block, in the order written. The parser took the sql block ELSE
+      # the bash block — first wins, the rest silently discarded.
+      blocks:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required: [form, body]
+          properties:
+            form: { enum: [sql, bash, na] }
+            body: { type: string }
+      sql: { type: string, description: "convenience: the FIRST sql block. Never the source of truth." }
+      bash: { type: string, description: "convenience: the FIRST bash block. Never the source of truth." }
+    description: "## CLEANUP — REQUIRED (VR12-C1). A runnable ```sql / ```bash block, or `N/A` + a justification."
+  # AsParsedMap emits `compare` for a scenario with a valid `## COMPARE` section, and
+  # additionalProperties is false (the trap noted above), so the property MUST be declared here.
+  compare:
+    type: object
+    additionalProperties: false
+    required: [reference]
+    properties:
+      reference: { enum: [measured, fixed, property] }
+      output:
+        type: object
+        additionalProperties: false
+        properties:
+          status: { type: boolean }
+          body: { type: boolean }
+          headers: { type: array, items: { type: string } }
+      mask: { type: array, items: { type: string } }
+      unordered: { type: array, items: { type: string } }
+      tolerance:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          properties:
+            path: { type: string }
+            kind: { enum: [abs, rel] }
+            value: { type: number }
+      repeats: { type: integer, minimum: 1, maximum: 20 }
+      agreement: { type: number, minimum: 1, maximum: 100 }
+      not_worse_than:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          properties:
+            metric: { enum: [p50, p95, p99, error_rate] }
+            value: { type: number }
+            unit: { enum: ["%", pp] }
+      steps: { type: array, items: { type: string } }
+    description: "## COMPARE — the parsed, defaulted rules (internal/compare.Rules). Present only when the section is declared and valid."
+  references:
+    type: array
+    items: { type: string }
+    description: >
+      Vision free-form field (DF-DEC-008): Jira keys / Confluence URLs / Memstore doc IDs / repo paths.
+      Author-provided breadcrumbs. Flows to the test-hat failure-context bundle; M3's classifier follows them.

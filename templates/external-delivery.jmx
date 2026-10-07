@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Argus External Delivery template (chained HTTP Ingestion -> External Delivery).
+     Fires the HTTP trigger (order-api accepts the order; the order-processor delivers the
+     OrderCreated webhook to the external system), then queries the capture server's /received
+     endpoint (long-polling up to webhook.wait seconds) and asserts the delivery for this
+     correlation_id arrived. Judged by the JMeter success flag (content layer). The webhook
+     host/port default to the compose service webhook-mock:8081 (targets.external). -->
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Argus: External Delivery" enabled="true">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments"><collectionProp name="Arguments.arguments"/></elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="external-delivery ${__P(scenario.id,unknown)}" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">${__P(load.users,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(load.ramp,0)}</stringProp>
+        <stringProp name="ThreadGroup.scheduler">${__P(load.scheduler,false)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(load.duration,0)}</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${__P(load.loops,1)}</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-trigger" enabled="true">
+          <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(http.host,localhost)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(http.port,8080)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(http.protocol,http)}</stringProp>
+          <stringProp name="HTTPSampler.path">${__P(trigger.path,/)}</stringProp>
+          <stringProp name="HTTPSampler.method">${__P(trigger.method,POST)}</stringProp>
+          <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">${__P(trigger.payload,{})}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="apply author headers (VR12-T3)" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="script">// VR12-T3 (V29-018): apply EVERY header the scenario's author declared in its ## TRIGGER.
+// The runner sets trigger.header_n and, per header i, trigger.header_i_name / _value.
+//
+// Until 0.3.31 the parser populated every declared header and the runner sent exactly ONE of
+// them (Authorization). SYN-MCP-002 and SYN-MCP-004 each declare
+// `Accept: application/json, text/event-stream` and neither ever sent it.
+//
+// An author header REPLACES the runner's for the same name — hence the remove-then-add. A
+// scenario that declares none leaves this block a no-op, so its bytes on the wire are IDENTICAL
+// to before this template changed.
+//
+// VR12-X10: header NAMES may be logged, values NEVER.
+def n = 0
+try { n = Integer.parseInt(props.get("trigger.header_n") ?: "0") } catch (e) { n = 0 }
+if (n &gt; 0) {
+  def hm = sampler.getHeaderManager()
+  if (hm == null) {
+    hm = new org.apache.jmeter.protocol.http.control.HeaderManager()
+    hm.setName("author headers")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.TEST_CLASS, "HeaderManager")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.GUI_CLASS, "HeaderPanel")
+    sampler.setHeaderManager(hm)
+  }
+  for (int i = 1; i &lt;= n; i++) {
+    def name = props.get("trigger.header_" + i + "_name")
+    if (name == null || name.trim().isEmpty()) { continue }
+    def value = props.get("trigger.header_" + i + "_value") ?: ""
+    hm.removeHeaderNamed(name)
+    hm.add(new org.apache.jmeter.protocol.http.control.Header(name, value))
+  }
+}</stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+
+          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="trigger is stimulus-only (DF-14)" enabled="true">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="cacheKey">true</stringProp>
+            <stringProp name="script">// DF-14: the trigger is a STIMULUS, not the verdict. The external-delivery verdict is the
+// verify step (did the delivery reach the external system?) — mark the trigger successful
+// regardless of HTTP status, recording the actual code for reference.
+def code = prev.getResponseCode()
+prev.setSuccessful(true)
+prev.setResponseMessage("trigger status " + code + " (decoupled — content verdict = verify assertion only, DF-14)")</stringProp>
+          </JSR223PostProcessor>
+          <hashTree/>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="trigger headers" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header"><stringProp name="Header.name">Content-Type</stringProp><stringProp name="Header.value">application/json</stringProp></elementProp>
+              <elementProp name="" elementType="Header"><stringProp name="Header.name">X-Correlation-Id</stringProp><stringProp name="Header.value">${__P(correlation.id,)}</stringProp></elementProp>
+              <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(auth.header,)}</stringProp></elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+        </hashTree>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-verify-delivery" enabled="true">
+          <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(webhook.host,webhook-mock)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(webhook.port,8081)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.path">/received?correlation_id=${__P(correlation.id,)}&amp;wait_seconds=${__P(webhook.wait,15)}</stringProp>
+          <stringProp name="HTTPSampler.method">GET</stringProp>
+          <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="evaluate the delivered payload (V30-004 F-2)" enabled="true">
+            <stringProp name="cacheKey">true</stringProp>
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="script">
+// V30-004 F-2 — THE DELIVERED PAYLOAD IS EVALUATED, NOT PROXIED.
+//
+// ⛔ IT REPLACES A ResponseAssertion, DELETED. That assertion tested only that the correlation id
+// appeared somewhere in the response — the "a delivery exists" proxy FINDING-7 set out to replace
+// for the database layer and never carried across. Worse, it passed on a 404: the miss body is
+// {"found":false} and the assertion looked for a substring, so a scenario whose delivery never
+// arrived could still go green if the id appeared in the URL echo.
+//
+// The capture server answers ONE object on a hit — {"body":…,"headers":…,"received_at":…} — and
+// 404 {"found":false} on a miss (webhook-mock/main.go:handleReceived).
+//
+// Failure messages are reality-only (VR-C8): they name the ACTUAL value, never the test's expected
+// one. The field NAME is permitted, as database-state.jmx:207 already shows.
+def code = (prev.getResponseCode() ?: "").toString()
+def body = (prev.getResponseDataAsString() ?: "")
+def hasRows  = (props.get("expect.has_rows") ?: "true").toString()
+def rowCountP = (props.get("expect.row_count") ?: "").toString()
+def columnsP  = (props.get("expect.columns") ?: "").toString()
+def corr = (props.get("correlation.id") ?: "").toString()
+def fail = { String m -&gt; prev.setSuccessful(false); prev.setResponseMessage(m) }
+
+// F-4, the NEGATIVE case: `- no rows` means nothing may have been delivered for this run. A 404 is
+// the success, and ANY 2xx is the failure — this branch owns the verdict, so the sampler's own
+// non-2xx failure is cleared first.
+if (hasRows == "false") {
+  if (code == "404") { prev.setSuccessful(true); return }
+  fail("a delivery was captured for correlation_id " + corr + " (http " + code + ")")
+  return
+}
+
+if (code == "404") { fail("no delivery captured for correlation_id " + corr); return }
+prev.setSuccessful(true)
+
+def payload
+try {
+  payload = new groovy.json.JsonSlurper().parseText(body)
+} catch (ignored) {
+  fail("the capture server's answer is not JSON (" + body.take(120) + ")")
+  return
+}
+// the assertions read the DELIVERED body, never the envelope the capture server wraps it in
+def delivered = (payload instanceof Map &amp;&amp; payload.containsKey("body")) ? payload.get("body") : payload
+
+if (rowCountP) {
+  int want = rowCountP.toInteger()
+  int got = (delivered instanceof List) ? delivered.size() : 1
+  if (got != want) { fail("the capture server holds " + got + " delivery(ies) for correlation_id " + corr); return }
+}
+if (columnsP) {
+  def one = (delivered instanceof List) ? (delivered ? delivered[0] : [:]) : delivered
+  if (!(one instanceof Map)) { fail("the delivered payload is not an object (" + body.take(120) + ")"); return }
+  for (pair in columnsP.split(";")) {
+    int eq = pair.indexOf("=")
+    if (eq &lt; 0) continue
+    def col = pair.substring(0, eq)
+    def want = pair.substring(eq + 1)
+    def actual = one.containsKey(col) ? String.valueOf(one.get(col)) : null
+    if (actual == null) { fail("field " + col + " not in the delivered payload (fields present: " + one.keySet().join(",") + ")"); return }
+    boolean okc
+    if (want == "__NULL__") {
+      okc = (actual == "" || actual.equalsIgnoreCase("null"))
+    } else {
+      def wants = want.split("\\|") as List   // alternation: NAME == A or B  ->  "A|B"
+      okc = wants.contains(actual)
+    }
+    if (!okc) { fail("field " + col + " actual " + actual); return }
+  }
+}
+if (!rowCountP &amp;&amp; !columnsP) {
+  // the proxy remains for a scenario that declares no content assertion: a delivery exists.
+  if (!body.contains(corr)) { fail("no delivery containing correlation_id " + corr) }
+}
+            </stringProp>
+          </JSR223PostProcessor>
+          <hashTree/>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

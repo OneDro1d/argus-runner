@@ -1,0 +1,28 @@
+{
+  "step": 1,
+  "sessions": 2,
+  "status": "measured",
+  "window_seconds": 9.5,
+  "offered_per_s": 2.1052631578947367,
+  "sent_per_s": 2.1052631578947367,
+  "confirmed_per_s": 2.1052631578947367,
+  "delivered_per_s": 2.1052631578947367,
+  "delivered_ratio": 1,
+  "publish_confirm_us": {
+    "min": 1000,
+    "p50": 5000,
+    "p75": 8000,
+    "p95": 10000,
+    "p99": 10000,
+    "max": 10000
+  },
+  "publish_deliver_us": {
+    "min": 3000,
+    "p50": 15000,
+    "p75": 24000,
+    "p95": 30000,
+    "p99": 30000,
+    "max": 30000
+  },
+  "comfortable": true
+}

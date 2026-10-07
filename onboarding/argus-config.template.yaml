@@ -1,0 +1,224 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Argus (OneDroid Testing Suite) — argus-config.yaml TEMPLATE for YOUR service
+# ─────────────────────────────────────────────────────────────────────────────
+# The one file you fill to test YOUR service (bring-your-own-SUT). Copy this into your
+# product-agent/ folder, fill the URLs, done.
+#
+# THE ONE RULE: every URL must resolve FROM THE JMETER RUNNER'S NETWORK VANTAGE, not
+# from your laptop. The onboarder joins the suite's runner to your SUT's docker network,
+# so use your SUT's COMPOSE SERVICE NAMES + in-container ports here (e.g.
+# http://my-api:8080), NOT localhost:<published-port>. (Fallback: if your SUT is not on
+# a docker network, publish host ports and use http://host.docker.internal:<port>.)
+#
+# A new SUT onboards by THIS FILE + scenarios ONLY — zero Argus source changes.
+#
+# SECRETS: every credential below is written as a ${VAR} placeholder — NEVER a literal
+# value. THE NAMING RULE: the ${VAR} name = the variable's name in YOUR product folder's
+# .env (the SUT's own env file). The onboarder's secrets preflight loads ONLY the referenced
+# names from <product-dir>/.env, shows a masked preview of each (never the value) and confirms with you
+# before anything runs; a missing name stops onboarding with instructions. On a direct host
+# run a shell export supplies the value instead. A referenced ${VAR} that is unset OR empty
+# FAILS validate-config loudly (no silent empty credential). This file is safe to commit.
+# See onboarding/HOW-TO-ARGUS-CONFIG.md → "Secrets & credentials".
+
+project:
+  name: my-service                      # ← your service name (shows in report.json + dashboards)
+
+targets:
+  # ── HTTP edge (required) — the endpoints your scenarios TRIGGER ──────────────
+  http:
+    base_url: http://my-api:8080        # ← SUT service-name:port from the JMeter vantage
+                                        #   (where to find it: your SUT compose service name + its container port)
+
+  # ── Database (optional) — only if you write Database State scenarios ─────────
+  # READ-ONLY credential — Argus never writes to your DB.
+  database:
+    type: postgres
+    jdbc_url: jdbc:postgresql://my-db:5432/mydb   # ← SUT db service-name:port/db
+    username: sut_ro                     # ← your SUT's read-only DB role (a role name, not a secret)
+    password: ${MY_SUT_DB_PASSWORD}      # ← ${VAR} — name it after the key in <product-dir>/.env; value never here
+
+  # ── Message broker (optional) — only if you write Message Flow scenarios ─────
+  message_broker:
+    type: amqp
+    url: amqp://${MY_SUT_BROKER_USER}:${MY_SUT_BROKER_PASSWORD}@my-rabbit:5672/  # ← ${VAR} creds named after your .env keys; ${VAR} resolves anywhere in the string
+    management_url: http://my-rabbit:15672          # ← RabbitMQ management API (queue inspection)
+    exchanges:
+      incoming: my-service.incoming     # ← your inbound exchange
+    queues:
+      incoming: my-service.incoming.q   # ← the queue a message lands on
+      dlq: my-service.dlq               # ← the dead-letter queue (poison/negative tests)
+    routing_keys:
+      incoming: my-service.created      # ← the routing key your service publishes with (0.3.32: the content tap binds with it; the broker user needs configure+write+read on argus-tap-*, read on the incoming exchange, and a monitoring tag)
+    # AMQP Load (0.3.52+) on a broker listed under the top-level load_allowed_targets: each session queue is
+    # <queues.load, default argus-load>-<run>-s<step>-<n>, bound to exchanges.load (default amq.direct, must exist).
+    # Grant the load login configure+write+read on those queue names and write+read on that exchange
+    # (onboarding/HOW-TO-ARGUS-CONFIG.md, "AMQP Load").
+    # HTTP Load (0.3.66+) ramps users against a targets.http_targets entry listed under the same top-level
+    # load_allowed_targets (onboarding/HOW-TO-ARGUS-CONFIG.md, "HTTP Load").
+
+  # ── External delivery (optional) — only if you assert outbound webhooks ──────
+  external:
+    webhook_base_url: http://my-webhook-sink:9099  # ← a sink that records deliveries
+
+  # ── Auth (optional) — so Argus can call authenticated endpoints ───────────
+  auth:
+    type: bearer
+    bearer_token: ${MY_SUT_BEARER_TOKEN}  # ← ${VAR} — a valid static test token; name = the key in <product-dir>/.env, value NOT here
+
+  # ── MCP endpoint (only if your SUT is an MCP server) ─────────────────────────
+  # An MCP SUT's wiring lives HERE (and in `mcp_targets` below for a second endpoint) — no
+  # MCP_URL/MCP_TOKEN env. Same vantage rule as targets.http: use the SUT compose
+  # SERVICE-NAME:port, not localhost.
+  mcp:
+    base_url: http://my-mcp:8080        # ← SUT MCP service-name:port from the JMeter vantage
+    transport: streamable-http          # ← streamable-http (POST /mcp) | http-sse (GET /sse + POST) — declared, never guessed
+    auth:
+      type: none                        # ← none | bearer
+      # bearer_token: ${MY_SUT_MCP_TOKEN}  #   …when type: bearer — a ${VAR} named after the key in <product-dir>/.env
+
+  # ── Named extra targets (optional) — a SECOND surface of the same kind ───────
+  # Beside each plain slot you may declare ANY NUMBER of named extras of the same kind and the
+  # same shape: `http_targets`, `mcp_targets`, `database_targets`, `message_broker_targets`.
+  # A scenario selects one with ONE word in its Metadata — `- **Target**: <name>` — (a chain step
+  # with `"target": "<name>"`); a scenario without the word keeps the plain slot, which stays the
+  # default. A name may not be `default` and may not be a plain-slot key (http, mcp, database,
+  # message_broker, external, auth). Every key under `targets` is checked: an unknown key, an
+  # unknown target name, and a name of the wrong kind for the scenario's layer are REFUSED by
+  # name — never ignored, never silently replaced by the plain slot. ${VAR}s resolve inside named
+  # entries exactly as in the plain slots, and the secrets preflight names the entry
+  # (`targets.database_targets.neo4j.password`). On k3d/AKS a named entry's host is aliased
+  # exactly like the plain slot's. validate-config lists and probes every named entry by name.
+  # http_targets:
+  #   graph:
+  #     base_url: http://my-graph:8096      # ← a second HTTP surface (e.g. an internal health port)
+  # database_targets:
+  #   neo4j:
+  #     jdbc_url: jdbc:neo4j://my-neo4j:7687
+  #     username: neo4j
+  #     password: ${MY_SUT_NEO4J_PASSWORD}  # ← ${VAR} named after the key in <product-dir>/.env
+
+scenarios:
+  timeout_default: 20s
+  # V29-015: `cleanup_enabled` is GONE. A scenario's ## CLEANUP now always runs, and there is no
+  # switch — an operator who can silently disable cleanup recreates the finding that the section
+  # was shipped, documented as enforced, and read by nothing for the life of the product.
+
+# Declared gaps (optional) — one-line declarations for SOFT things the suite cannot derive from
+# this file: no sagas emitted, no /metrics endpoint. Reported in the preflight, never a failure.
+# Correlation propagation is a HARD requirement (COMPATIBLE-SUT.md) and is not declarable here.
+# declared_gaps:
+#   - "saga: my service emits no event_type=saga (no mandated control actions)"
+
+# ── Rate limit (optional, 0.3.29) — how YOUR SUT says "you are going too fast" ─────────
+# TOP-LEVEL, never under `targets`. Absent = nothing changes: Argus never guesses a throttle.
+# When declared, a refusal that carries the signature scores the scenario "not measured" (grey,
+# never a pass and never a product failure), the run pauses for retry_after (or the window) and
+# retries that scenario once, and the run summary counts the pauses. Unknown keys are refused by name.
+# rate_limit:
+#   requests: 120                       # how many requests the SUT accepts per window
+#   per: minute                         # minute | second — nothing else is accepted
+#   signature:
+#     body_contains: "rate limit exceeded"   # the stable text in the SUT's refusal (MCP tool error / HTTP 429 body)
+#     retry_after_field: retry_after    # optional: the JSON field carrying the retry-after SECONDS
+#   pause:
+#     max_pauses: 3                     # pauses allowed in ONE run (default 3)
+#     max_total_wait: 180s              # total wall-clock ONE run may spend paused (default 180s)
+#     retry_once: true                  # re-fire a throttled scenario once after the pause (default true)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ARGUS-OWNED above (project + targets + scenarios) — argus's run.sh/preflight.py
+# read these. Everything BELOW is the ARGUS-OWNED block (RO-10): the obs/deploy
+# wiring. argus IGNORES this whole block; it is self-contained so it can move to its
+# own file later. Fill it so the bundled obs stack captures YOUR SUT — which runs in
+# its OWN compose project/network, separate from the Argus stack.
+# ─────────────────────────────────────────────────────────────────────────────
+deploy:
+  compose_project: my-sut              # ← your SUT's docker compose project name
+  network: my-sut_default              # ← your SUT's docker network (the suite's runner/JMeter joins it)
+
+# Observability (bundled by the package). Your SUT must emit structured JSON logs (with
+# correlation_id + level) + sagas for control actions — see docs/COMPATIBLE-SUT.md.
+observability:
+  loki:
+    url: http://loki:3100                  # bundled Loki from the runner vantage (leave as-is)
+    derive_project_from_container: true    # RO-05: label each SUT's logs by its compose project (recommended)
+    # project_label: my-service            #   …or pin a fixed `project` label instead of deriving it
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LOG-FIELD TRANSLATION TABLE — REQUIRED. Fill ALL FOUR for YOUR service.
+    # ───────────────────────────────────────────────────────────────────────────
+    # The dashboard reads YOUR service's own log lines to power the "Logs" panel
+    # and the "Saga timeline" panel. Different services name their log fields
+    # differently, so you MUST tell the suite what YOUR service calls each one.
+    # Provide every value EXPLICITLY — do NOT rely on hidden defaults.
+    #
+    # HOW TO FIND EACH VALUE: start your service, print ONE structured log line
+    #   `docker compose -p <your-project> logs <your-gateway> | grep '{' | head -1`
+    # and read the field names straight off that JSON line. Full guidance +
+    # worked examples: onboarding/HOW-TO-ARGUS-CONFIG.md → "Log-field translation table".
+    #
+    # The four values below are the the operator-standard convention (Go slog + GoKit).
+    # If your service follows it, keep these values — but keep them EXPLICIT.
+    # If it deviates (like Social does), set them to your service's actual names.
+    correlation_field: correlation_id      # 1. the field that carries the request/correlation id the
+                                            #    suite injects (ties each log line to a scenario/run).
+                                            #    the operator-standard: correlation_id     ·  Social uses: request_id
+    level_field: level                     # 2. the field that carries the log severity (INFO/WARN/ERROR).
+                                            #    the operator-standard: level              ·  e.g. some use: severity
+    saga_event_field: event_type           # 3. the field that MARKS a line as a saga / control-action audit event.
+                                            #    the operator-standard: event_type         ·  Social uses: event
+    saga_event_value: saga                 # 4. the VALUE in field #3 that means "this line IS a saga".
+                                            #    the operator-standard: saga               ·  Social uses: tool_dispatch
+    # ═══════════════════════════════════════════════════════════════════════════
+  grafana:
+    dashboard_template: dashboards/argus-overview.json
+    # PER-TIER (M3-FX): the Grafana YOU open in a BROWSER. This is the one field in this file whose
+    # correct value differs per environment, so it is declared per tier instead of once.
+    #
+    # Every other URL here is written from the RUNNER's vantage (a service name), which resolves the
+    # same on every tier. This one answers a different question - what does a HUMAN open? - and on a
+    # k8s tier `localhost` is NOT your machine, so a localhost link cannot open the cluster's Grafana.
+    #
+    # MANDATORY for the tier you onboard to. If the value for that tier is missing, onboarding STOPS:
+    # a dashboard link that does not open is worse than no link, because nobody re-checks it.
+    public_url:
+      compose: http://localhost:3000       # the shared local obs stack, published on your machine
+      k3d:     http://localhost:3000       # same: k3d uses the same host-published Grafana
+      managed: https://grafana.example.com   # the cluster ingress - NEVER localhost here
+  # OPTIONAL — OpenShell sandbox evidence (spec 26, A1, OBSERVE ONLY in this release).
+  # Only when the system under test is an AI agent running in an NVIDIA OpenShell sandbox. Leave the
+  # whole block commented out otherwise: absent = off, and report.json says nothing about it.
+  # With it, every scenario row in report.json carries a `sandbox_policy` block: what the sandbox
+  # DENIED in that scenario's padded window, with an honest `coverage`. It never changes a verdict.
+  # Unknown keys inside this block are refused by name. Not allowed beside observability.betterstack.
+  # Guide: onboarding/HOW-TO-ARGUS-CONFIG.md → "OpenShell sandbox evidence (optional)".
+  # openshell:
+  #   source: loki                          # the only value in v1 — read from this executor's --loki
+  #   selector: '{job="openshell-gateway",source="sandbox-jsonl"}'   # the LogQL stream that carries
+  #                                         #   the sandbox's OCSF JSONL (shipped there by the host);
+  #                                         #   the bare {...} only: a line filter or pipeline stage
+  #                                         #   after the braces is refused
+  #   sandbox: ${SUT_SANDBOX_UID}           # the sandbox ID (`openshell sandbox get`), NOT its name;
+  #                                         #   re-creating the sandbox changes the ID
+  #   window_pad: 5s                        # padding on each side of a scenario's window, and the
+  #                                         #   settle wait before the read (a positive duration,
+  #                                         #   at most 2m)
+  # The source must ship OCSF JSONL WITH `container` — leave OpenShell's ocsf_schema_version unset:
+  # a 1.1 or 1.3 downgrade strips `container`, and every window then reads `unavailable`.
+  # sandbox-jsonl is trustworthy only if the effective policy does not grant read-write on /var/log;
+  # spec 26 G2 (not yet measured) decides whether this source may be used as evidence. The shipping
+  # path itself is UNPROVEN until spec 26 G1 runs: no real OpenShell line has been read through it yet.
+  # Filesystem (Landlock) and seccomp refusals are never logged by OpenShell, so they never appear here.
+  # Ship the stream with NO `service` label: runner__get_tail_logs and get_sagas return any line,
+  # containing the caller's substring, of a stream that has one (a builder could read a certification
+  # run's denials). Give a certification instance its own sandbox.
+
+# OPTIONAL — names to DELIVER to the executor. A password written as ${SOME_PASSWORD} in a
+# check's HTTP body or a chain step has no credential field above to be found through, so list its NAME here
+# (top level, never under `targets:`; names only, never values; not ARGUS_*, LD_*, KUBERNETES_* or process-control
+# names such as PATH, HOME, HTTP_PROXY). The value is read from <product-dir>/.env at onboarding like any ${VAR}
+# above. This list decides what is delivered, not what a check may use: any name in the executor's environment is
+# substituted. An executor older than this key ignores it, so upgrade the executor first.
+# check_env:
+#   - SOME_PASSWORD

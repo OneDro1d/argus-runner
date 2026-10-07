@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Argus HTTP idempotency template: fires the SAME request twice in one thread,
+     sharing the Idempotency-Key (thread-level HeaderManager, value ${idempotency.key}).
+     The runner-core judges codes[0] vs expect.status and codes[1] vs expect.status2
+     (e.g. 202 then 409). No ResponseAssertion — runner judges by response code. -->
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Argus: HTTP Idempotency" enabled="true">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments"><collectionProp name="Arguments.arguments"/></elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="http-idempotency ${__P(scenario.id,unknown)}" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">${__P(load.users,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(load.ramp,0)}</stringProp>
+        <stringProp name="ThreadGroup.scheduler">${__P(load.scheduler,false)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(load.duration,0)}</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${__P(load.loops,1)}</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="Headers" enabled="true">
+          <collectionProp name="HeaderManager.headers">
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">Content-Type</stringProp><stringProp name="Header.value">application/json</stringProp></elementProp>
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">X-Correlation-Id</stringProp><stringProp name="Header.value">${__P(correlation.id,)}</stringProp></elementProp>
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(auth.header,)}</stringProp></elementProp>
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">Idempotency-Key</stringProp><stringProp name="Header.value">${__P(idempotency.key,)}</stringProp></elementProp>
+          </collectionProp>
+        </HeaderManager>
+        <hashTree/>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-1" enabled="true">
+          <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(http.host,localhost)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(http.port,8080)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(http.protocol,http)}</stringProp>
+          <stringProp name="HTTPSampler.path">${__P(trigger.path,/)}</stringProp>
+          <stringProp name="HTTPSampler.method">${__P(trigger.method,POST)}</stringProp>
+          <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">${__P(trigger.payload,{})}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="apply author headers (VR12-T3)" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="script">// VR12-T3 (V29-018): apply EVERY header the scenario's author declared in its ## TRIGGER.
+// The runner sets trigger.header_n and, per header i, trigger.header_i_name / _value.
+//
+// Until 0.3.31 the parser populated every declared header and the runner sent exactly ONE of
+// them (Authorization). SYN-MCP-002 and SYN-MCP-004 each declare
+// `Accept: application/json, text/event-stream` and neither ever sent it.
+//
+// An author header REPLACES the runner's for the same name — hence the remove-then-add. A
+// scenario that declares none leaves this block a no-op, so its bytes on the wire are IDENTICAL
+// to before this template changed.
+//
+// VR12-X10: header NAMES may be logged, values NEVER.
+def n = 0
+try { n = Integer.parseInt(props.get("trigger.header_n") ?: "0") } catch (e) { n = 0 }
+if (n &gt; 0) {
+  def hm = sampler.getHeaderManager()
+  if (hm == null) {
+    hm = new org.apache.jmeter.protocol.http.control.HeaderManager()
+    hm.setName("author headers")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.TEST_CLASS, "HeaderManager")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.GUI_CLASS, "HeaderPanel")
+    sampler.setHeaderManager(hm)
+  }
+  for (int i = 1; i &lt;= n; i++) {
+    def name = props.get("trigger.header_" + i + "_name")
+    if (name == null || name.trim().isEmpty()) { continue }
+    def value = props.get("trigger.header_" + i + "_value") ?: ""
+    hm.removeHeaderNamed(name)
+    hm.add(new org.apache.jmeter.protocol.http.control.Header(name, value))
+  }
+}</stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+        <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="record output for a compare run (ARGUS-CMP-3)" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="parameters"></stringProp>
+          <stringProp name="filename"></stringProp>
+          <stringProp name="cacheKey">true</stringProp>
+          <stringProp name="script">// ARGUS-CMP-3: hand the RAW response of this sampler to the executor, for a compare run.
+// ACTIVE ONLY when the property output.capture.dir is set. The executor sets it in mode compare, for a
+// check that declares `## COMPARE`, and never for a check that declares `## LOAD`. With it unset this block
+// does nothing, so every other run's samplers, .jtl and bytes on the wire are exactly what they were.
+//
+// Writes, for sample n (1-based, in firing order, at most 8): n.body (the raw response bytes, at most
+// 1 MiB + 1: one more than the cap is how the executor tells "too large" from "exactly the cap"),
+// n.headers (the response header lines) and, LAST, n.status (its presence says the sample is complete).
+// The Go side (internal/argus/outputs_capture.go) reads them, builds the record with compare.BuildRecord
+// and DELETES them on every path. Nothing is logged: not the response, not a header, not a value.
+def dir = props.getProperty("output.capture.dir")
+if (dir != null &amp;&amp; !dir.trim().isEmpty()) {
+  int n
+  synchronized (props) {
+    n = Integer.parseInt(props.getProperty("output.capture.seq") ?: "0") + 1
+    props.setProperty("output.capture.seq", String.valueOf(n))
+  }
+  if (n &lt;= 8) {
+    try {
+      byte[] data = prev.getResponseData()
+      if (data == null) { data = new byte[0] }
+      byte[] body = data.length &gt; 1048577 ? java.util.Arrays.copyOf(data, 1048577) : data
+      new File(dir, n + ".body").bytes = body
+      new File(dir, n + ".headers").bytes = (prev.getResponseHeaders() ?: "").getBytes("ISO-8859-1")
+      new File(dir, n + ".status").text = String.valueOf(prev.getResponseCode())
+    } catch (Throwable t) {
+      log.warn("output capture: sample " + n + " was not written")
+    }
+  }
+}</stringProp>
+        </JSR223PostProcessor>
+        <hashTree/>
+        </hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-2" enabled="true">
+          <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(http.host,localhost)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(http.port,8080)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(http.protocol,http)}</stringProp>
+          <stringProp name="HTTPSampler.path">${__P(trigger.path,/)}</stringProp>
+          <stringProp name="HTTPSampler.method">${__P(trigger.method,POST)}</stringProp>
+          <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">${__P(trigger.payload,{})}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="apply author headers (VR12-T3)" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="script">// VR12-T3 (V29-018): apply EVERY header the scenario's author declared in its ## TRIGGER.
+// The runner sets trigger.header_n and, per header i, trigger.header_i_name / _value.
+//
+// Until 0.3.31 the parser populated every declared header and the runner sent exactly ONE of
+// them (Authorization). SYN-MCP-002 and SYN-MCP-004 each declare
+// `Accept: application/json, text/event-stream` and neither ever sent it.
+//
+// An author header REPLACES the runner's for the same name — hence the remove-then-add. A
+// scenario that declares none leaves this block a no-op, so its bytes on the wire are IDENTICAL
+// to before this template changed.
+//
+// VR12-X10: header NAMES may be logged, values NEVER.
+def n = 0
+try { n = Integer.parseInt(props.get("trigger.header_n") ?: "0") } catch (e) { n = 0 }
+if (n &gt; 0) {
+  def hm = sampler.getHeaderManager()
+  if (hm == null) {
+    hm = new org.apache.jmeter.protocol.http.control.HeaderManager()
+    hm.setName("author headers")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.TEST_CLASS, "HeaderManager")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.GUI_CLASS, "HeaderPanel")
+    sampler.setHeaderManager(hm)
+  }
+  for (int i = 1; i &lt;= n; i++) {
+    def name = props.get("trigger.header_" + i + "_name")
+    if (name == null || name.trim().isEmpty()) { continue }
+    def value = props.get("trigger.header_" + i + "_value") ?: ""
+    hm.removeHeaderNamed(name)
+    hm.add(new org.apache.jmeter.protocol.http.control.Header(name, value))
+  }
+}</stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+        <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="record output for a compare run (ARGUS-CMP-3)" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="parameters"></stringProp>
+          <stringProp name="filename"></stringProp>
+          <stringProp name="cacheKey">true</stringProp>
+          <stringProp name="script">// ARGUS-CMP-3: hand the RAW response of this sampler to the executor, for a compare run.
+// ACTIVE ONLY when the property output.capture.dir is set. The executor sets it in mode compare, for a
+// check that declares `## COMPARE`, and never for a check that declares `## LOAD`. With it unset this block
+// does nothing, so every other run's samplers, .jtl and bytes on the wire are exactly what they were.
+//
+// Writes, for sample n (1-based, in firing order, at most 8): n.body (the raw response bytes, at most
+// 1 MiB + 1: one more than the cap is how the executor tells "too large" from "exactly the cap"),
+// n.headers (the response header lines) and, LAST, n.status (its presence says the sample is complete).
+// The Go side (internal/argus/outputs_capture.go) reads them, builds the record with compare.BuildRecord
+// and DELETES them on every path. Nothing is logged: not the response, not a header, not a value.
+def dir = props.getProperty("output.capture.dir")
+if (dir != null &amp;&amp; !dir.trim().isEmpty()) {
+  int n
+  synchronized (props) {
+    n = Integer.parseInt(props.getProperty("output.capture.seq") ?: "0") + 1
+    props.setProperty("output.capture.seq", String.valueOf(n))
+  }
+  if (n &lt;= 8) {
+    try {
+      byte[] data = prev.getResponseData()
+      if (data == null) { data = new byte[0] }
+      byte[] body = data.length &gt; 1048577 ? java.util.Arrays.copyOf(data, 1048577) : data
+      new File(dir, n + ".body").bytes = body
+      new File(dir, n + ".headers").bytes = (prev.getResponseHeaders() ?: "").getBytes("ISO-8859-1")
+      new File(dir, n + ".status").text = String.valueOf(prev.getResponseCode())
+    } catch (Throwable t) {
+      log.warn("output capture: sample " + n + " was not written")
+    }
+  }
+}</stringProp>
+        </JSR223PostProcessor>
+        <hashTree/>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

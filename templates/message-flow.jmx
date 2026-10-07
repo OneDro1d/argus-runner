@@ -1,0 +1,662 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Argus Message Flow template (chained HTTP Ingestion -> Message Flow).
+     Fires the HTTP trigger (order-api publishes OrderCreated to orders.incoming), then
+     queries the RabbitMQ management API for the bound queue and asserts it exists +
+     is live (proves the publish->queue topology). Judged by the JMeter success flag
+     (content layer). mgmt host/port/auth + queue from argus-config targets.message_broker. -->
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Argus: Message Flow" enabled="true">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments"><collectionProp name="Arguments.arguments"/></elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="message-flow ${__P(scenario.id,unknown)}" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">${__P(load.users,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(load.ramp,0)}</stringProp>
+        <stringProp name="ThreadGroup.scheduler">${__P(load.scheduler,false)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(load.duration,0)}</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${__P(load.loops,1)}</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <!-- ⭐ V30-004 F-4 — THE NEGATIVE CASE, `- no rows`.
+             "Nothing was published for this run" cannot be read from one sample of a live queue:
+             the SUT's own consumer drains it, so a depth of 0 after the trigger proves only that
+             the consumer was fast. The honest measurement is a BASELINE before the trigger and the
+             same read after it, and that is what these two samplers are.
+
+             ⛔ It does NOT tap. A tap would have to be bound before the trigger and would then
+             hold the message the scenario asserts was never published — the queue we read is the
+             SUT's own, and we only count.
+
+             Gated on `mq.negative.queue`, which DeriveProps emits ONLY for `expect.has_rows=false`
+             — so a positive scenario runs neither call. Both carry the `<id>-verify` prefix, so
+             neither is counted as a SUT request. -->
+        <IfController guiclass="IfControllerPanel" testclass="IfController" testname="negative case?" enabled="true">
+          <stringProp name="IfController.condition">${__jexl3("${__P(mq.negative.queue,)}" != "",)}</stringProp>
+          <boolProp name="IfController.useExpression">true</boolProp>
+          <boolProp name="IfController.evaluateAll">false</boolProp>
+        </IfController>
+        <hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-verify-negative-baseline" enabled="true">
+            <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.domain">${__P(mgmt.host,rabbitmq)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(mgmt.port,15672)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">http</stringProp>
+            <stringProp name="HTTPSampler.path">/api/queues/%2F/${__P(mq.negative.queue,)}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="mgmt auth" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(mgmt.auth.header,)}</stringProp></elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="remember the depth before the trigger (V30-004 F-4)" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="script">
+// The baseline. It never decides a verdict — it only records what the queue held before we fired.
+def code = (prev.getResponseCode() ?: "").toString()
+prev.setSuccessful(true)
+if (!code.startsWith("2")) { vars.put("mf_baseline", "unknown"); return }
+try {
+  def q = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString() ?: "{}")
+  vars.put("mf_baseline", String.valueOf(q?.messages ?: 0))
+} catch (ignored) {
+  vars.put("mf_baseline", "unknown")
+}
+              </stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+
+        <!-- ⭐ V30-004 F-3 — THE TAP.
+             message-flow.jmx read NO expect.* property: its verdict was "the queue exists and the
+             correlation id appears in the management API's answer" — the proxy FINDING-7 replaced
+             for the database layer and never carried across. Reading the CONTENT of a published
+             message needs a message, and the SUT's own consumer takes it, so we bind a private
+             queue of our own to the same exchange before the trigger fires and read it after.
+
+             ⛔ EVERY SAMPLER HERE CARRIES THE `<id>-verify` PREFIX. isVerifySample (argus.go:841)
+             excludes a sample from the SUT request count on exactly that prefix; without it these
+             four management calls would be counted as load the SUT never received.
+
+             ⛔ The whole tap is gated on `mq.tap.queue` being non-empty, so a scenario that asserts
+             no content declares no tap and nothing below runs. `${__jexl3(…)}` with
+             IfController.useExpression=true is the form 5.6.3 evaluates in default mode: a
+             condition that does not evaluate is a silent always-false, which would disable the tap
+             and leave every content assertion unevaluated — this row's own defect, reintroduced. -->
+        <IfController guiclass="IfControllerPanel" testclass="IfController" testname="tap declared?" enabled="true">
+          <stringProp name="IfController.condition">${__jexl3("${__P(mq.tap.queue,)}" != "",)}</stringProp>
+          <boolProp name="IfController.useExpression">true</boolProp>
+          <boolProp name="IfController.evaluateAll">false</boolProp>
+        </IfController>
+        <hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-verify-tap-declare" enabled="true">
+            <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.domain">${__P(mgmt.host,rabbitmq)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(mgmt.port,15672)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">http</stringProp>
+            <stringProp name="HTTPSampler.path">/api/queues/%2F/${__P(mq.tap.queue,)}</stringProp>
+            <stringProp name="HTTPSampler.method">PUT</stringProp>
+            <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{"durable":false,"auto_delete":false,"arguments":{"x-expires":${__P(mq.tap.ttl_ms,120000)},"x-message-ttl":${__P(mq.tap.ttl_ms,120000)}}}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="mgmt auth" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(mgmt.auth.header,)}</stringProp></elementProp>
+                <elementProp name="" elementType="Header"><stringProp name="Header.name">Content-Type</stringProp><stringProp name="Header.value">application/json</stringProp></elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="a broker refusal on DECLARE is an EXECUTION error (V30-004)" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="script">
+// ⛔ A PERMISSION REFUSAL IS NOT A SUT FAILURE. Measured 2026-09-13 on a restricted user: with
+// `configure`+`read` on argus-tap-* the DECLARE returns 201 and the BIND is refused 401 — so the
+// operator sees a tap that was created and then refused. Nothing about the SUT is thereby known, so
+// the message says so in this product's own vocabulary rather than blaming the responder.
+def code = (prev.getResponseCode() ?: "").toString()
+if (code.startsWith("2")) { return }
+prev.setSuccessful(false)
+prev.setResponseMessage("BROKER-REFUSED: tap declare returned http " + code +
+  " - the run could not measure. The SUT broker user needs configure+write+read on argus-tap-* and read on the incoming exchange")
+              </stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-verify-tap-bind" enabled="true">
+            <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.domain">${__P(mgmt.host,rabbitmq)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(mgmt.port,15672)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">http</stringProp>
+            <stringProp name="HTTPSampler.path">/api/bindings/%2F/e/${__P(mq.exchange,)}/q/${__P(mq.tap.queue,)}</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{"routing_key":"${__P(mq.routing_key,)}","arguments":{}}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="mgmt auth" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(mgmt.auth.header,)}</stringProp></elementProp>
+                <elementProp name="" elementType="Header"><stringProp name="Header.name">Content-Type</stringProp><stringProp name="Header.value">application/json</stringProp></elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="a broker refusal on BIND is an EXECUTION error (V30-004)" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="script">
+// The BIND is the call a `configure`+`read` user is refused on - measured, 401. See the declare.
+def code = (prev.getResponseCode() ?: "").toString()
+if (code.startsWith("2")) { return }
+prev.setSuccessful(false)
+prev.setResponseMessage("BROKER-REFUSED: tap bind returned http " + code +
+  " - the run could not measure. RabbitMQ maps queue.bind to write-on-destination + read-on-source, so configure alone is not enough")
+              </stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-trigger" enabled="true">
+          <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(http.host,localhost)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(http.port,8080)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(http.protocol,http)}</stringProp>
+          <stringProp name="HTTPSampler.path">${__P(trigger.path,/)}</stringProp>
+          <stringProp name="HTTPSampler.method">${__P(trigger.method,POST)}</stringProp>
+          <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">${__P(trigger.payload,{})}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="apply author headers (VR12-T3)" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="script">// VR12-T3 (V29-018): apply EVERY header the scenario's author declared in its ## TRIGGER.
+// The runner sets trigger.header_n and, per header i, trigger.header_i_name / _value.
+//
+// Until 0.3.31 the parser populated every declared header and the runner sent exactly ONE of
+// them (Authorization). SYN-MCP-002 and SYN-MCP-004 each declare
+// `Accept: application/json, text/event-stream` and neither ever sent it.
+//
+// An author header REPLACES the runner's for the same name — hence the remove-then-add. A
+// scenario that declares none leaves this block a no-op, so its bytes on the wire are IDENTICAL
+// to before this template changed.
+//
+// VR12-X10: header NAMES may be logged, values NEVER.
+def n = 0
+try { n = Integer.parseInt(props.get("trigger.header_n") ?: "0") } catch (e) { n = 0 }
+if (n &gt; 0) {
+  def hm = sampler.getHeaderManager()
+  if (hm == null) {
+    hm = new org.apache.jmeter.protocol.http.control.HeaderManager()
+    hm.setName("author headers")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.TEST_CLASS, "HeaderManager")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.GUI_CLASS, "HeaderPanel")
+    sampler.setHeaderManager(hm)
+  }
+  for (int i = 1; i &lt;= n; i++) {
+    def name = props.get("trigger.header_" + i + "_name")
+    if (name == null || name.trim().isEmpty()) { continue }
+    def value = props.get("trigger.header_" + i + "_value") ?: ""
+    hm.removeHeaderNamed(name)
+    hm.add(new org.apache.jmeter.protocol.http.control.Header(name, value))
+  }
+}</stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+
+          <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="trigger is stimulus-only (DF-14)" enabled="true">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="cacheKey">true</stringProp>
+            <stringProp name="script">// DF-14: the trigger is a STIMULUS, not the verdict. A negative message-flow test (an
+// invalid/rejected trigger that should land NO message on the main queue, or land in the
+// DLQ) must be judged ONLY by the verify step — so mark the trigger sample successful
+// regardless of HTTP status, recording the actual code for reference.
+def code = prev.getResponseCode()
+prev.setSuccessful(true)
+prev.setResponseMessage("trigger status " + code + " (decoupled — content verdict = verify assertion only, DF-14)")</stringProp>
+          </JSR223PostProcessor>
+          <hashTree/>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="trigger headers" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header"><stringProp name="Header.name">Content-Type</stringProp><stringProp name="Header.value">application/json</stringProp></elementProp>
+              <elementProp name="" elementType="Header"><stringProp name="Header.name">X-Correlation-Id</stringProp><stringProp name="Header.value">${__P(correlation.id,)}</stringProp></elementProp>
+              <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(auth.header,)}</stringProp></elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+        </hashTree>
+
+        <!-- ⭐ AC-D16 — EXPECTED REFUSAL. A `- broker refuses with <code>` bullet (EXPECT) declares the
+             exact AMQP reply code the broker must refuse a publish with; DeriveProps reads it into
+             expect.refusal_code and the connection/exchange/routing-key/user_id it takes from the
+             scenario's message-broker target into mq.amqp.*/mq.exchange/mq.routing_key/mq.user_id
+             (internal/argus/argus.go). The publish is made DIRECTLY against the broker, not through
+             the SUT's HTTP endpoint above — this is a test of the BROKER's own ACL/precondition, not
+             of the SUT, so the ordinary trigger (if any) is unaffected either way.
+
+             ⛔ THE SAMPLER DECIDES PASS/FAIL, NOT A GROOVY SCRIPT HERE
+             (jmeter-plugins/amqp's AmqpPublishSampler, unit-tested there): success is
+             refusal with EXACTLY the declared code; an accepted publish, a timeout, or a refusal
+             with a different code are all failures, named by the ACTUAL outcome only (VR-C8 —
+             never the declared one). Labelled `-verify-amqp-refusal`, so isVerifySample excludes it
+             from the SUT-request count the way every other management call here already is
+             (V30-004). Gated on expect.refusal_code, so a scenario that declares none runs nothing
+             here — byte-identical to before. -->
+        <IfController guiclass="IfControllerPanel" testclass="IfController" testname="refusal declared?" enabled="true">
+          <stringProp name="IfController.condition">${__jexl3("${__P(expect.refusal_code,)}" != "",)}</stringProp>
+          <boolProp name="IfController.useExpression">true</boolProp>
+          <boolProp name="IfController.evaluateAll">false</boolProp>
+        </IfController>
+        <hashTree>
+          <JavaSampler guiclass="JavaTestSamplerGui" testclass="JavaSampler" testname="${__P(scenario.id,unknown)}-verify-amqp-refusal" enabled="true">
+            <elementProp name="arguments" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="amqp_uri" elementType="Argument">
+                  <stringProp name="Argument.name">amqp_uri</stringProp>
+                  <stringProp name="Argument.value">${__P(mq.amqp.uri,)}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+                <elementProp name="username" elementType="Argument">
+                  <stringProp name="Argument.name">username</stringProp>
+                  <stringProp name="Argument.value">${__P(mq.amqp.username,)}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+                <elementProp name="password" elementType="Argument">
+                  <stringProp name="Argument.name">password</stringProp>
+                  <stringProp name="Argument.value">${__P(mq.amqp.password,)}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+                <elementProp name="exchange" elementType="Argument">
+                  <stringProp name="Argument.name">exchange</stringProp>
+                  <stringProp name="Argument.value">${__P(mq.exchange,)}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+                <elementProp name="routing_key" elementType="Argument">
+                  <stringProp name="Argument.name">routing_key</stringProp>
+                  <stringProp name="Argument.value">${__P(mq.routing_key,)}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+                <elementProp name="user_id" elementType="Argument">
+                  <stringProp name="Argument.name">user_id</stringProp>
+                  <stringProp name="Argument.value">${__P(mq.user_id,)}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+                <elementProp name="message_body" elementType="Argument">
+                  <stringProp name="Argument.name">message_body</stringProp>
+                  <stringProp name="Argument.value">${__P(trigger.payload,{})}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+                <elementProp name="expected_refusal_code" elementType="Argument">
+                  <stringProp name="Argument.name">expected_refusal_code</stringProp>
+                  <stringProp name="Argument.value">${__P(expect.refusal_code,)}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+            <stringProp name="classname">com.onedroid.jmeter.amqp.AmqpPublishSampler</stringProp>
+          </JavaSampler>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="the declared refusal code, logged (AC-D16)" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="script">
+// The AmqpPublishSampler argument above already carries expect.refusal_code (via __P) and is what
+// decides prev.isSuccessful() — this does not re-judge it (VR-C8: one verdict, one place, made by
+// the sampler that observed the broker). It is read here too, via props.get like every other
+// expect.* family in this file, purely to log what was declared for the run's own log — never
+// written into the sample result, which stays reality-only (never the declared code, the actual
+// one only).
+def declared = (props.get("expect.refusal_code") ?: "").toString()
+if (declared) {
+  log.info("AC-D16 " + (props.get("scenario.id") ?: "") + ": declared refusal code " + declared +
+    " -&gt; observed " + prev.getResponseCode() + " (" + (prev.isSuccessful() ? "match" : "no match") + ")")
+}
+              </stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-verify-queue" enabled="true">
+          <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(mgmt.host,rabbitmq)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(mgmt.port,15672)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.path">/api/queues/%2F/${__P(mq.queue,orders.incoming.q)}</stringProp>
+          <stringProp name="HTTPSampler.method">GET</stringProp>
+          <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="settle" enabled="true">
+            <stringProp name="ConstantTimer.delay">1200</stringProp>
+          </ConstantTimer>
+          <hashTree/>
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="mgmt auth" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(mgmt.auth.header,)}</stringProp></elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="queue exists + live" enabled="true">
+            <collectionProp name="Asserion.test_strings"><stringProp name="0">${__P(mq.queue,orders.incoming.q)}</stringProp></collectionProp>
+            <stringProp name="Assertion.test_field">Assertion.response_data</stringProp>
+            <intProp name="Assertion.test_type">16</intProp>
+          </ResponseAssertion>
+          <hashTree/>
+        </hashTree>
+
+        <!-- ⭐ V30-004 F-3 — READ THE TAP, AND JUDGE ITS CONTENT.
+             ackmode=ack_requeue_true, so the message is put back: the tap is a private copy bound
+             beside the SUT's own consumer, and nothing here changes what the SUT receives. -->
+        <IfController guiclass="IfControllerPanel" testclass="IfController" testname="tap declared?" enabled="true">
+          <stringProp name="IfController.condition">${__jexl3("${__P(mq.tap.queue,)}" != "",)}</stringProp>
+          <boolProp name="IfController.useExpression">true</boolProp>
+          <boolProp name="IfController.evaluateAll">false</boolProp>
+        </IfController>
+        <hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-verify-tap-get" enabled="true">
+            <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.domain">${__P(mgmt.host,rabbitmq)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(mgmt.port,15672)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">http</stringProp>
+            <stringProp name="HTTPSampler.path">/api/queues/%2F/${__P(mq.tap.queue,)}/get</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                  <stringProp name="Argument.value">{"count":${__P(mq.tap.read_cap,20)},"ackmode":"ack_requeue_true","encoding":"auto"}</stringProp>
+                  <stringProp name="Argument.metadata">=</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="settle" enabled="true">
+              <stringProp name="ConstantTimer.delay">1200</stringProp>
+            </ConstantTimer>
+            <hashTree/>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="mgmt auth" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(mgmt.auth.header,)}</stringProp></elementProp>
+                <elementProp name="" elementType="Header"><stringProp name="Header.name">Content-Type</stringProp><stringProp name="Header.value">application/json</stringProp></elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="evaluate the tapped message (V30-004 F-3)" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="script">
+// V30-004 F-3 — THE PUBLISHED MESSAGE IS EVALUATED, NOT PROXIED.
+//
+// The management API answers an ARRAY of messages, each {payload, properties, routing_key, …}.
+// We select the one carrying THIS run's correlation id — in the payload or in a header property —
+// because the tap sees every message published to the exchange while it is bound, not only ours.
+//
+// Failure messages are reality-only (VR-C8): they name the ACTUAL value, never the test's expected
+// one. The field NAME is permitted, as database-state.jmx already shows.
+def code = (prev.getResponseCode() ?: "").toString()
+def body = (prev.getResponseDataAsString() ?: "")
+def rowCountP = (props.get("expect.row_count") ?: "").toString()
+def columnsP  = (props.get("expect.columns") ?: "").toString()
+def corr = (props.get("correlation.id") ?: "").toString()
+def cap = (props.get("mq.tap.read_cap") ?: "20").toString().toInteger()
+def fail = { String m -&gt; prev.setSuccessful(false); prev.setResponseMessage(m) }
+
+if (!code.startsWith("2")) {
+  fail("BROKER-REFUSED: tap read returned http " + code + " - the run could not measure")
+  return
+}
+prev.setSuccessful(true)
+
+def msgs
+try {
+  msgs = new groovy.json.JsonSlurper().parseText(body)
+} catch (ignored) {
+  fail("the broker answer is not JSON (" + body.take(120) + ")")
+  return
+}
+if (!(msgs instanceof List)) { fail("the broker answer is not a message array (" + body.take(120) + ")"); return }
+
+// the messages that belong to THIS run
+def mine = msgs.findAll { m -&gt;
+  def payload = (m?.payload ?: "").toString()
+  def hdrs = (m?.properties?.headers ?: [:])
+  payload.contains(corr) || hdrs.values().any { String.valueOf(it).contains(corr) }
+}
+if (mine.isEmpty()) {
+  if (msgs.size() &gt;= cap) {
+    fail("no tapped message for correlation_id " + corr + "; the tap returned " + msgs.size() + " message(s) (the read cap)")
+  } else {
+    fail("no tapped message for correlation_id " + corr + "; the tap returned " + msgs.size() + " message(s)")
+  }
+  return
+}
+if (rowCountP) {
+  int want = rowCountP.toInteger()
+  if (mine.size() != want) { fail("the tap holds " + mine.size() + " message(s) for correlation_id " + corr); return }
+}
+if (columnsP) {
+  def first = mine[0]
+  def parsed
+  try {
+    parsed = new groovy.json.JsonSlurper().parseText((first?.payload ?: "").toString())
+  } catch (ignored) {
+    fail("the tapped payload is not JSON (" + (first?.payload ?: "").toString().take(120) + ")")
+    return
+  }
+  // ⭐ V32 Release QA: A TWISTYGO MESSAGE IS A LIST. GoKit — the transport every the operator SUT publishes
+  // through — puts its data LIST on the wire (json.Marshal(dataList), gokit@v0.2.7 transport.json.go:9)
+  // and its own consumers unwrap it (order-processor: GetDataList()[0]). Measured on the demo SUT: with
+  // the tap bound, every message-flow content check failed "not an object". The object read is the one
+  // carrying THIS run's correlation id, else the list's only object; anything else is named, not guessed.
+  if (parsed instanceof List) {
+    def objs = parsed.findAll { it instanceof Map }
+    def withCorr = objs.findAll { groovy.json.JsonOutput.toJson(it).contains(corr) }
+    def pick = withCorr ? withCorr[0] : (objs.size() == 1 ? objs[0] : null)
+    if (pick == null) { fail("the tapped payload is a list of " + parsed.size() + " item(s) with no single object to read fields from"); return }
+    parsed = pick
+  }
+  if (!(parsed instanceof Map)) { fail("the tapped payload is not an object"); return }
+  for (pair in columnsP.split(";")) {
+    int eq = pair.indexOf("=")
+    if (eq &lt; 0) continue
+    def col = pair.substring(0, eq)
+    def want = pair.substring(eq + 1)
+    def actual = parsed.containsKey(col) ? String.valueOf(parsed.get(col)) : null
+    if (actual == null) { fail("field " + col + " not in the tapped payload (fields present: " + parsed.keySet().join(",") + ")"); return }
+    boolean okc
+    if (want == "__NULL__") {
+      okc = (actual == "" || actual.equalsIgnoreCase("null"))
+    } else {
+      def wants = want.split("\\|") as List   // alternation: NAME == A or B  ->  "A|B"
+      okc = wants.contains(actual)
+    }
+    if (!okc) { fail("tapped " + col + " actual " + actual); return }
+  }
+}
+              </stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+        <!-- ⭐ V30-004 F-4 — the same read, after the trigger. -->
+        <IfController guiclass="IfControllerPanel" testclass="IfController" testname="negative case?" enabled="true">
+          <stringProp name="IfController.condition">${__jexl3("${__P(mq.negative.queue,)}" != "",)}</stringProp>
+          <boolProp name="IfController.useExpression">true</boolProp>
+          <boolProp name="IfController.evaluateAll">false</boolProp>
+        </IfController>
+        <hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-verify-negative-after" enabled="true">
+            <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.domain">${__P(mgmt.host,rabbitmq)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(mgmt.port,15672)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">http</stringProp>
+            <stringProp name="HTTPSampler.path">/api/queues/%2F/${__P(mq.negative.queue,)}</stringProp>
+            <stringProp name="HTTPSampler.method">GET</stringProp>
+            <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer" testname="settle" enabled="true">
+              <stringProp name="ConstantTimer.delay">1200</stringProp>
+            </ConstantTimer>
+            <hashTree/>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="mgmt auth" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(mgmt.auth.header,)}</stringProp></elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="nothing was published for this run (V30-004 F-4)" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="script">
+// V30-004 F-4 — `- no rows` on a Message Flow scenario: the SUT must NOT have published for this run.
+//
+// ⚠ WHAT THIS CAN AND CANNOT PROVE, stated because the limit is real. A live queue is drained by the
+// SUT's own consumer, so a depth of 0 after the trigger proves only that the consumer was fast. What
+// is measurable is that the depth did not GROW across the trigger. A message published and consumed
+// inside the settle window is invisible to this check — the positive cases use a tap for exactly
+// that reason, and the negative case cannot, because a tap bound before the trigger would itself
+// hold the message the scenario asserts was never published.
+def hasRows = (props.get("expect.has_rows") ?: "true").toString()
+if (hasRows != "false") { prev.setSuccessful(true); return }
+
+def code = (prev.getResponseCode() ?: "").toString()
+def fail = { String m -&gt; prev.setSuccessful(false); prev.setResponseMessage(m) }
+if (!code.startsWith("2")) {
+  fail("BROKER-REFUSED: the queue read returned http " + code + " - the run could not measure")
+  return
+}
+prev.setSuccessful(true)
+
+def before = (vars.get("mf_baseline") ?: "unknown").toString()
+if (before == "unknown") {
+  fail("BROKER-REFUSED: the baseline read did not answer, so no comparison is possible - the run could not measure")
+  return
+}
+int after = 0
+try {
+  def q = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString() ?: "{}")
+  after = (q?.messages ?: 0) as int
+} catch (ignored) {
+  fail("the broker answer is not JSON (" + (prev.getResponseDataAsString() ?: "").take(120) + ")")
+  return
+}
+if (after &gt; before.toInteger()) {
+  fail("the queue's message count for this run grew from " + before + " to " + after)
+}
+              </stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+
+      </hashTree>
+      <!-- ⭐ V30-004 F-3 — THE TAP IS DELETED, ALWAYS.
+           A PostThreadGroup runs after the main thread group whatever its verdict, so a failed
+           scenario does not leave a queue bound to the SUT's exchange. The queue also carries
+           x-expires, so even a killed run is reaped by the broker itself — the tearDown is the
+           tidy path, the TTL is the guarantee. -->
+      <PostThreadGroup guiclass="PostThreadGroupGui" testclass="PostThreadGroup" testname="delete the tap" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">1</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">0</stringProp>
+        <boolProp name="ThreadGroup.scheduler">false</boolProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">1</stringProp>
+        </elementProp>
+      </PostThreadGroup>
+      <hashTree>
+        <IfController guiclass="IfControllerPanel" testclass="IfController" testname="tap declared?" enabled="true">
+          <stringProp name="IfController.condition">${__jexl3("${__P(mq.tap.queue,)}" != "",)}</stringProp>
+          <boolProp name="IfController.useExpression">true</boolProp>
+          <boolProp name="IfController.evaluateAll">false</boolProp>
+        </IfController>
+        <hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-verify-tap-delete" enabled="true">
+            <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+            <stringProp name="HTTPSampler.domain">${__P(mgmt.host,rabbitmq)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(mgmt.port,15672)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">http</stringProp>
+            <stringProp name="HTTPSampler.path">/api/queues/%2F/${__P(mq.tap.queue,)}</stringProp>
+            <stringProp name="HTTPSampler.method">DELETE</stringProp>
+            <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="mgmt auth" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(mgmt.auth.header,)}</stringProp></elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="the cleanup never fails the scenario (V30-004)" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="script">
+// ⛔ THE DELETE NEVER DECIDES A VERDICT. The scenario's answer is about the SUT; failing it because
+// our own cleanup call was refused would blame the responder for our housekeeping. x-expires is the
+// guarantee the queue goes away regardless, so a failed delete is at worst a queue that lingers for
+// its TTL — recorded in the log, never in the verdict.
+prev.setSuccessful(true)
+              </stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

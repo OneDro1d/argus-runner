@@ -1,0 +1,160 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.onedroid</groupId>
+  <artifactId>jmeter-amqp-sampler</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+  <name>JMeter AMQP Sampler (Publish)</name>
+  <description>JMeter Java sampler for AMQP publish throughput testing</description>
+
+  <properties>
+    <maven.compiler.source>1.8</maven.compiler.source>
+    <maven.compiler.target>1.8</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+    <!-- JMeter version you're running locally -->
+    <jmeter.version>5.6.3</jmeter.version>
+
+    <!-- RabbitMQ Java client implements AMQP 0-9-1 -->
+    <amqp.client.version>5.22.0</amqp.client.version>
+
+    <!-- Test dependencies -->
+    <junit.jupiter.version>5.10.2</junit.jupiter.version>
+    <!-- Mockito 4.x is the last line that still supports Java 8 -->
+    <mockito.version>4.11.0</mockito.version>
+
+    <!-- surefire tag selection: default = everything except the broker-backed "live" tests -->
+    <argus.test.groups></argus.test.groups>
+    <argus.test.excludedGroups>live</argus.test.excludedGroups>
+  </properties>
+
+  <profiles>
+    <!-- mvn -Plive test : ONLY the live tests, against the broker named by ARGUS_TEST_AMQP_* (see
+         AmqpLiveHarness). ARGUS_REQUIRE_AMQP=1 turns a missing broker into a FAILURE, never a skip. -->
+    <profile>
+      <id>live</id>
+      <properties>
+        <argus.test.groups>live</argus.test.groups>
+        <argus.test.excludedGroups>none-excluded</argus.test.excludedGroups>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <environmentVariables>
+                <ARGUS_REQUIRE_AMQP>1</ARGUS_REQUIRE_AMQP>
+              </environmentVariables>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+
+  <dependencies>
+    <!-- Compile against JMeter Java sampler APIs, but do NOT bundle them -->
+    <dependency>
+      <groupId>org.apache.jmeter</groupId>
+      <artifactId>ApacheJMeter_java</artifactId>
+      <version>${jmeter.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.jmeter</groupId>
+      <artifactId>ApacheJMeter_core</artifactId>
+      <version>${jmeter.version}</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- AMQP client library (RabbitMQ) -->
+    <dependency>
+      <groupId>com.rabbitmq</groupId>
+      <artifactId>amqp-client</artifactId>
+      <version>${amqp.client.version}</version>
+    </dependency>
+
+    <!-- Test dependencies (not bundled in shaded jar) -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-api</artifactId>
+      <version>${junit.jupiter.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-engine</artifactId>
+      <version>${junit.jupiter.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <version>${mockito.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-junit-jupiter</artifactId>
+      <version>${mockito.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Build a single "fat jar" so JMeter only needs one file -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-shade-plugin</artifactId>
+        <version>3.6.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <createDependencyReducedPom>false</createDependencyReducedPom>
+
+              <!-- Avoid bundling JMeter's own jars -->
+              <artifactSet>
+                <excludes>
+                  <exclude>org.apache.jmeter:*</exclude>
+                  <exclude>org.apache.logging.log4j:*</exclude>
+                  <exclude>org.slf4j:*</exclude>
+                </excludes>
+              </artifactSet>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Tests tagged "live" need the mission's throwaway RabbitMQ: excluded by default (the image build
+           and CI run without a broker), selected, and made loud when the broker is missing, by -Plive. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+        <configuration>
+          <groups>${argus.test.groups}</groups>
+          <excludedGroups>${argus.test.excludedGroups}</excludedGroups>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+        <configuration>
+          <source>${maven.compiler.source}</source>
+          <target>${maven.compiler.target}</target>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -1,0 +1,304 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Argus HTTP Ingestion template (derived from argus; argus stays pinned).
+     One request, parameterized via -J props. No ResponseAssertion: the runner-core
+     judges pass/fail by comparing the .jtl responseCode to the scenario's expected
+     status (JMeter's success flag conflates an expected 4xx with failure). The
+     header block threads correlation_id + auth + idempotency-key.
+ HTTPSampler.use_keepalive reads http.keepalive (default false = the request carries
+     Connection: close, as before). DeriveProps sets it true for a `## LOAD` check, so each simulated user
+     keeps ONE connection across its loops (the thread group's same-user default is left alone). A stringProp,
+     because JMeter evaluates no function inside a boolProp. -->
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Argus: HTTP Ingestion" enabled="true">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments"><collectionProp name="Arguments.arguments"/></elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="http-ingestion ${__P(scenario.id,unknown)}" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">${__P(load.users,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(load.ramp,0)}</stringProp>
+        <stringProp name="ThreadGroup.scheduler">${__P(load.scheduler,false)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(load.duration,0)}</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${__P(load.loops,1)}</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="Headers" enabled="true">
+          <collectionProp name="HeaderManager.headers">
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">Content-Type</stringProp><stringProp name="Header.value">application/json</stringProp></elementProp>
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">X-Correlation-Id</stringProp><stringProp name="Header.value">${__P(correlation.id,)}</stringProp></elementProp>
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(auth.header,)}</stringProp></elementProp>
+            <elementProp name="" elementType="Header"><stringProp name="Header.name">Idempotency-Key</stringProp><stringProp name="Header.value">${__P(idempotency.key,)}</stringProp></elementProp>
+          </collectionProp>
+        </HeaderManager>
+        <hashTree/>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}" enabled="true">
+          <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(http.host,localhost)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(http.port,8080)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(http.protocol,http)}</stringProp>
+          <stringProp name="HTTPSampler.path">${__P(trigger.path,/)}</stringProp>
+          <stringProp name="HTTPSampler.method">${__P(trigger.method,POST)}</stringProp>
+          <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">${__P(trigger.payload,{})}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="apply author headers (VR12-T3)" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="script">// VR12-T3 (V29-018): apply EVERY header the scenario's author declared in its ## TRIGGER.
+// The runner sets trigger.header_n and, per header i, trigger.header_i_name / _value.
+//
+// Until 0.3.31 the parser populated every declared header and the runner sent exactly ONE of
+// them (Authorization). SYN-MCP-002 and SYN-MCP-004 each declare
+// `Accept: application/json, text/event-stream` and neither ever sent it.
+//
+// An author header REPLACES the runner's for the same name — hence the remove-then-add. A
+// scenario that declares none leaves this block a no-op, so its bytes on the wire are IDENTICAL
+// to before this template changed.
+//
+// VR12-X10: header NAMES may be logged, values NEVER.
+def n = 0
+try { n = Integer.parseInt(props.get("trigger.header_n") ?: "0") } catch (e) { n = 0 }
+if (n &gt; 0) {
+  def hm = sampler.getHeaderManager()
+  if (hm == null) {
+    hm = new org.apache.jmeter.protocol.http.control.HeaderManager()
+    hm.setName("author headers")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.TEST_CLASS, "HeaderManager")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.GUI_CLASS, "HeaderPanel")
+    sampler.setHeaderManager(hm)
+  }
+  for (int i = 1; i &lt;= n; i++) {
+    def name = props.get("trigger.header_" + i + "_name")
+    if (name == null || name.trim().isEmpty()) { continue }
+    def value = props.get("trigger.header_" + i + "_value") ?: ""
+    hm.removeHeaderNamed(name)
+    hm.add(new org.apache.jmeter.protocol.http.control.Header(name, value))
+  }
+}</stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+        <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="record output for a compare run (ARGUS-CMP-3)" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="parameters"></stringProp>
+          <stringProp name="filename"></stringProp>
+          <stringProp name="cacheKey">true</stringProp>
+          <stringProp name="script">// ARGUS-CMP-3: hand the RAW response of this sampler to the executor, for a compare run.
+// ACTIVE ONLY when the property output.capture.dir is set. The executor sets it in mode compare, for a
+// check that declares `## COMPARE`, and never for a check that declares `## LOAD`. With it unset this block
+// does nothing, so every other run's samplers, .jtl and bytes on the wire are exactly what they were.
+//
+// Writes, for sample n (1-based, in firing order, at most 8): n.body (the raw response bytes, at most
+// 1 MiB + 1: one more than the cap is how the executor tells "too large" from "exactly the cap"),
+// n.headers (the response header lines) and, LAST, n.status (its presence says the sample is complete).
+// The Go side (internal/argus/outputs_capture.go) reads them, builds the record with compare.BuildRecord
+// and DELETES them on every path. Nothing is logged: not the response, not a header, not a value.
+def dir = props.getProperty("output.capture.dir")
+if (dir != null &amp;&amp; !dir.trim().isEmpty()) {
+  int n
+  synchronized (props) {
+    n = Integer.parseInt(props.getProperty("output.capture.seq") ?: "0") + 1
+    props.setProperty("output.capture.seq", String.valueOf(n))
+  }
+  if (n &lt;= 8) {
+    try {
+      byte[] data = prev.getResponseData()
+      if (data == null) { data = new byte[0] }
+      byte[] body = data.length &gt; 1048577 ? java.util.Arrays.copyOf(data, 1048577) : data
+      new File(dir, n + ".body").bytes = body
+      new File(dir, n + ".headers").bytes = (prev.getResponseHeaders() ?: "").getBytes("ISO-8859-1")
+      new File(dir, n + ".status").text = String.valueOf(prev.getResponseCode())
+    } catch (Throwable t) {
+      log.warn("output capture: sample " + n + " was not written")
+    }
+  }
+}</stringProp>
+        </JSR223PostProcessor>
+        <hashTree/>
+
+          <JSR223Assertion guiclass="TestBeanGUI" testclass="JSR223Assertion" testname="enforce body assertion (DF-04)" enabled="true">
+            <stringProp name="scriptLanguage">groovy</stringProp>
+            <stringProp name="parameters"></stringProp>
+            <stringProp name="filename"></stringProp>
+            <stringProp name="cacheKey">true</stringProp>
+            <stringProp name="script">// DF-04: enforce a scenario `body has &lt;field&gt; containing|matching &lt;x&gt;` assertion on
+// the status layer (was status-code-only = silent non-enforcement / false confidence).
+// The runner sets expect.body.count and, per assertion i, expect.body.i.field/op/value
+// (VR12-E8); the pre-0.3.31 scalars expect.body_contains / expect.body_matches are still
+// honoured as a fallback when the numbered set is absent. A mismatch
+// fails with a DISTINCT "BODY-ASSERT-FAIL" message that the runner combines with the code
+// verdict — so an expected-4xx is still judged by code, but its body assertion is enforced.
+// VR10-R1-12: the SUT answered 429 — it REFUSED to be measured because we were going too fast.
+// The .jtl has no header column, so this assertion is the ONLY place the response's Retry-After
+// can be read; it is copied verbatim into a distinct RATE-LIMITED marker the runner parses. The
+// runner decides what it MEANS (a scenario that EXPECTS 429 is testing the limiter and passes).
+if (prev.getResponseCode() == "429") {
+  def ra = ""
+  def hdrs = prev.getResponseHeaders() ?: ""
+  def raMatch = (hdrs =~ /(?im)^Retry-After: *(.+?) *$/)
+  if (raMatch.find()) { ra = raMatch.group(1).trim() }
+  AssertionResult.setFailure(true)
+  AssertionResult.setFailureMessage("RATE-LIMITED: retry_after=" + ra)
+  return
+}
+// VR12-E8 (V29-017): EVERY declared body assertion is evaluated and ALL must hold (AND).
+// The runner sets expect.body.count plus, per assertion i, expect.body.i.field/op/value.
+// A field-scoped assertion navigates a dotted path through the JSON response; a whole-response
+// assertion (empty field) searches the raw text, which is the `body contains ...` form.
+//
+// R4 - a field-scoped assertion that CANNOT be evaluated is a FAIL, never a pass and never a skip:
+// if the response is not JSON, or the field is absent, the assertion has not been satisfied.
+//
+// VR-C8 - no failure message may echo an asserted value; observed is product-hat-visible.
+def body = prev.getResponseDataAsString() ?: ""
+def n = 0
+try { n = Integer.parseInt(props.get("expect.body.count") ?: "0") } catch (e) { n = 0 }
+
+// LEGACY FALLBACK: an executor running a pre-0.3.31 runner sets only the old scalars. Honour them
+// when the numbered set is absent, so a mixed estate degrades to the old single-assertion
+// behaviour rather than to no enforcement at all.
+if (n == 0) {
+  def c = props.get("expect.body_contains")
+  def m = props.get("expect.body_matches")
+  if (c != null &amp;&amp; !c.trim().isEmpty() &amp;&amp; !body.contains(c)) {
+    AssertionResult.setFailure(true)
+    AssertionResult.setFailureMessage("BODY-ASSERT-FAIL: response body did not satisfy the expected body assertion")
+  } else if (m != null &amp;&amp; !m.trim().isEmpty() &amp;&amp; !(body =~ m)) {
+    AssertionResult.setFailure(true)
+    AssertionResult.setFailureMessage("BODY-ASSERT-FAIL: response body did not match the expected body pattern")
+  }
+  return
+}
+
+// goJson renders a parsed JSON value the way Go's encoding/json Marshal does, because the Go judge
+// (jsonField) does exactly that for a non-string field, and `equals` must agree with it: numbers go
+// through float64 (1.0 and 1e0 are "1", shortest form, plain below 1e21), object keys are sorted,
+// output is compact, strings escape " \ control chars and the HTML-sensitive characters (&lt; &gt; &amp;).
+def goNum = { Number num ->
+  double d = num.doubleValue()
+  if (d == 0d) { return (1d / d &lt; 0d) ? "-0" : "0" }
+  def bd = new BigDecimal(Double.toString(d)).stripTrailingZeros()
+  double ad = Math.abs(d)
+  if (ad &lt; 1e-6d || ad &gt;= 1e21d) {
+    def digits = bd.unscaledValue().abs().toString()
+    int e = digits.length() - bd.scale() - 1
+    def mant = digits.length() &gt; 1 ? digits.substring(0, 1) + "." + digits.substring(1) : digits
+    def es = Math.abs(e) &lt; 10 &amp;&amp; e &gt;= 0 ? "0" + e : String.valueOf(Math.abs(e))
+    return (d &lt; 0 ? "-" : "") + mant + "e" + (e &lt; 0 ? "-" : "+") + es
+  }
+  return bd.toPlainString()
+}
+def goStr = { String s ->
+  def sb = new StringBuilder("\"")
+  for (int k = 0; k &lt; s.length(); k++) {
+    char ch = s.charAt(k)
+    int c = (int) ch
+    if (c == 34) { sb.append("\\\"") }
+    else if (c == 92) { sb.append("\\\\") }
+    else if (c == 10) { sb.append("\\n") }
+    else if (c == 13) { sb.append("\\r") }
+    else if (c == 9) { sb.append("\\t") }
+    else if (c == 8) { sb.append("\\b") }
+    else if (c == 12) { sb.append("\\f") }
+    else if (c &lt; 32 || c == 60 || c == 62 || c == 38 || c == 0x2028 || c == 0x2029) { sb.append(String.format("\\u%04x", c)) }
+    else { sb.append(ch) }
+  }
+  return sb.append("\"").toString()
+}
+def goJson
+goJson = { x ->
+  if (x == null) { return "null" }
+  if (x instanceof Boolean) { return x.toString() }
+  if (x instanceof Number) { return goNum(x) }
+  if (x instanceof CharSequence) { return goStr(x.toString()) }
+  if (x instanceof Map) {
+    def keys = x.keySet().collect { it.toString() }.sort()
+    return "{" + keys.collect { goStr(it) + ":" + goJson(x[it]) }.join(",") + "}"
+  }
+  if (x instanceof List) { return "[" + x.collect { goJson(it) }.join(",") + "]" }
+  return groovy.json.JsonOutput.toJson(x)
+}
+
+// every failure of the numbered set ENDS with a fixed machine token,
+// " [argus-body-check=N]", N being the i of the failing expect.body.i.* entry. The runner maps N back to
+// the scenario's own bullet for the TEST hat only. The token is the index and nothing else: never a
+// field name, an asserted value or the body (VR-C8).
+def parsed = null
+def parseTried = false
+for (int i = 1; i &lt;= n; i++) {
+  def checkTok = " [argus-body-check=" + i + "]"
+  def f  = props.get("expect.body." + i + ".field") ?: ""
+  def op = props.get("expect.body." + i + ".op") ?: "contains"
+  def v  = props.get("expect.body." + i + ".value") ?: ""
+  def target = body
+  def fieldVal = null
+  if (!f.isEmpty()) {
+    if (!parseTried) {
+      parseTried = true
+      try { parsed = new groovy.json.JsonSlurper().parseText(body) } catch (e) { parsed = null }
+    }
+    if (parsed == null) {
+      AssertionResult.setFailure(true)
+      AssertionResult.setFailureMessage("BODY-ASSERT-FAIL: a field-scoped assertion cannot be evaluated against a non-JSON response - use `body contains &lt;value&gt;` for a text answer" + checkTok)
+      return
+    }
+    def cur = parsed
+    for (String seg : f.split("\\.")) {
+      if (cur instanceof Map) { cur = cur[seg] }
+      else if (cur instanceof List &amp;&amp; seg.isInteger()) { cur = cur[seg as int] }
+      else { cur = null }
+      if (cur == null) { break }
+    }
+    if (cur == null) {
+      AssertionResult.setFailure(true)
+      AssertionResult.setFailureMessage("BODY-ASSERT-FAIL: the asserted field is not present in the response body" + checkTok)
+      return
+    }
+    fieldVal = cur
+    target = (cur instanceof String) ? cur : groovy.json.JsonOutput.toJson(cur)
+  }
+  def ok = true
+  if (op == "exists") { ok = true }
+  else if (op == "matches") { ok = (target =~ v).find() }
+  else if (op == "contains") { ok = target.contains(v) }
+  else if (op == "equals") {
+    // EXACT, with the Go judge's semantics (internal/mcp/judge.go bodyAssertMiss:
+    // `target != a.Value`). A scoped field is compared as the Go judge renders it: a string as itself,
+    // anything else as encoding/json would marshal it. The whole-body form compares the raw body.
+    def eqText = f.isEmpty() ? body : ((fieldVal instanceof String) ? fieldVal : goJson(fieldVal))
+    ok = (eqText == v)
+  }
+  else {
+    // Every op the grammar can put on this path is handled above (the numeric ops are refused at
+    // validation, item 25). Anything else is NOT judged as `contains`: it fails, by name.
+    AssertionResult.setFailure(true)
+    AssertionResult.setFailureMessage("BODY-ASSERT-FAIL: unsupported body-assertion operator '" + op + "' on this template - the assertion was not evaluated" + checkTok)
+    return
+  }
+  if (!ok) {
+    AssertionResult.setFailure(true)
+    AssertionResult.setFailureMessage("BODY-ASSERT-FAIL: response body did not satisfy the expected body assertion" + checkTok)
+    return
+  }
+}</stringProp>
+          </JSR223Assertion>
+          <hashTree/>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

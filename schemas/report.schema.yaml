@@ -1,0 +1,88 @@
+# report.schema.yaml — the normalized Argus run report (VR-D2)
+#
+# Extends argus's native report.json (scripts/report.py) by structuring the
+# per-scenario `failure` into {expected, observed} (LOCKED, plan §3.2.2). argus
+# emits `failure` as a string ("code: message" = the observed); `get-report`
+# normalizes: observed from the .jtl/report, expected joined from the scenario's
+# parsed EXPECT. Role-gating: the product hat receives `observed`, never `expected`.
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://onedroid.ai/schemas/report.schema.yaml"
+title: "Argus run report"
+type: object
+additionalProperties: true   # argus may add fields (timestamp, mode); we tolerate
+required: [project, summary, layers]
+properties:
+  project: { type: string }
+  timestamp: { type: string, format: date-time }
+  mode: { enum: [ci, continuous] }
+  summary:
+    type: object
+    additionalProperties: false
+    required: [total, passed, failed, skipped]
+    properties:
+      total: { type: integer, minimum: 0 }
+      passed: { type: integer, minimum: 0 }
+      failed: { type: integer, minimum: 0 }
+      skipped: { type: integer, minimum: 0 }
+      errored: { type: integer, minimum: 0, description: "Execution/harness failures (status=error), DISTINCT from a SUT failed (UC-62). omitempty." }
+      rate_limit_pauses: { type: integer, minimum: 0, description: "Times THIS RUN paused between scenarios because the SUT throttled it (VR10-R1). omitempty." }
+      rate_limited_scenarios: { type: integer, minimum: 0, description: "Scenarios that ended NOT MEASURED because the SUT throttled them. Counted inside `errored`, never in passed/failed (VR10-R1). omitempty." }
+      rate_limit_cap_hit: { type: boolean, description: "The run stopped pausing because max_pauses / max_total_wait was reached (VR10-R1). omitempty." }
+      note: { type: string, description: "The summary's own sentence to the operator — today, the rate-limit cap message. omitempty." }
+  layers:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [layer, scenarios]
+      properties:
+        layer: { type: string }
+        scenarios:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, status, duration_ms]
+            properties:
+              id: { type: string }
+              status: { enum: [passed, failed, skipped, error] }
+              duration_ms: { type: integer, minimum: 0 }
+              correlation_id: { type: string }
+              req_success: { type: integer, minimum: 0, description: "SUT requests fired with a positive response (r3). omitempty." }
+              req_failed: { type: integer, minimum: 0, description: "SUT requests with a negative RESPONSE — 4xx/5xx, MCP isError/protocol (r3); NOT the scenario verdict. omitempty." }
+              req_error: { type: integer, minimum: 0, description: "SUT requests that got no response — conn-fail/unreachable/transport (r3). omitempty." }
+              rate_limited: { type: boolean, description: "The SUT refused this scenario with its DECLARED throttle signature — not measured (VR10-R1). Rides status=error. omitempty." }
+              rate_limited_retries: { type: integer, minimum: 0, description: "Times the run re-fired this scenario after pausing (0 or 1). omitempty." }
+              paused_ms: { type: integer, minimum: 0, description: "Wall-clock the run spent paused for this scenario's throttle. omitempty." }
+              steps:
+                type: array
+                description: "Per-step results for a chained scenario (DEC-07). omitempty."
+                items:
+                  type: object
+                  additionalProperties: true
+                  properties:
+                    name: { type: string }
+                    status: { enum: [passed, failed, skipped, error] }
+                    observed: { type: string }
+                    correlation_id: { type: string }
+              mcp_envelope: { description: "The judged JSON-RPC envelope for an mcp scenario (VR-J10). omitempty." }
+              failure:
+                type: object
+                additionalProperties: false
+                required: [observed]
+                properties:
+                  expected:
+                    type: string
+                    description: "The test's assertion (from scenario EXPECT). TEST-HAT ONLY — redacted for product hat."
+                  observed:
+                    type: string
+                    description: "Actual reality from the run (response code/message, saga/log). Always present on a failure."
+                  failed_body_check:
+                    type: object
+                    additionalProperties: false
+                    required: [index, bullet]
+                    properties:
+                      index: { type: integer, minimum: 1, description: "1-based position of the failing check among the scenario's runnable body checks." }
+                      bullet: { type: string, description: "The failing `body …` bullet as written." }
+                    description: "WHICH body check failed. TEST-HAT ONLY — redacted for product hat, like expected. omitempty."
+                description: "Present only on failed scenarios."

@@ -1,0 +1,243 @@
+# argus-config.schema.yaml — the SUT config contract (VR-A1)
+#
+# Derived from argus `argus-config.example.yaml`. `validate-config` checks a config
+# against this schema AND runs argus preflight.py (layer<->targets coverage).
+$schema: "https://json-schema.org/draft/2020-12/schema"
+$id: "https://onedroid.ai/schemas/argus-config.schema.yaml"
+title: "argus-config"
+type: object
+additionalProperties: true
+required: [project, targets]
+properties:
+  project:
+    type: object
+    required: [name]
+    properties:
+      name: { type: string }
+  targets:
+    type: object
+    # VR10-S3 (V28-012): keys under `targets` are STRICT in code — an unknown key is refused at load,
+    # by name, with the accepted list. Beside each plain slot a `<kind>_targets` map holds any number
+    # of named extras of the SAME shape; a scenario selects one by `- **Target**: <name>`.
+    additionalProperties: false
+    description: "Only include sections for the layers you test (preflight enforces coverage)."
+    properties:
+      http:
+        $ref: "#/$defs/http_target"
+      http_targets:
+        type: object
+        additionalProperties: { $ref: "#/$defs/http_target" }
+      message_broker:
+        $ref: "#/$defs/message_broker_target"
+      message_broker_targets:
+        type: object
+        additionalProperties: { $ref: "#/$defs/message_broker_target" }
+      database:
+        $ref: "#/$defs/database_target"
+      database_targets:
+        type: object
+        additionalProperties: { $ref: "#/$defs/database_target" }
+      external:
+        oneOf: [{ type: array }, { type: object }]
+      auth:
+        type: object
+        properties:
+          # VR-TH1: `api-key` and `mtls` REMOVED 2026-09-22 — neither had any implementation, and
+          # neither COULD be honoured as declared: AuthTarget carries exactly one credential field
+          # (bearer_token), so there is no header-name for an api-key and no cert/key pair for mtls.
+          type: { enum: [bearer, none] }
+          bearer_token: { type: string }
+      mcp:
+        $ref: "#/$defs/mcp_target"
+      mcp_targets:
+        type: object
+        additionalProperties: { $ref: "#/$defs/mcp_target" }
+  scenarios:
+    type: object
+    properties:
+      timeout_default: { type: string, pattern: "^[0-9]+(ms|s)$" }
+      # V29-015: `cleanup_enabled` REMOVED — ## CLEANUP always runs; there is no off switch.
+      parallel_layers: { type: boolean }
+  # VR10-R1 (V28-009): the SUT DECLARES its own rate limit and how it says "you are going too fast".
+  # TOP-LEVEL, never under `targets`. The retired key there was about TESTING a limiter and is gone
+  # (VR10-S3-13; V28-019 owns that concept); this block is about RESPECTING one. Absent = nothing
+  # changes: Argus never guesses a throttle.
+  #
+  # Unknown keys under rate_limit / signature / pause are refused at load, by name, in CODE — the
+  # `additionalProperties: false` below documents that; it does not enforce it.
+  # T5.4: this SUT moves real money. Turns on the money-path guard, ENFORCED IN CODE at both doors
+  # (config.Validate and argus.runOneScenario, via scenario.MoneyGuardViolations): only plain HTTP
+  # GETs run; MCP, UI, AMQP and non-GET chain steps, any CLEANUP that runs something, and any path
+  # naming order/quote/swap/rebalance/claim are refused by name. Absent = false = nothing changes.
+  money_handling:
+    type: boolean
+    description: "true = this SUT moves real money: every scenario must be a plain HTTP GET on a non-money path, with CLEANUP N/A. Refused otherwise, at validate time AND at run time."
+  # S9: the operator's explicit mark of the broker targets an `AMQP Load` scenario may
+  # drive. TOP-LEVEL, never under `targets` (an older executor decodes `targets` strictly and would refuse
+  # a new key there; a top-level key is ignored by it). OFF BY DEFAULT: absent / empty / unlisted = every
+  # AMQP Load run is refused before anything is sent. ENFORCED IN CODE (config.LoadRefusal), at
+  # validate-config AND in argus.runOneScenario. A shared/production-looking broker URL is refused.
+  load_allowed_targets:
+    type: object
+    # an entry may also name a targets.http_targets entry, the target of an `HTTP Load` ramp;
+    # max_sessions then caps the users of a step. A shared/production-looking base_url is refused.
+    description: "name under targets.message_broker_targets (AMQP Load) or targets.http_targets (HTTP Load) -> { max_sessions }. Use only for a lab or dedicated test broker or deployment, never a live one."
+    additionalProperties:
+      type: object
+      additionalProperties: false
+      properties:
+        max_sessions: { type: integer, minimum: 1, maximum: 10000, description: "Largest step this target may be asked for. Default 2000." }
+  # the environment variable NAMES the checks use inside their own bodies, headers or chain steps
+  # (`${SOME_PASSWORD}`), which no credential field names. TOP-LEVEL, never under `targets` (an older executor
+  # decodes `targets` strictly): an executor built before this key IGNORES it, silently, so the names are never
+  # scanned or delivered. NAMES ONLY, never values; each is read from <product-dir>/.env at onboarding exactly like
+  # a credential `${VAR}`, and a name missing there is reported by name. Named `check_env` after `url_env` (an
+  # amqp step's env-var NAME) and because a scenario is a "check" to its author.
+  check_env:
+    type: array
+    maxItems: 64
+    description: "Environment variable NAMES to deliver to the executor (letters A-Z, digits, underscore; not ARGUS_*, and none of the process-control names below). This list decides what is DELIVERED; any name present in the executor's environment is substituted by a `${NAME}` in a check. Names only, never values."
+    items:
+      type: string
+      # Mirrored from config.CheckEnvReservedNames / CheckEnvReservedPrefixes (internal/config/checkenv.go);
+      # TestCheckEnv_ReservedListAndSchemaDoNotDrift fails when the two differ. These names change how the
+      # executor process itself runs, and on Kubernetes a declared name's value lands in the Secret the
+      # executor pod takes its environment from.
+      allOf:
+        - pattern: "^[A-Z_][A-Z0-9_]*$"
+        - not: { pattern: "^ARGUS_" }
+        - not: { pattern: "^LD_" }
+        - not: { pattern: "^KUBERNETES_" }
+        - not: { pattern: "^(PATH|HOME|USER|SHELL|PWD|HOSTNAME|TMPDIR|JAVA_TOOL_OPTIONS|JAVA_HOME|GODEBUG|SSL_CERT_FILE|SSL_CERT_DIR|HTTP_PROXY|HTTPS_PROXY|NO_PROXY)$" }
+  # `load_test: never` on a test_targets entry. TOP-LEVEL block (never under `targets`), strict
+  # inside: an executor built before the key refuses the whole config that carries it, so upgrade the executor first.
+  test_targets:
+    type: array
+    description: "Named slices of one instance's checks (docs/runbooks/TEST-TARGETS.md)."
+    items:
+      type: object
+      additionalProperties: false
+      required: [name, match]
+      properties:
+        name: { type: string, pattern: "^[a-z][a-z0-9-]{0,31}$" }
+        label: { type: string }
+        namespace: { type: string, description: "Informational; a load run's environment capture reads it. Refused together with outside_cluster." }
+        outside_cluster: { type: boolean, description: "true = the system this target names does not run in a Kubernetes cluster (a hosted app behind a CDN): a load run's environment capture reads nothing from Kubernetes for it and says so. Refused together with namespace. Absent or false = today's behaviour. An executor built before this key refuses the whole config that carries it, so upgrade the executor first." }
+        description: { type: string }
+        match:
+          type: object
+          additionalProperties: false
+          properties:
+            scenario_prefixes: { type: array, items: { type: string } }
+            tags: { type: array, items: { type: string } }
+        dashboard_link_template: { type: string }
+        load_test: { enum: [never], description: "never = this target must never be loaded: validate-config refuses a load check of it, the executor will not fire one, Capacity says 'not load tested, by declaration'. Absent = today's behaviour." }
+  rate_limit:
+    type: object
+    additionalProperties: false
+    required: [requests, per]
+    properties:
+      requests: { type: integer, minimum: 1, description: "How many requests the SUT accepts per window." }
+      per: { enum: [minute, second], description: "The window. Nothing else is accepted." }
+      signature:
+        type: object
+        additionalProperties: false
+        properties:
+          body_contains: { type: string, description: "The stable text in this SUT's refusal, matched against the MCP tool-error content. On the HTTP path the signature is the 429 status + Retry-After, and this is not consulted." }
+          retry_after_field: { type: string, description: "Optional: the JSON field carrying the retry-after SECONDS. Absent -> the run pauses for the declared window." }
+      pause:
+        type: object
+        additionalProperties: false
+        properties:
+          max_pauses: { type: integer, minimum: 0, description: "Pauses allowed in ONE run. Default 3." }
+          max_total_wait: { type: string, description: "Total wall-clock ONE run may spend paused, e.g. 180s. Default 180s." }
+          retry_once: { type: boolean, description: "Re-fire a throttled scenario once after the pause. Default true." }
+  observability:
+    type: object
+    properties:
+      prometheus: { type: object }
+      loki: { type: object }
+      grafana:
+        type: object
+        properties:
+          dashboard_template: { type: string }   # COMMON - the same on every tier
+          # PER-TIER (M3-FX): the browser-facing Grafana base. It is the only field in this file
+          # whose correct value differs per environment. MANDATORY for the tier being onboarded to;
+          # that requirement is enforced in CODE, not here, because the schema cannot know which
+          # tier a given onboard targets.
+          #
+          # NOTE FOR ANYONE EDITING THIS FILE: nothing in the product loads this schema. It is the
+          # published CONTRACT people read, and it is kept accurate for that reason - but adding a
+          # `required:` here enforces nothing at runtime.
+          public_url:
+            type: object
+            additionalProperties: false
+            properties:
+              compose: { type: string }
+              k3d:     { type: string }
+              managed: { type: string }
+      # UI-2: an operator-set dashboard link template for ANY tool (Grafana, Zabbix,
+      # Datadog, an internal page). The control plane renders it per run, so it works for every past run.
+      # Placeholders: {run_id} {correlation_id} {instance} {target} {from} {to} ({from}/{to} are epoch
+      # milliseconds; {correlation_id} is the run's prefix tr-<run_id>). Refused at load: not an absolute
+      # http(s) URL, userinfo, ${VAR}, an unknown placeholder, an unmatched brace, over 2048 bytes.
+      # See docs/ARGUS-GRAFANA-CONTRACT.md "Bring your own dashboard".
+      dashboard_link:
+        type: object
+        properties:
+          template: { type: string, maxLength: 2048 }
+          label:    { type: string, maxLength: 60 }   # button text; default "Open dashboard"
+
+# One shape per kind, shared by the plain slot and by its `<kind>_targets` map (VR10-S3 / V28-012):
+# a named entry has EXACTLY the fields of its plain slot. `type:` on database/message_broker is
+# documentation the product does not read (the JDBC driver is chosen from the URL).
+$defs:
+  http_target:
+    type: object
+    additionalProperties: false
+    properties:
+      base_url: { type: string }
+  mcp_target:
+    type: object
+    additionalProperties: false
+    properties:
+      base_url: { type: string }
+      transport: { enum: [streamable-http, http-sse] }
+      timeout_seconds: { type: integer }
+      auth:
+        type: object
+        additionalProperties: false
+        properties:
+          type: { enum: [bearer, none] }
+          bearer_token: { type: string }
+  database_target:
+    type: object
+    additionalProperties: false
+    properties:
+      # VR-TH1: WIDENED to the JDBC drivers the execution plane actually ships
+      # (jmeter-plugins/amqp/docker/install-jdbc-drivers.sh). The driver is chosen from
+      # the jdbc_url, never from this key, so [postgres, mysql] was NARROWER than reality and denied
+      # mariadb/sqlserver/sqlite SUTs that work today. Oracle stays out: that script skips it on
+      # licence grounds. ⚠ Enforced in internal/config (targetTypeErrors) — NOT by this file, which
+      # nothing reads at run time.
+      type: { enum: [postgres, postgresql, mysql, mariadb, sqlserver, sqlite, none] }
+      jdbc_url: { type: string }
+      username: { type: string, description: "MUST be read-only (Layer-3 contract)" }
+      password: { type: string }
+  message_broker_target:
+    type: object
+    additionalProperties: false
+    properties:
+      # VR-TH1: `kafka` REMOVED 2026-09-22 (the operator: "remove Kafka and any other tools we don't
+      # actually have"). There is no Kafka engine anywhere in the tree — internal/amqpengine is the
+      # only broker implementation — and this key is never dispatched on, so a `kafka` config was
+      # accepted and then handled by the AMQP engine. Re-add it the day an engine exists, not before.
+      type: { enum: [amqp, none] }
+      url: { type: string }
+      management_url: { type: string }
+      exchanges: { type: object }
+      queues: { type: object }
+      # V30-004: the key the Message Flow tap binds with. `targets` is decoded with KnownFields(true)
+      # and this block is additionalProperties:false, so the struct, the schema and the validator
+      # must gain it together or a config carrying it is REFUSED rather than ignored.
+      routing_keys: { type: object, description: "binding keys per exchange; `incoming` is the one the content tap binds with (V30-004)" }

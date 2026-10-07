@@ -1,0 +1,20 @@
+{
+  "name": "onedroid-ui-testkit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Vendored Playwright/Clerk UI testing subset for the OneDroid Testing Suite (D4). No private dev-kit dependency.",
+  "scripts": {
+    "capture-auth": "node auth/capture-auth.mjs",
+    "mint-auth": "node auth/mint-clerk-session.mjs",
+    "test:dev": "playwright test --project=chromium-dev",
+    "test:live": "playwright test --project=live",
+    "test:live:headed": "playwright test --project=live --headed",
+    "show-trace": "playwright show-trace",
+    "show-report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/node": "^22.0.0"
+  }
+}

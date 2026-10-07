@@ -1,0 +1,15 @@
+# The package this deployment certifies: the production overlay (images by digest), never the
+# legacy overlay beside it; the app's own schema, secrets example and seed-data document.
+project:
+  name: declared-package
+targets:
+  http:
+    base_url: http://app:8080
+package:
+  manifests:
+    - k8s/overlays/prod
+  lockfiles:
+    - go.sum
+  env_schema: config/env.schema.json
+  secrets_example: config/secrets.example.yaml
+  seed: docs/SEED.md

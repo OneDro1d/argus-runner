@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Argus saga-presence template (Decision-2, 2026-06-19): JMeter judges the saga
+     IN THE MIDDLE. It fires the control-action HTTP trigger (which self-judges its
+     status: a 4xx/5xx fails the sample), then a JSR223 (Groovy) step polls Loki's
+     query_range from the IN-NETWORK vantage (loki:3100, not the host's localhost) for
+     the mandated control_action saga keyed by correlation_id, with the obs-infra
+     service exclusion (mirrors obsquery.ObsInfraExclusion / FINDING-4 so it never
+     self-matches Loki's own query logs). Verdict flows back via the .jtl success flag
+     (the runner judges saga-presence like a content layer). Fails CLOSED if Loki is
+     unreachable; the failure message is reality-only (names the missing saga +
+     correlation_id, never the test's expected value — VR-C8). -->
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Argus: Saga Presence" enabled="true">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments"><collectionProp name="Arguments.arguments"/></elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="saga-presence ${__P(scenario.id,unknown)}" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">${__P(load.users,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(load.ramp,0)}</stringProp>
+        <stringProp name="ThreadGroup.scheduler">${__P(load.scheduler,false)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(load.duration,0)}</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${__P(load.loops,1)}</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="${__P(scenario.id,unknown)}-trigger" enabled="true">
+          <stringProp name="HTTPSampler.connect_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.response_timeout">${__P(trigger.timeout_ms,)}</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(http.host,localhost)}</stringProp>
+          <stringProp name="HTTPSampler.port">${__P(http.port,8080)}</stringProp>
+          <stringProp name="HTTPSampler.protocol">${__P(http.protocol,http)}</stringProp>
+          <stringProp name="HTTPSampler.path">${__P(trigger.path,/)}</stringProp>
+          <stringProp name="HTTPSampler.method">${__P(trigger.method,POST)}</stringProp>
+          <stringProp name="HTTPSampler.use_keepalive">${__P(http.keepalive,false)}</stringProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+            <collectionProp name="Arguments.arguments">
+              <elementProp name="" elementType="HTTPArgument">
+                <boolProp name="HTTPArgument.always_encode">false</boolProp>
+                <stringProp name="Argument.value">${__P(trigger.payload,{})}</stringProp>
+                <stringProp name="Argument.metadata">=</stringProp>
+              </elementProp>
+            </collectionProp>
+          </elementProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+        <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="apply author headers (VR12-T3)" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="script">// VR12-T3 (V29-018): apply EVERY header the scenario's author declared in its ## TRIGGER.
+// The runner sets trigger.header_n and, per header i, trigger.header_i_name / _value.
+//
+// Until 0.3.31 the parser populated every declared header and the runner sent exactly ONE of
+// them (Authorization). SYN-MCP-002 and SYN-MCP-004 each declare
+// `Accept: application/json, text/event-stream` and neither ever sent it.
+//
+// An author header REPLACES the runner's for the same name — hence the remove-then-add. A
+// scenario that declares none leaves this block a no-op, so its bytes on the wire are IDENTICAL
+// to before this template changed.
+//
+// VR12-X10: header NAMES may be logged, values NEVER.
+def n = 0
+try { n = Integer.parseInt(props.get("trigger.header_n") ?: "0") } catch (e) { n = 0 }
+if (n &gt; 0) {
+  def hm = sampler.getHeaderManager()
+  if (hm == null) {
+    hm = new org.apache.jmeter.protocol.http.control.HeaderManager()
+    hm.setName("author headers")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.TEST_CLASS, "HeaderManager")
+    hm.setProperty(org.apache.jmeter.testelement.TestElement.GUI_CLASS, "HeaderPanel")
+    sampler.setHeaderManager(hm)
+  }
+  for (int i = 1; i &lt;= n; i++) {
+    def name = props.get("trigger.header_" + i + "_name")
+    if (name == null || name.trim().isEmpty()) { continue }
+    def value = props.get("trigger.header_" + i + "_value") ?: ""
+    hm.removeHeaderNamed(name)
+    hm.add(new org.apache.jmeter.protocol.http.control.Header(name, value))
+  }
+}</stringProp>
+        </JSR223PreProcessor>
+        <hashTree/>
+
+          <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="trigger headers" enabled="true">
+            <collectionProp name="HeaderManager.headers">
+              <elementProp name="" elementType="Header"><stringProp name="Header.name">Content-Type</stringProp><stringProp name="Header.value">application/json</stringProp></elementProp>
+              <elementProp name="" elementType="Header"><stringProp name="Header.name">X-Correlation-Id</stringProp><stringProp name="Header.value">${__P(correlation.id,)}</stringProp></elementProp>
+              <elementProp name="" elementType="Header"><stringProp name="Header.name">Authorization</stringProp><stringProp name="Header.value">${__P(auth.header,)}</stringProp></elementProp>
+            </collectionProp>
+          </HeaderManager>
+          <hashTree/>
+        </hashTree>
+
+        <JSR223Sampler guiclass="TestBeanGUI" testclass="JSR223Sampler" testname="${__P(scenario.id,unknown)}-verify-saga" enabled="true">
+          <stringProp name="scriptLanguage">groovy</stringProp>
+          <stringProp name="parameters"></stringProp>
+          <stringProp name="filename"></stringProp>
+          <stringProp name="cacheKey">true</stringProp>
+          <stringProp name="script">
+import groovy.json.JsonSlurper
+
+def base = (props.get("loki.url") ?: "http://loki:3100").toString()
+def corr = (props.get("correlation.id") ?: "").toString()
+def step = (props.get("loki.expected_saga") ?: "control_action").toString()
+// #419: the SUT's DECLARED names, resolved by the Go reader's own accessors (argus.go DeriveProps ->
+// obsquery.SagaJudgeFields) and passed as props. There is deliberately NO default table here: a
+// missing prop means the runner did not send it, and the verdict then fails rather than guess.
+def jsonList = { String name ->
+  def raw = (props.get(name) ?: "[]").toString()
+  def v = new JsonSlurper().parseText(raw)
+  return (v instanceof List) ? v.collect { it.toString() } : []
+}
+def corrField = (props.get("loki.corr_field") ?: "").toString()
+def sagaField = (props.get("loki.saga_field") ?: "").toString()
+def sagaValues = jsonList("loki.saga_values")
+def stepFields = jsonList("loki.step_fields")
+def logfmt = (props.get("loki.log_format") ?: "json").toString().equalsIgnoreCase("logfmt")
+int attempts = Integer.parseInt((props.get("loki.poll_attempts") ?: "15").toString())
+long settleMs = Long.parseLong((props.get("loki.settle_ms") ?: "1500").toString())
+long intervalMs = Long.parseLong((props.get("loki.poll_interval_ms") ?: "1000").toString())
+
+// logfmt: `k=v` / `k="quoted v"`; anything that is not a pair (a stdlib-logger date/level prefix) is
+// skipped. Mirrors obsquery.splitLogfmt.
+def parseLogfmt = { String s ->
+  def m = [:]
+  int i = 0
+  while (i &lt; s.length()) {
+    int eq = s.indexOf("=", i)
+    if (eq &lt; 0) { break }
+    int ks = eq
+    while (ks &gt; i &amp;&amp; !Character.isWhitespace(s.charAt(ks - 1))) { ks-- }
+    String key = s.substring(ks, eq)
+    int j = eq + 1
+    StringBuilder val = new StringBuilder()
+    if (j &lt; s.length() &amp;&amp; s.charAt(j) == (char) '"') {
+      j++
+      while (j &lt; s.length()) {
+        char c = s.charAt(j)
+        if (c == (char) '\\' &amp;&amp; j + 1 &lt; s.length()) { val.append(s.charAt(j + 1)); j += 2; continue }
+        if (c == (char) '"') { j++; break }
+        val.append(c); j++
+      }
+    } else {
+      while (j &lt; s.length() &amp;&amp; !Character.isWhitespace(s.charAt(j))) { val.append(s.charAt(j)); j++ }
+    }
+    if (key ==~ /[A-Za-z_][A-Za-z0-9_.\-]*/) { m[key] = val.toString() }
+    i = j
+  }
+  return m
+}
+
+// One log line -> a field map, or null when it cannot be parsed (skipped: never a pass, never a crash).
+def parseLine = { String line ->
+  try {
+    def v = new JsonSlurper().parseText(line)
+    return (v instanceof Map) ? v : null
+  } catch (Throwable ignore) { }
+  if (logfmt) {
+    def m = parseLogfmt(line)
+    return m.isEmpty() ? null : m
+  }
+  return null
+}
+
+// THE VERDICT, on ONE parsed line: the SUT's correlation field is exactly this run's id, its saga
+// field holds one of its declared saga values, and its step-name field IS the expected step. The
+// step name is the first declared/fallback field with a non-empty value (obsquery.stepField).
+def isSagaStep = { Map m ->
+  if (corrField.isEmpty() || sagaField.isEmpty() || sagaValues.isEmpty() || stepFields.isEmpty()) { return false }
+  if (m[corrField] == null || m[corrField].toString() != corr) { return false }
+  if (m[sagaField] == null || !sagaValues.contains(m[sagaField].toString())) { return false }
+  def name = ""
+  for (f in stepFields) {
+    def v = m[f]
+    if (v != null &amp;&amp; !v.toString().isEmpty()) { name = v.toString(); break }
+  }
+  return name == step
+}
+
+// obs-infra exclusion mirrors obsquery.ObsInfraExclusion (FINDING-4): never self-match Loki's own query logs.
+def excl = "loki|promtail|grafana|prometheus|pushgateway|jmeter"
+def lq = { String s -> '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"' }
+// The line filters only NARROW the query; the verdict comes from the parsed fields above.
+def logql = '{service=~".+",service!~"' + excl + '"} |= ' + lq(corr) + ' |= ' + lq(step)
+
+long endNs = System.currentTimeMillis() * 1000000L
+long startNs = endNs - (15L * 60L * 1000000000L)
+
+boolean found = false
+Throwable lastErr = null
+if (settleMs &gt; 0) { sleep(settleMs) } // initial settle for the stdout-&gt;promtail-&gt;Loki hop
+for (int i = 0; i &lt; attempts &amp;&amp; !found; i++) {
+  try {
+    String q = URLEncoder.encode(logql, "UTF-8")
+    String u = base + "/loki/api/v1/query_range?limit=300&amp;direction=backward&amp;start=" + startNs + "&amp;end=" + endNs + "&amp;query=" + q
+    HttpURLConnection conn = (HttpURLConnection) new URL(u).openConnection()
+    conn.setConnectTimeout(3000)
+    conn.setReadTimeout(5000)
+    int code = conn.getResponseCode()
+    if (code == 200) {
+      String body = conn.getInputStream().getText("UTF-8")
+      def doc = new JsonSlurper().parseText(body)
+      for (stream in (doc?.data?.result ?: [])) {
+        for (pair in (stream.values ?: [])) {
+          def m = parseLine(pair[1].toString())
+          if (m != null &amp;&amp; isSagaStep(m)) { found = true; break }
+        }
+        if (found) { break }
+      }
+    }
+  } catch (Throwable e) {
+    lastErr = e
+  }
+  if (!found &amp;&amp; intervalMs &gt; 0) { sleep(intervalMs) }
+}
+
+if (found) {
+  SampleResult.setSuccessful(true)
+  SampleResult.setResponseMessage("control_action saga present for " + corr)
+  SampleResult.setResponseData("saga-presence OK: " + corr, "UTF-8")
+} else if (lastErr != null) {
+  SampleResult.setSuccessful(false)
+  SampleResult.setResponseMessage("saga-presence not verifiable: Loki unreachable (" + lastErr.getClass().getSimpleName() + ") - failing closed")
+  SampleResult.setResponseData("saga-presence fail-closed for " + corr, "UTF-8")
+} else {
+  SampleResult.setSuccessful(false)
+  SampleResult.setResponseMessage("control_action saga not found in Loki for correlation_id " + corr + " (saga-presence FAIL)")
+  SampleResult.setResponseData("saga-presence FAIL: control_action not found in Loki for " + corr, "UTF-8")
+}
+          </stringProp>
+        </JSR223Sampler>
+        <hashTree/>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Argus AMQP Load template: one JMeter thread = one AMQP SESSION.
+     Per thread: set the session up ONCE (connect, declare + bind its own queue, arm the consumer), then
+     loop until the scheduler stops the thread group: publish (paced by a per-thread throughput timer)
+     and, when the publish went out, wait for its delivery. internal/argus (runAMQPLoad) runs this plan
+     ONCE PER STEP of the declared ramp with load.users = that step's session count, and reads the JTL
+     (internal/amqpload). It has no HTTP trigger and no assertion of its own: the verdict is the ramp's.
+
+     THE SAMPLER CONTRACT (design DESIGN-AMQP §2.B/§2.C), classes com.onedroid.jmeter.amqp.*:
+       AmqpSessionSetupSampler  label <id>-amqp-setup    one row per session
+       AmqpPublishSampler       label <id>-amqp-publish  responseMessage `published <n>B confirm=<mode> us=<µs>`;
+                                                        503 `blocked by broker: <reason> (since=<epoch ms>)`
+       AmqpSubscribeSampler     label <id>-amqp-deliver  responseMessage `delivered <n>B us=<µs> redelivered=<bool>`;
+                                                        timeStamp = the SEND time; 408 on no delivery
+     The sampler sets its own label (it beats the JMX element name), so every sampler is also handed a
+     `label` argument.
+
+     CREDENTIALS: ${__P(mq.amqp.*)} are the property names DeriveProps already emits for the AC-D16 refusal
+     sampler and secret_props.go already protects: mq.amqp.password travels in the private 0600
+     properties file, never as -J, so JMeter never echoes it into its run log.
+
+     ⛔ LoopController.loops is -1 (forever): the scheduler (load.scheduler / load.duration) is what ends
+     the step. Every other template runs ONE iteration per thread; a message STREAM needs its own loop.
+     ⛔ properties are read with ${__P(name,default)}, never as ${name} variables (T-C). -->
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Argus: AMQP Load" enabled="true">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">true</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments"><collectionProp name="Arguments.arguments"/></elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="amqp-load ${__P(scenario.id,unknown)} step ${__P(amqp.step,1)}" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(load.users,1)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(load.ramp,0)}</stringProp>
+        <stringProp name="ThreadGroup.scheduler">${__P(load.scheduler,false)}</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(load.duration,0)}</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">-1</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <!-- 1. THE SESSION, once per thread (S6). Its post-processor records whether it came up; a thread
+             whose session did not come up STOPS (an empty infinite loop would spin the CPU). -->
+        <OnceOnlyController guiclass="OnceOnlyControllerGui" testclass="OnceOnlyController" testname="session setup, once per thread" enabled="true"/>
+        <hashTree>
+          <JavaSampler guiclass="JavaTestSamplerGui" testclass="JavaSampler" testname="${__P(scenario.id,unknown)}-amqp-setup" enabled="true">
+            <elementProp name="arguments" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="amqp_uri" elementType="Argument"><stringProp name="Argument.name">amqp_uri</stringProp><stringProp name="Argument.value">${__P(mq.amqp.uri,)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="username" elementType="Argument"><stringProp name="Argument.name">username</stringProp><stringProp name="Argument.value">${__P(mq.amqp.username,)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="password" elementType="Argument"><stringProp name="Argument.name">password</stringProp><stringProp name="Argument.value">${__P(mq.amqp.password,)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="session" elementType="Argument"><stringProp name="Argument.name">session</stringProp><stringProp name="Argument.value">${__P(amqp.run,)}-s${__P(amqp.step,1)}-${__threadNum}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="exchange" elementType="Argument"><stringProp name="Argument.name">exchange</stringProp><stringProp name="Argument.value">${__P(amqp.exchange,amq.direct)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="routing_key" elementType="Argument"><stringProp name="Argument.name">routing_key</stringProp><stringProp name="Argument.value">argus-load.${__P(amqp.run,)}.${__P(amqp.step,1)}.${__threadNum}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="queue" elementType="Argument"><stringProp name="Argument.name">queue</stringProp><stringProp name="Argument.value">${__P(amqp.queue_prefix,argus-load)}-${__P(amqp.run,)}-s${__P(amqp.step,1)}-${__threadNum}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="queue_type" elementType="Argument"><stringProp name="Argument.name">queue_type</stringProp><stringProp name="Argument.value">${__P(amqp.queue_type,classic)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="queue_expires_ms" elementType="Argument"><stringProp name="Argument.name">queue_expires_ms</stringProp><stringProp name="Argument.value">${__P(amqp.expires_ms,300000)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="prefetch" elementType="Argument"><stringProp name="Argument.name">prefetch</stringProp><stringProp name="Argument.value">${__P(amqp.prefetch,100)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="ack" elementType="Argument"><stringProp name="Argument.name">ack</stringProp><stringProp name="Argument.value">${__P(amqp.ack,manual)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="connect_timeout_ms" elementType="Argument"><stringProp name="Argument.name">connect_timeout_ms</stringProp><stringProp name="Argument.value">${__P(amqp.connect_timeout_ms,10000)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="label" elementType="Argument"><stringProp name="Argument.name">label</stringProp><stringProp name="Argument.value">${__P(scenario.id,unknown)}-amqp-setup</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+              </collectionProp>
+            </elementProp>
+            <stringProp name="classname">com.onedroid.jmeter.amqp.AmqpSessionSetupSampler</stringProp>
+          </JavaSampler>
+          <hashTree>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="record whether the session came up" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="script">
+// One thread, one session. A thread whose session did not come up has nothing to publish on: it ends
+// here (JMeterThread.stop() lets the current iteration finish, then the thread leaves its loop).
+vars.put("amqp_session_ok", prev.isSuccessful() ? "1" : "0")
+if (!prev.isSuccessful()) { ctx.getThread().stop() }
+              </stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+
+        <!-- 2. THE STREAM: publish at the declared rate, then wait for that message's delivery. -->
+        <IfController guiclass="IfControllerPanel" testclass="IfController" testname="session up?" enabled="true">
+          <stringProp name="IfController.condition">${__jexl3("${amqp_session_ok}" == "1",)}</stringProp>
+          <boolProp name="IfController.useExpression">true</boolProp>
+          <boolProp name="IfController.evaluateAll">false</boolProp>
+        </IfController>
+        <hashTree>
+          <JavaSampler guiclass="JavaTestSamplerGui" testclass="JavaSampler" testname="${__P(scenario.id,unknown)}-amqp-publish" enabled="true">
+            <elementProp name="arguments" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="amqp_uri" elementType="Argument"><stringProp name="Argument.name">amqp_uri</stringProp><stringProp name="Argument.value">${__P(mq.amqp.uri,)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="username" elementType="Argument"><stringProp name="Argument.name">username</stringProp><stringProp name="Argument.value">${__P(mq.amqp.username,)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="password" elementType="Argument"><stringProp name="Argument.name">password</stringProp><stringProp name="Argument.value">${__P(mq.amqp.password,)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="session" elementType="Argument"><stringProp name="Argument.name">session</stringProp><stringProp name="Argument.value">${__P(amqp.run,)}-s${__P(amqp.step,1)}-${__threadNum}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="exchange" elementType="Argument"><stringProp name="Argument.name">exchange</stringProp><stringProp name="Argument.value">${__P(amqp.exchange,amq.direct)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="routing_key" elementType="Argument"><stringProp name="Argument.name">routing_key</stringProp><stringProp name="Argument.value">argus-load.${__P(amqp.run,)}.${__P(amqp.step,1)}.${__threadNum}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="message_size_bytes" elementType="Argument"><stringProp name="Argument.name">message_size_bytes</stringProp><stringProp name="Argument.value">${__P(amqp.size,1000)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="message_body" elementType="Argument"><stringProp name="Argument.name">message_body</stringProp><stringProp name="Argument.value">${__RandomString(${__P(amqp.size,1000)},abcdefghijklmnopqrstuvwxyz0123456789)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="confirm" elementType="Argument"><stringProp name="Argument.name">confirm</stringProp><stringProp name="Argument.value">${__P(amqp.confirm,each)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="confirm_timeout_ms" elementType="Argument"><stringProp name="Argument.name">confirm_timeout_ms</stringProp><stringProp name="Argument.value">${__P(amqp.confirm_timeout_ms,5000)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                <elementProp name="label" elementType="Argument"><stringProp name="Argument.name">label</stringProp><stringProp name="Argument.value">${__P(scenario.id,unknown)}-amqp-publish</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+              </collectionProp>
+            </elementProp>
+            <stringProp name="classname">com.onedroid.jmeter.amqp.AmqpPublishSampler</stringProp>
+          </JavaSampler>
+          <hashTree>
+            <!-- the rate: this thread only, samples per MINUTE = msg/s x 60. It is attached to the PUBLISH
+                 alone, so the wait for a delivery is never paced. -->
+            <ConstantThroughputTimer guiclass="TestBeanGUI" testclass="ConstantThroughputTimer" testname="rate per session" enabled="true">
+              <intProp name="calcMode">0</intProp>
+              <stringProp name="throughput">${__jexl3(${__P(amqp.rate,1)} * 60.0,)}</stringProp>
+            </ConstantThroughputTimer>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="did the publish go out?" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+              <stringProp name="script">
+// Without this a blocked broker would make every loop wait the deliver timeout for a message that was never sent.
+vars.put("amqp_published_ok", prev.isSuccessful() ? "1" : "0")
+              </stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+          <IfController guiclass="IfControllerPanel" testclass="IfController" testname="publish went out?" enabled="true">
+            <stringProp name="IfController.condition">${__jexl3("${amqp_published_ok}" == "1",)}</stringProp>
+            <boolProp name="IfController.useExpression">true</boolProp>
+            <boolProp name="IfController.evaluateAll">false</boolProp>
+          </IfController>
+          <hashTree>
+            <JavaSampler guiclass="JavaTestSamplerGui" testclass="JavaSampler" testname="${__P(scenario.id,unknown)}-amqp-deliver" enabled="true">
+              <elementProp name="arguments" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments">
+                <collectionProp name="Arguments.arguments">
+                  <elementProp name="session" elementType="Argument"><stringProp name="Argument.name">session</stringProp><stringProp name="Argument.value">${__P(amqp.run,)}-s${__P(amqp.step,1)}-${__threadNum}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                  <elementProp name="timeout_ms" elementType="Argument"><stringProp name="Argument.name">timeout_ms</stringProp><stringProp name="Argument.value">${__P(amqp.deliver_timeout_ms,5000)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                  <elementProp name="ack" elementType="Argument"><stringProp name="Argument.name">ack</stringProp><stringProp name="Argument.value">${__P(amqp.ack,manual)}</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                  <elementProp name="label" elementType="Argument"><stringProp name="Argument.name">label</stringProp><stringProp name="Argument.value">${__P(scenario.id,unknown)}-amqp-deliver</stringProp><stringProp name="Argument.metadata">=</stringProp></elementProp>
+                </collectionProp>
+              </elementProp>
+              <stringProp name="classname">com.onedroid.jmeter.amqp.AmqpSubscribeSampler</stringProp>
+            </JavaSampler>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

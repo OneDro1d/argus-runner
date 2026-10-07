@@ -1,0 +1,92 @@
+# argus-config for Memstore (the OneDroid knowledge-base MCP — a THIRD real the operator service
+# shape: an MCP server with an async worker constellation). The CANONICAL "honest minimal
+# SUT" reference: it is behavioural-MCP-testable now, and everything it does NOT emit is a
+# DECLARED GAP (below), never a mysterious blank panel. See docs/COMPATIBLE-SUT.md +
+# examples/memstore/MEMSTORE-CONFORMANCE-REQUIREMENTS-FOR-DEVS.md.
+#
+# Memstore runs with AUTH_MODE=none locally, so the keyless surface (liveness + MCP transport)
+# needs no credential. The content path (namespace -> write -> search) needs the embedding/LLM
+# provider key + the worker constellation and is a documented HARD-STOP for M2 (DF-DEC-009).
+project:
+  name: memstore
+
+# The SUT's compose project + network — the onboarder READS these (RO-10) to join the execution
+# plane to Memstore's network; onboarding hard-fails without deploy.network (RO-07). Memstore's
+# docker-compose.yml declares no `name:`, so the project defaults to its DIRECTORY name
+# (acme-knowledge-base-mcp) and the network to <project>_default. If you cloned Memstore into a
+# differently-named folder, or run it with `-p <other>`, set these to match `docker network ls`.
+deploy:
+  compose_project: acme-knowledge-base-mcp
+  network: acme-knowledge-base-mcp_default
+
+targets:
+  # HTTP edge — used by the keyless health / mcp-initialize HTTP scenarios. targets.http means
+  # the SUT's HTTP EDGE, and Memstore's edge is the gateway; it is never repointed at an internal
+  # port (a test agent did that on 2026-09-02 and it was reverted the same day).
+  http:
+    base_url: http://memstore-gateway:8090
+
+  # Second HTTP surface (VR10-S3 / V28-012): memstore-graph's own health port. Its /health runs a
+  # live Neo4j ping — the only endpoint that proves the Neo4j credential works. NEO-010/011
+  # select it with `- **Target**: graph`; every other HTTP scenario keeps the gateway above.
+  http_targets:
+    graph:
+      base_url: http://memstore-graph:8096
+
+  # MCP endpoint (CHANGE-1) — the streamable-HTTP transport at /mcp; AUTH_MODE=none locally.
+  # The mcp/chain scenarios resolve their endpoint from here (no MCP_URL env).
+  mcp:
+    base_url: http://memstore-gateway:8090/mcp
+    transport: streamable-http
+    auth:
+      type: none
+
+scenarios:
+  timeout_default: 15s
+  parallel_layers: false
+
+# ── DECLARED GAPS (the honest floor — do NOT paper over with a blank panel) ──────────────
+# These are why Memstore's BOTTOM "SUT Observability" dashboard tier shows honest empty-states.
+# Full parity needs Memstore's owner to close them — see MEMSTORE-CONFORMANCE-REQUIREMENTS-FOR-DEVS.md.
+#
+#  - /metrics:      NONE. Memstore exposes no Prometheus endpoint → prometheus DISABLED below.
+#                   (No dashboard panel depends on it — the request/error-rate panel is now
+#                   runner-owned (the Loki request-event stream), so a missing /metrics is NOT a gap.)
+#  - structured logs: Memstore does NOT yet ship JSON-to-stdout with a correlation field, so
+#                   tail-logs / the Logs panel are blind (COMPATIBLE-SUT HARD #3 — declared gap).
+#  - correlation:   NO inbound correlation propagation into a log field (HARD-STOP for cross-layer
+#                   triage). In-band, the MCP handle is result._meta.request_id / result.id only.
+#  - sagas:         NONE (no event_type=saga) → the Saga timeline panel is empty (declared gap).
+#  - read-only DB:  no Database-State role exposed for tests (no targets.database).
+#
+# Net: behavioural MCP scenarios GREEN; correlation / saga / metrics = declared gaps.
+#
+# The gaps the suite CANNOT derive from the config (no field implies them) are declared
+# here so the onboarding preflight (argus capabilities) echoes them honestly. The DB gap
+# is derived automatically (no targets.database). (/metrics is no longer a gap — the
+# request/error-rate panel is runner-owned, sourced from the Loki request-event stream.)
+declared_gaps:
+  - "correlation: no inbound correlation propagation into a log field (HARD-STOP for cross-layer triage); in-band the MCP handle is result._meta.request_id only"
+  - "saga: none emitted (no event_type=saga) → the Saga timeline panel is honestly empty"
+  - "logs: no structured JSON-to-stdout with a correlation field → tail-logs / the Logs panel are blind (COMPATIBLE-SUT HARD #3)"
+
+observability:
+  # LOG-FIELD TRANSLATION TABLE — declared explicitly for completeness (the operator-default values), but
+  # MOOT for Memstore: it ships no structured JSON logs to stdout and propagates no inbound
+  # correlation id (both declared gaps below), and emits no sagas — so the Logs + Saga panels are
+  # honestly empty regardless of these values. See onboarding/HOW-TO-ARGUS-CONFIG.md.
+  loki:
+    correlation_field: correlation_id      # 1. (moot — no structured logs / no inbound correlation propagation)
+    level_field: level                     # 2.
+    saga_event_field: event_type           # 3. (moot — Memstore emits no sagas)
+    saga_event_value: saga                 # 4.
+  prometheus:
+    enabled: false                         # Memstore exposes no /metrics (declared gap) — was mis-set to true
+  grafana:
+    dashboard_template: dashboards/argus-overview.json
+    # PER-TIER (M3-FX): the Grafana a HUMAN opens in a browser. MANDATORY for the tier you onboard
+    # to - onboarding STOPS if this tier has no value. On a k8s tier `localhost` is not your machine.
+    public_url:
+      compose: http://localhost:3000
+      k3d:     http://localhost:3000
+      managed: https://grafana.example.com

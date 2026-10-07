@@ -1,0 +1,16 @@
+<!-- The declared-assertions spec's bounded wait: this page is EMPTY at first paint and renders its
+     content 1.5s later, the way an SPA does once its auth script has loaded (a WEBUI-001 run,
+     run). It also asks an auth host that never resolves (.invalid is reserved,
+     RFC 2606) for a script, so a check that times out has a failed Clerk request to name. -->
+<body>
+<div id="root"></div>
+<script src="https://clerk.argus-fixture.invalid/npm/clerk.browser.js"></script>
+<script>
+  setTimeout(function () {
+    var card = document.createElement('div');
+    card.className = 'cl-rootBox';
+    card.textContent = 'Sign in to OneDroid';
+    document.getElementById('root').appendChild(card);
+  }, 1500);
+</script>
+</body>
