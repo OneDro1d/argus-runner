@@ -121,22 +121,26 @@ func chainBodyNote(observed string) string {
 	return strings.Replace(observed, mcp.ClaimsHeldOutNote, chainClaimsNote, 1)
 }
 
-// failedBodyClaims lists, in written order and capped at report.MaxFailedClaims, each of the step's
-// content claims that did not hold against text. written and bound are the same claims before and
-// after ${saved.<var>} binding (bindBodyAsserts keeps the length); vars is the capture store the
-// binding read; scrub (may be nil) cleans an observed value of anything that must not be printed
-// (the amqp step's broker URL).
-func failedBodyClaims(text string, written, bound []mcp.BodyAssert, vars map[string]string, scrub func(string) string) []report.FailedClaim {
+// failedBodyClaims lists, in written order, each of the step's content claims that did not hold against
+// text, up to the backstop report.MaxFailedClaims. It keeps JUDGING past the backstop and returns how
+// many further claims did not hold: the caller sets StepResult.FailedClaimsOmitted from
+// it, and that count goes nowhere else (author-only, never into Observed). written and bound are the
+// same claims before and after ${saved.<var>} binding (bindBodyAsserts keeps the length); vars is the
+// capture store the binding read; scrub (may be nil) cleans an observed value of anything that must
+// not be printed (the amqp step's broker URL).
+func failedBodyClaims(text string, written, bound []mcp.BodyAssert, vars map[string]string, scrub func(string) string) ([]report.FailedClaim, int) {
 	if len(written) != len(bound) {
-		return nil
+		return nil, 0
 	}
 	var out []report.FailedClaim
+	omitted := 0
 	for i := range bound {
-		if len(out) >= report.MaxFailedClaims {
-			break
-		}
 		miss, observed := mcp.BodyAssertObservation(text, bound[i])
 		if !miss {
+			continue
+		}
+		if len(out) >= report.MaxFailedClaims {
+			omitted++
 			continue
 		}
 		if scrub != nil {
@@ -154,7 +158,7 @@ func failedBodyClaims(text string, written, bound []mcp.BodyAssert, vars map[str
 			Observed: report.TruncateObserved(observed),
 		})
 	}
-	return out
+	return out, omitted
 }
 
 // ownNumericSaved names the saved variable a numeric claim's threshold is, when the threshold is one

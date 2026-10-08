@@ -2,6 +2,7 @@ package chain
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -135,16 +136,20 @@ func TestFailedClaims_HTTP_BoundedInCountAndLength(t *testing.T) {
 	long := strings.Repeat("x", 2000)
 	srv := newSeqServer(t, map[string][]string{"/b": {long}})
 	var want []mcp.BodyAssert
-	for i := 0; i < 12; i++ {
-		want = append(want, mcp.BodyAssert{Op: mcp.BodyContainsOp, Value: "absent-" + string(rune('a'+i))})
+	for i := 0; i < 107; i++ {
+		want = append(want, mcp.BodyAssert{Op: mcp.BodyContainsOp, Value: fmt.Sprintf("absent-%03d", i)})
 	}
 	st := httpStepWith(srv.URL, 200, nil, want...).Run("cid", map[string]string{})
 	got := failedClaimsOf(t, st)
-	// The documented bounds (report.StepResult.FailedClaims): 10 entries, 200 bytes of observed
-	// value, then the suffix below. Pinned here as literals so changing either is a visible decision.
-	const maxEntries, maxObserved, suffix = 10, 200, "... (truncated)"
+	// The documented bounds (report.StepResult.FailedClaims): a BACKSTOP of 100 entries,
+	// 200 bytes of observed value, then the suffix below. Pinned here as literals so changing either is a
+	// visible decision.
+	const maxEntries, maxObserved, suffix = 100, 200, "... (truncated)"
+	if report.MaxFailedClaims != maxEntries {
+		t.Fatalf("the backstop moved: MaxFailedClaims = %d, pinned %d", report.MaxFailedClaims, maxEntries)
+	}
 	if len(got) != maxEntries {
-		t.Fatalf("want exactly %d entries (12 missed), got %d", maxEntries, len(got))
+		t.Fatalf("want exactly %d entries (107 missed), got %d", maxEntries, len(got))
 	}
 	for _, e := range got {
 		if len(e.Observed) > maxObserved+len(suffix) {
@@ -154,8 +159,53 @@ func TestFailedClaims_HTTP_BoundedInCountAndLength(t *testing.T) {
 			t.Fatalf("a cut observed value must say so: %q", e.Observed[len(e.Observed)-30:])
 		}
 	}
-	if got[0].Claim != `content contains "absent-a"` {
-		t.Errorf("entries keep the order the claims were written in, got first %q", got[0].Claim)
+	if got[0].Claim != `content contains "absent-000"` || got[maxEntries-1].Claim != `content contains "absent-099"` {
+		t.Errorf("the FIRST claims in written order are listed, got first %q last %q", got[0].Claim, got[maxEntries-1].Claim)
+	}
+	if st.FailedClaimsOmitted != 7 {
+		t.Errorf("107 missed, 100 listed: want FailedClaimsOmitted 7, got %d", st.FailedClaimsOmitted)
+	}
+	// the count is the report's `failed_claims_omitted` key, and it is NOT in the step's observed text
+	b, _ := json.Marshal(st)
+	if !strings.Contains(string(b), `"failed_claims_omitted":7`) {
+		t.Errorf("the step's JSON must carry failed_claims_omitted: %s", b)
+	}
+	if strings.Contains(st.Observed, "7") || strings.Contains(st.Observed, "omitted") {
+		t.Errorf("the count is author-only and must not enter Observed: %q", st.Observed)
+	}
+}
+
+// a step with 12 false claims lists all 12, in written order, the
+// claims that held are absent, and nothing is reported omitted.
+func TestFailedClaims_HTTP_TwelveFalseClaimsAreAllListed(t *testing.T) {
+	srv := newSeqServer(t, map[string][]string{"/b": {`{"v": 1, "ok": "yes"}`}})
+	var want []mcp.BodyAssert
+	var falseOnes []string
+	for i := 0; i < 12; i++ {
+		want = append(want, mcp.BodyAssert{Field: "v", Op: mcp.BodyGTOp, Value: fmt.Sprintf("%d", 100+i)})
+		falseOnes = append(falseOnes, fmt.Sprintf("field v > %d", 100+i))
+		if i%3 == 0 { // true claims interleaved
+			want = append(want, mcp.BodyAssert{Field: "ok", Op: mcp.BodyEqualsOp, Value: "yes"})
+		}
+	}
+	st := httpStepWith(srv.URL, 200, nil, want...).Run("cid", map[string]string{})
+	got := failedClaimsOf(t, st)
+	if len(got) != 12 {
+		t.Fatalf("want all 12 false claims listed, got %d: %+v", len(got), got)
+	}
+	for i, e := range got {
+		if e.Claim != falseOnes[i] {
+			t.Errorf("entry %d: want %q (written order), got %q", i, falseOnes[i], e.Claim)
+		}
+		if strings.Contains(e.Claim, "ok") {
+			t.Errorf("a claim that held is listed: %+v", e)
+		}
+	}
+	if st.FailedClaimsOmitted != 0 {
+		t.Errorf("nothing was left out, want FailedClaimsOmitted 0, got %d", st.FailedClaimsOmitted)
+	}
+	if b, _ := json.Marshal(st); strings.Contains(string(b), "failed_claims_omitted") {
+		t.Errorf("a complete list carries no failed_claims_omitted key: %s", b)
 	}
 }
 

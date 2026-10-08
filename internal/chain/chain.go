@@ -47,6 +47,10 @@ func stepOutcome(status string) string {
 type Step struct {
 	Name string
 	Run  func(cid string, vars map[string]string) report.StepResult
+	// RunUntil, when non-nil, is called INSTEAD of Run by chain.Run and is given the chain's `## TIMEOUT`
+	// deadline (zero = none declared), so a step can bound its own I/O by the time the chain has left
+	// (#621: the http step). Run must stay set and equal RunUntil with a zero deadline.
+	RunUntil func(cid string, vars map[string]string, deadline time.Time) report.StepResult
 	// Needs reports whether this step CAN be given its inputs from the capture store, WITHOUT
 	// calling the SUT (VR12-CH1 rule 3). A non-nil error means an earlier step never produced
 	// something this one references, so the step is `not-measured` and is never fired — a step
@@ -367,8 +371,12 @@ var stepGrace = 5 * time.Second
 // nobody reads, so it can never reach the finished run's results. A panic in st.Run is carried back
 // and re-raised on the caller's goroutine, where it always surfaced.
 func callStep(st Step, cid string, vars map[string]string, deadline time.Time) (sr report.StepResult, abandoned bool) {
+	call := st.Run
+	if st.RunUntil != nil {
+		call = func(c string, v map[string]string) report.StepResult { return st.RunUntil(c, v, deadline) }
+	}
 	if deadline.IsZero() {
-		return st.Run(cid, vars), false
+		return call(cid, vars), false
 	}
 	left := max(time.Until(deadline), 0)
 	limit := left + stepGrace
@@ -390,7 +398,7 @@ func callStep(st Step, cid string, vars map[string]string, deadline time.Time) (
 			}
 			ch <- d
 		}()
-		d.sr = st.Run(cid, own)
+		d.sr = call(cid, own)
 		d.did = true
 	}()
 	timer := time.NewTimer(limit)
@@ -519,7 +527,7 @@ func MCPStep(name string, cl *mcp.Client, tool, argsJSON string, expect mcp.Expe
 				// failure record that does not exist. `expect` is the claims as written, `want` the
 				// bound copy the judge compared.
 				st.Observed = chainBodyNote(v.Observed)
-				st.FailedClaims = failedBodyClaims(mcp.BodyClaimText(res, want), expect.Body, want.Body, vars, nil)
+				st.FailedClaims, st.FailedClaimsOmitted = failedBodyClaims(mcp.BodyClaimText(res, want), expect.Body, want.Body, vars, nil)
 			}
 			if v.RateLimited {
 				// NOT MEASURED, not failed. The rollup below promotes the whole chain scenario on it.

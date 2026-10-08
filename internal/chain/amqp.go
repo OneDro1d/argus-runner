@@ -466,6 +466,7 @@ func judgeBroker(out amqpengine.Outcome, body []byte, want scenario.AMQPStepWant
 	// non-empty alongside a `broker refuses` claim — scenario.AMQPStepClaims refuses that pairing at
 	// authoring time), so `pass` here is exactly "did the message arrive".
 	var failed []report.FailedClaim
+	failedOmitted := 0 // claims past the list's backstop (author-only, never in observed)
 	if !pass {
 		// the broker claim itself did not hold (body claims are never evaluated then)
 		failed = []report.FailedClaim{{Claim: want.Broker.String(), Observed: report.TruncateObserved(observed)}}
@@ -476,7 +477,7 @@ func judgeBroker(out amqpengine.Outcome, body []byte, want scenario.AMQPStepWant
 			pass = false
 			observed = "broker accepted the " + what + ", but the delivered message did not satisfy the " +
 				"scenario's content assertion " + chainClaimsNote
-			failed = failedBodyClaims(string(body), want.Body, boundBody, vars, func(s string) string { return scrubBroker(s, urlEnv) })
+			failed, failedOmitted = failedBodyClaims(string(body), want.Body, boundBody, vars, func(s string) string { return scrubBroker(s, urlEnv) })
 		}
 	}
 	st := report.StepResult{Status: "failed", Observed: observed,
@@ -485,6 +486,7 @@ func judgeBroker(out amqpengine.Outcome, body []byte, want scenario.AMQPStepWant
 		st.Status = "passed"
 	} else {
 		st.FailedClaims = failed
+		st.FailedClaimsOmitted = failedOmitted
 	}
 	return st
 }

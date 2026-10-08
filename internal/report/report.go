@@ -587,14 +587,24 @@ type StepResult struct {
 	// FailedClaims names, for a step that failed on its CLAIMS,
 	// each claim that did not hold — AS WRITTEN (`${saved.<var>}` left unbound) — with the value the
 	// SUT showed for that claim's field on the LAST attempt of the step (a polled step: the last poll).
-	// A claim that held is not listed. At most MaxFailedClaims entries, in the order the claims were
-	// written; each observed value is cut to MaxFailedClaimObserved bytes (see FailedClaim).
+	// A claim that held is not listed. EVERY claim that did not hold is listed, in the order the claims
+	// were written, up to the backstop MaxFailedClaims; each observed value is cut to
+	// MaxFailedClaimObserved bytes (see FailedClaim). Past the backstop the rest are COUNTED in
+	// FailedClaimsOmitted, never silently dropped.
 	//
 	// ⛔ AUTHOR-ONLY, AND IT CARRIES THE SUT'S OBSERVED VALUES: redactExpected NILs it for the product
 	// hat (internal/toolcore), it is not among the fields runner.RelayedReport copies, and it never
 	// enters the federation push. A saved value is never printed here either: the claim is the written
 	// text, and an observed value equal to a saved value is shown as its placeholder.
 	FailedClaims []FailedClaim `json:"failed_claims,omitempty"`
+	// FailedClaimsOmitted is how many claims did NOT hold on the same attempt FailedClaims came from
+	// but are not listed there because the list reached MaxFailedClaims (the events_omitted
+	// precedent). Absent (0) means the list is complete.
+	//
+	// ⛔ AUTHOR-ONLY, LIKE FailedClaims: redactExpected zeroes it BY NAME for the product hat, it is not
+	// among the fields runner.RelayedReport copies, and it never enters the federation push. It is NEVER
+	// written into Observed or any product-hat text — how many hidden claims failed is holdout material.
+	FailedClaimsOmitted int `json:"failed_claims_omitted,omitempty"`
 	// RanAfterFailure marks a step that executed AFTER the chain's first failure (VR12-CH1 rule 4).
 	// Its status carries the same fact, but a machine consumer should not have to parse a string.
 	RanAfterFailure bool `json:"ran_after_failure,omitempty"`
@@ -614,9 +624,11 @@ type StepResult struct {
 	Output *RecordedOutput `json:"-"`
 }
 
-// MaxFailedClaims is the most entries StepResult.FailedClaims carries; the rest are dropped (the
-// step's AssertionsEnforced still lists every claim it evaluated).
-const MaxFailedClaims = 10
+// MaxFailedClaims is the BACKSTOP on StepResult.FailedClaims, not a working limit: a real step lists
+// every claim that did not hold (a cap of 10 cut an 11th red silently while the
+// step's observed text called the list the full record). Claims past it are counted in
+// StepResult.FailedClaimsOmitted. Each entry stays bounded by MaxFailedClaimObserved.
+const MaxFailedClaims = 100
 
 // MaxFailedClaimObserved is the longest observed value (in bytes, before FailedClaimTruncatedSuffix)
 // one FailedClaim carries. An unscoped claim (`body contains …`) is judged against the whole response,

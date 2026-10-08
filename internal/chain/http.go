@@ -3,6 +3,7 @@ package chain
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -62,6 +63,8 @@ type httpJudged struct {
 	// failed is the per-claim record of THIS attempt: each claim that did not hold,
 	// as written, with what this attempt observed. A polled step keeps the last attempt's.
 	failed []report.FailedClaim
+	// failedOmitted counts the claims that did not hold on THIS attempt but are past the list's backstop.
+	failedOmitted int
 }
 
 // HTTPStep builds the native-HTTP step. method/urlTmpl/headers/bodyTmpl are already resolved for
@@ -123,13 +126,15 @@ func HTTPStepWithOutput(name, method, urlTmpl string, headers map[string]string,
 			if nonNumeric {
 				reason = "a numeric comparison in the scenario's body assertion(s) found a non-numeric observed value"
 			}
+			failed, omitted := failedBodyClaims(string(raw), bodyWant, boundWant, vars, nil)
 			return httpJudged{status: status, pass: false, reachedBody: true,
 				// VR-C8 twin: reality-only, never echoes the asserted value (the test hat reads it via
 				// AssertionsEnforced/failure.expected). The status IS named — a poll timeout must name
 				// "the last observed status" regardless of which half of the claim missed (AC-D20).
 				observed: fmt.Sprintf("http status %d matched but %s %s", status, reason, chainClaimsNote),
 				// the claim AS WRITTEN (bodyWant, the closure's) with what this attempt's body showed
-				failed: failedBodyClaims(string(raw), bodyWant, boundWant, vars, nil)}
+				failed:        failed,
+				failedOmitted: omitted}
 		}
 		return httpJudged{status: status, pass: true, reachedBody: true, observed: fmt.Sprintf("http status %d", status)}
 	}
@@ -143,16 +148,10 @@ func HTTPStepWithOutput(name, method, urlTmpl string, headers map[string]string,
 		return out
 	}
 
-	return Step{
-		Name:   name,
-		Always: always,
-		Needs: func(vars map[string]string) error {
-			if always {
-				return nil // AC-D20: the cleanup step attempts regardless — see ChainStep.Always
-			}
-			return needs(vars)
-		},
-		Run: func(cid string, vars map[string]string) report.StepResult {
+	// run is the step body. chainDeadline is the chain's `## TIMEOUT` deadline (zero = none declared);
+	// it bounds each request (requestTimeout, #621). A Poll's own Timeout still bounds the retry loop.
+	run := func(cid string, vars map[string]string, chainDeadline time.Time) report.StepResult {
+		{
 			timeout, interval := time.Duration(0), time.Second
 			if poll != nil {
 				timeout, interval = poll.Timeout, poll.Interval
@@ -193,10 +192,19 @@ func HTTPStepWithOutput(name, method, urlTmpl string, headers map[string]string,
 							MoneyWriteRefusal, entry.Method, entry.Path, entry.MaxPerRun)}
 					}
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), httpClientTimeout)
+				allowed := requestTimeout(chainDeadline)
+				ctx, cancel := context.WithTimeout(context.Background(), allowed)
+				sent := time.Now()
 				resp, derr := httpClient.Do(req.WithContext(ctx))
 				if derr != nil {
+					cutByDeadline := !chainDeadline.IsZero() && errors.Is(ctx.Err(), context.DeadlineExceeded)
 					cancel()
+					if cutByDeadline {
+						// #621: the CHAIN's budget ended this request, not a refused connection. A timeout,
+						// not "SUT unreachable": status failed, so isUnanswered does not stop-and-relabel it.
+						return report.StepResult{Status: "failed",
+							Observed: deadlineCutObserved(allowed, time.Since(sent), derr)}
+					}
 					// No response at all — an execution error (VR-C8 unreachable/transport twin), never
 					// a content failure: mirrors chain.MCPStep's `v.Plane == "unreachable"` mapping to
 					// report.StatusError, which chain.Run's rule 5 stops the WHOLE chain dead on. A poll
@@ -241,7 +249,7 @@ func HTTPStepWithOutput(name, method, urlTmpl string, headers map[string]string,
 				}
 
 				if poll == nil || time.Now().After(deadline) {
-					st := report.StepResult{Status: "failed", Observed: last.observed, FailedClaims: last.failed}
+					st := report.StepResult{Status: "failed", Observed: last.observed, FailedClaims: last.failed, FailedClaimsOmitted: last.failedOmitted}
 					if poll != nil {
 						st.Observed = fmt.Sprintf("poll timed out after %s (%d attempt(s)); last observed: %s",
 							timeout, attempts, last.observed)
@@ -255,8 +263,44 @@ func HTTPStepWithOutput(name, method, urlTmpl string, headers map[string]string,
 				}
 				time.Sleep(interval)
 			}
-		},
+		}
 	}
+
+	return Step{
+		Name:   name,
+		Always: always,
+		Needs: func(vars map[string]string) error {
+			if always {
+				return nil // AC-D20: the cleanup step attempts regardless — see ChainStep.Always
+			}
+			return needs(vars)
+		},
+		Run: func(cid string, vars map[string]string) report.StepResult {
+			return run(cid, vars, time.Time{})
+		},
+		RunUntil: run,
+	}
+}
+
+// requestTimeout is how long ONE http attempt may take. No chain budget (zero chainDeadline): the
+// fixed httpClientTimeout, today's behaviour byte-for-byte. With a budget (#621): the time the chain
+// has LEFT, so a slow endpoint is not cut at 30 s inside a longer `## TIMEOUT`; once the budget is
+// spent (an `always` cleanup step still fires) the attempt gets only stepGrace, which is also how
+// long callStep waits past the deadline. Either way a request cannot outlive deadline + stepGrace.
+func requestTimeout(chainDeadline time.Time) time.Duration {
+	if chainDeadline.IsZero() {
+		return httpClientTimeout
+	}
+	if left := time.Until(chainDeadline); left > 0 {
+		return left
+	}
+	return stepGrace
+}
+
+// deadlineCutObserved words a request that the chain's deadline, not the SUT, cut off.
+func deadlineCutObserved(allowed, elapsed time.Duration, derr error) string {
+	return fmt.Sprintf("request cut off by the chain's ## TIMEOUT deadline (the chain had %.1fs left when it was sent) after %.1fs: %s",
+		allowed.Seconds(), elapsed.Seconds(), derr.Error())
 }
 
 // buildHTTPRequest binds ${saved.<var>} into the url, headers and body and builds the request. Shared by

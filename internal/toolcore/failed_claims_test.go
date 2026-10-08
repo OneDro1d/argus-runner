@@ -36,6 +36,8 @@ func fcReport() *report.Report {
 				Name: "check", Status: "failed", Observed: "the claims did not hold",
 				AssertionsEnforced: []string{"field " + fcClaim + " > 5"}, AssertionsEnforcedCount: 1,
 				FailedClaims: []report.FailedClaim{{Claim: "field " + fcClaim + " > 5", Observed: fcObserved}},
+				// planted non-zero, so an omitted-count that leaks cannot hide
+				FailedClaimsOmitted: 37,
 			}},
 		}}}},
 	}
@@ -71,7 +73,7 @@ func TestFailedClaims_Builder_GetReport_BothReadPaths(t *testing.T) {
 	e := fcEnv(t, fcReport())
 	for name, runID := range map[string]string{"per-run file": "run_1", "latest report.json": ""} {
 		out := fcGet(t, e, role.Product, runID)
-		for _, needle := range []string{fcObserved, fcClaim, `"failed_claims":`} {
+		for _, needle := range []string{fcObserved, fcClaim, `"failed_claims":`, "failed_claims_omitted"} {
 			if strings.Contains(out, needle) {
 				t.Errorf("builder GetReport (%s) carries %q: %s", name, needle, out)
 			}
@@ -81,6 +83,9 @@ func TestFailedClaims_Builder_GetReport_BothReadPaths(t *testing.T) {
 		if !strings.Contains(author, fcObserved) || !strings.Contains(author, `"failed_claims"`) {
 			t.Errorf("author GetReport (%s) must carry failed_claims and the observed value: %s", name, author)
 		}
+		if !strings.Contains(author, `"failed_claims_omitted":37`) {
+			t.Errorf("author GetReport (%s) must keep failed_claims_omitted (positive control): %s", name, author)
+		}
 	}
 }
 
@@ -88,7 +93,7 @@ func TestFailedClaims_Builder_RedactExpected(t *testing.T) {
 	rep := fcReport()
 	RedactExpected(rep, role.Product)
 	b, _ := json.Marshal(rep)
-	for _, needle := range []string{fcObserved, `"failed_claims":`} {
+	for _, needle := range []string{fcObserved, `"failed_claims":`, "failed_claims_omitted"} {
 		if strings.Contains(string(b), needle) {
 			t.Errorf("RedactExpected(product) left %q: %s", needle, b)
 		}
@@ -100,6 +105,12 @@ func TestFailedClaims_Builder_RedactExpected(t *testing.T) {
 	RedactExpected(author, role.Test)
 	if len(author.Layers[0].Scenarios[0].Steps[0].FailedClaims) != 1 {
 		t.Errorf("RedactExpected(test) must not touch the author's record")
+	}
+	if author.Layers[0].Scenarios[0].Steps[0].FailedClaimsOmitted != 37 {
+		t.Errorf("RedactExpected(test) must keep failed_claims_omitted")
+	}
+	if rep.Layers[0].Scenarios[0].Steps[0].FailedClaimsOmitted != 0 {
+		t.Errorf("RedactExpected(product) must zero failed_claims_omitted by name")
 	}
 }
 

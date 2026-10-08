@@ -188,6 +188,9 @@ func redactExpected(rep *report.Report, hat role.Role) {
 				// the failed claims carry the claim text AND the SUT's observed value
 				// for it — author-only, nilled explicitly (a new field is not covered by accident).
 				sc.Steps[k].FailedClaims = nil
+				// how many claims did not hold past the list's backstop — also
+				// author-only (how many hidden claims failed is holdout material), zeroed by name.
+				sc.Steps[k].FailedClaimsOmitted = 0
 			}
 			// The scenario-level twin (http, mcp and ui scenarios record their enforced checks on the
 			// scenario, not on a step) carries the same expected values: text nilled, count kept.

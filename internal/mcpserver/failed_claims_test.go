@@ -32,7 +32,8 @@ func writeFailedClaimsFixture(t *testing.T) toolcore.Env {
 			Steps: []report.StepResult{{
 				Name: "check", Status: "failed", Observed: "the claims did not hold",
 				AssertionsEnforced: []string{"field " + fcSentinelClaim + " > 5"}, AssertionsEnforcedCount: 1,
-				FailedClaims: []report.FailedClaim{{Claim: "field " + fcSentinelClaim + " > 5", Observed: fcSentinelObserved}},
+				FailedClaims:        []report.FailedClaim{{Claim: "field " + fcSentinelClaim + " > 5", Observed: fcSentinelObserved}},
+				FailedClaimsOmitted: 37, // author-only, planted non-zero
 			}},
 		}}}},
 	}
@@ -65,7 +66,13 @@ func TestFailedClaims_Builder_RunnerGetReportEnvelope(t *testing.T) {
 	if strings.Contains(builder, `\"failed_claims\":`) || strings.Contains(builder, `"failed_claims":`) {
 		t.Fatalf("SECURITY: the builder's runner__get_report envelope carries the failed_claims field:\n%s", builder)
 	}
+	if strings.Contains(builder, "failed_claims_omitted") {
+		t.Fatalf("SECURITY: the builder's runner__get_report envelope carries failed_claims_omitted:\n%s", builder)
+	}
 	author := string(callGetReport(t, env, atok))
+	if !strings.Contains(author, "failed_claims_omitted") {
+		t.Fatalf("positive control: the author's get_report must keep failed_claims_omitted:\n%s", author)
+	}
 	if !strings.Contains(author, fcSentinelObserved) {
 		t.Fatalf("positive control: the author's get_report must carry the planted observed value:\n%s", author)
 	}
