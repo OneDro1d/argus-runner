@@ -14,7 +14,7 @@ import (
 // page.goto fails (argus-declared.spec.ts: the goto runs before the per-check try), the spec writes
 // no outcome at all, and Playwright's real error is on stdout (discarded) and in its JSON report
 // argus-out/results.json. The row stays `error` — the SUT was not measured — and now says why.
-// (Found by Aleksander on memstore-dev WEBUI-001, 2026-09-18: a wrong app_url port read as
+// (Found on a test instance's WEBUI-001, 2026-09-18: a wrong app_url port read as
 // "not measured" with no reason.)
 func TestUIScenario_NotEvaluatedKeepsTheCause(t *testing.T) {
 	orig := uiRun

@@ -1,6 +1,6 @@
 # Spec 01 — Argus MCP server (single binary, two tool namespaces)
 
-> **Status:** Draft · **Owner:** Aleksander · **Phase:** Phase 0 (consumer-prototype spike) · **Iteration:** 1 · **Last updated:** 2026-05-21 (Day-5 reshape: CC-1, CC-2, smoke-test, MCP-SDK lock-in)
+> **Status:** Draft · **Phase:** Phase 0 (consumer-prototype spike) · **Iteration:** 1 · **Last updated:** 2026-05-21 (Day-5 reshape: CC-1, CC-2, smoke-test, MCP-SDK lock-in)
 
 ## Purpose
 
@@ -179,7 +179,7 @@ Also extended in the same release: `residue` (VR12-CH1 rule 7) and `unexecuted[]
 | `argus` submodule | git submodule at `../argus/` (relative to `mcp-runner/`) | Phase 0: SHA `HEAD` of main. Phase 1+: SHA-pinned. |
 | `argus/scripts/run.sh` | invoked via `os/exec` from `internal/argus/runner.go` | Pass `--config`, `--scenarios`, `--results-dir`, `--instance-id`, optional `--layer`, `--tag`. |
 | `argus/scripts/preflight.py` | invoked via `os/exec` from `internal/argus/preflight.go` | Pass config + scenarios paths. Parse stdout (JSON). |
-| MCP Go SDK | **Open — Aleksander to decide.** Three options on the table (see Open questions below). | Mario uses `mark3labs/mcp-go` (community library). **MCP-router uses a native in-house impl** (raw jsonrpc 2.0 in `cmd/mcp-gateway/handlers/` + `internal/router/`, no third-party MCP SDK). Aleksander has prior MCP-server experience from his social-media MCP — his call which path fits Argus best. |
+| MCP Go SDK | **Open.** Three options on the table (see Open questions below). | `mark3labs/mcp-go` (community library), an existing in-house gateway's native implementation (raw jsonrpc 2.0, no third-party MCP SDK), or a fresh native one. |
 | Structured logging | `log/slog` from stdlib | JSON handler. |
 | Prometheus client | `github.com/prometheus/client_golang` | Standard the operator pattern. |
 
@@ -253,7 +253,7 @@ Static checks for new code:
 
 | Question | Resolution path |
 |---|---|
-| **MCP Go SDK / protocol layer — Aleksander to pick (iter-1 day-1 blocker).** Three options: | **(a)** `github.com/mark3labs/mcp-go` (community library; mario-mcp uses it; fastest bootstrap). **(b)** Vendor/share MCP-router's native impl (raw jsonrpc 2.0 in `cmd/mcp-gateway/handlers/` + `internal/router/`; matches the operator house pattern; benefits from MCP-router's auth + permissions code; adds coupling to MCP-router's evolution). **(c)** Native in-house, written fresh (full control; duplicates MCP-router's work; only justifiable if (a) and (b) both block on something). Aleksander brings prior MCP-server experience (social-media MCP) — recommend he scan MCP-router's protocol code + mark3labs/mcp-go and pick within day 1 of iter 1. |
+| **MCP Go SDK / protocol layer (iter-1 day-1 blocker).** Three options: | **(a)** `github.com/mark3labs/mcp-go` (community library; fastest bootstrap). **(b)** Vendor/share an existing in-house gateway's native implementation (raw jsonrpc 2.0; benefits from its auth + permissions code; adds coupling to its evolution). **(c)** Native in-house, written fresh (full control; duplicates existing work; only justifiable if (a) and (b) both block on something). Pick within day 1 of iter 1. |
 | Stdio transport for local CLI use, in addition to HTTP+SSE? | Defer to Phase 1+ unless ergonomics test reveals it's needed sooner. |
 | Where does the MCP server resolve `instance_id` from? Env var, config file, env-substituted scenario root path? | Phase 0: `${ARGUS_HOME}/instances/${INSTANCE_ID}/`. Phase 1+: pluggable resolver. |
 | Should `run` be sync or async? Argus runs can take 10+ minutes for full suites. | Phase 0: sync. Phase 1+: `run_async` + `get_run_status` if the AI ergonomics demand it. |

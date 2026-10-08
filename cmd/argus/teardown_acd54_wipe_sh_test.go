@@ -17,7 +17,7 @@ import (
 //
 // These tests RUN the real teardown.sh under the harness (stubbed docker/kubectl/curl) from a scratch kit
 // against a seeded machine, and assert on what is on disk afterwards. Their first form was written by
-// Aleksander's agent ("analysis and proof by Aleksander's agent"); it is committed here as a real test, with
+// a reviewer's agent ("analysis and proof by a reviewer's agent"); it is committed here as a real test, with
 // two changes: the neighbour's router-state record now points at ITS OWN kit in the single-instance case
 // (the original recorded it in the very kit expected to go, which a correct fix must refuse to delete), and
 // the placeholder token values are spelled out.

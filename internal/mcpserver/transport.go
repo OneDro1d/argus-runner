@@ -237,7 +237,7 @@ func bearer(h string) string {
 // reqToken reads the bearer from the Authorization header, falling back to a ?token= query param.
 // S7 (CP-M3-III-5, §D-3.1.4/ADR-9): an AUTHOR PAT (odts_...) in a URL leaks into gateway/proxy access logs
 // on an internet-facing CP, so the query form is REJECTED for odts_ tokens — authors present the
-// Authorization header (Hub's MCP-router sends `Authorization: Bearer`, and onboarding is header-only).
+// Authorization header (an MCP gateway in front sends `Authorization: Bearer`, and onboarding is header-only).
 // The ?token= form is RETAINED only for the static-gateway credential class (UC026 — a log-stripped, non-PAT
 // token, per the owner's Q1 ruling). The "odts_" prefix mirrors store.AuthorTokenPrefix (kept local to avoid
 // a control-layer import from this transport package).

@@ -15,7 +15,7 @@ import (
 // app_url is ${VAR}-expanded before Playwright sees it, and Playwright quotes the URL in full
 // ("page.goto: net::ERR_CONNECTION_REFUSED at <url>"), user:password and query included. The row
 // keeps where it tried to go (scheme, host, port, path — the #139 diagnosis) and loses the rest.
-// (Found by Aleksander in his review of #140, reproduced on dev 5cb13b0 with real Playwright.)
+// (Found in the review of #140, reproduced on dev 5cb13b0 with real Playwright.)
 func TestUIScenario_CauseRedactsTheURL(t *testing.T) {
 	orig := uiRun
 	defer func() { uiRun = orig }()
@@ -87,7 +87,7 @@ func TestRedactURLs(t *testing.T) {
 		{"at https://h/x?a=1 and ws://u@h2", "at https://h/x?REDACTED and ws://REDACTED@h2"},
 		{`navigating to "http://h:8090/"`, `navigating to "http://h:8090/"`},
 		{"no url here", "no url here"},
-		// #152 review (Aleksander): each of these leaked on b3e9b15.
+		// #152 review: each of these leaked on b3e9b15.
 		{"at http://fakeuser:ab'cd@127.0.0.1:59997/app?token=T", "at http://REDACTED@127.0.0.1:59997/app?REDACTED"}, // apostrophe in the password
 		{"at http://fakeuser:ab#cd@127.0.0.1:59997/app?token=T", "at http://REDACTED?REDACTED"},                     // '#' in the password: host lost, nothing leaks
 		{"at http://fakeuser:ab?cd@127.0.0.1:59997/app?token=T", "at http://REDACTED?REDACTED"},                     // '?' in the password: host lost, nothing leaks
@@ -99,7 +99,7 @@ func TestRedactURLs(t *testing.T) {
 		// The pinned trade-off: an '@' at the start of a path segment reads as a userinfo end. The host is
 		// lost; nothing leaks.
 		{"at http://h:1/@scope/x", "at http://REDACTED@scope/x"},
-		// #152 second review (Aleksander): each of these kept a credential on 3163f40.
+		// #152 second review: each of these kept a credential on 3163f40.
 		{"GET http://h/api/me?next=/@alice/home&token=S → 401", "GET http://REDACTED?REDACTED → 401"},                                                                             // '@' + host-like text in the query
 		{`{"error":"failed to connect to amqp://svc:S@rabbitmq:5672: connection refused"}`, `{"error":"failed to connect to amqp://REDACTED@rabbitmq:5672: connection refused"}`}, // no path, ends in ':'
 		{"(see http://svc:S@h:1)", "(see http://REDACTED@h:1)"},                                                                                                                   // ends in ')'

@@ -1,6 +1,6 @@
 # Spec 17 — Chain scenarios (the multi-step contract)
 
-> **Status:** Implemented (0.3.29, VR10-S2 / V28-014) · **Owner:** Aleksander · **Phase:** Phase 1 · **Iteration:** 1 · **Last updated:** 2026-09-05
+> **Status:** Implemented (0.3.29, VR10-S2 / V28-014) · **Phase:** Phase 1 · **Iteration:** 1 · **Last updated:** 2026-09-05
 
 ## Purpose
 
