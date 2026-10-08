@@ -1590,7 +1590,10 @@ func needsPlainMCPTarget(s *scenario.Scenario) bool {
 		return true
 	}
 	for _, st := range steps {
-		if st.Type == "mcp" && st.Target == "" {
+		// An mcp step carrying its OWN server_url never reads the plain slot (an explicit step
+		// server_url wins over targets.mcp.base_url). A "${VAR}" url is accepted too: validate
+		// cannot know the environment the run will have.
+		if st.Type == "mcp" && st.Target == "" && strings.TrimSpace(st.ServerURL) == "" {
 			return true
 		}
 	}

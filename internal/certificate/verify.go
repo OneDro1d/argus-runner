@@ -153,7 +153,7 @@ func verdictPayload(cert *Certificate) ([]byte, error) {
 //   - degraded: nothing failed or errored (failed outranks degraded). On v2 at least one scenario is
 //     counted degraded; a v1 certificate has no degraded bucket, so there the missing scenarios show as
 //     passed+failed+errored < scenario_count and equality is refused.
-func checkTallies(cert *Certificate) CheckResult {
+func checkTallies(cert *Certificate, verdictAnchors []CheckResult) CheckResult {
 	const name = "certificate tallies"
 	t, n := cert.Tallies, cert.Set.ScenarioCount
 	bad := func(format string, a ...any) CheckResult {
@@ -198,8 +198,39 @@ func checkTallies(cert *Certificate) CheckResult {
 		return CheckResult{Name: name, Status: StatusVerified,
 			Detail: fmt.Sprintf("passed %d + failed %d + errored %d of set.scenario_count %d, consistent with verdict %s — NOT anchored on a v1 certificate: a consistency check only, see NOT ANCHORED below", t.Passed, t.Failed, t.Errored, n, cert.Verdict)}
 	}
+	// On a tallied format the tallies sit inside the anchored verdict payload, so the verdict anchor's
+	// read-back is the comparison with the chain. Rule: any verdict anchor MISMATCH -> MISMATCH; else at
+	// least one VERIFIED -> VERIFIED naming the chain(s) it was compared on (an unreachable sibling does
+	// not void a read-back that happened); else internal consistency only.
+	counts := fmt.Sprintf("passed %d + failed %d + errored %d + degraded %d of set.scenario_count %d, consistent with verdict %s", t.Passed, t.Failed, t.Errored, t.Degraded, n, cert.Verdict)
+	var verifiedOn []string
+	mismatched := 0
+	for _, r := range verdictAnchors {
+		switch r.Status {
+		case StatusVerified:
+			verifiedOn = append(verifiedOn, anchorChain(r.Name))
+		case StatusMismatch:
+			mismatched++
+		}
+	}
+	switch {
+	case mismatched > 0:
+		return CheckResult{Name: name, Status: StatusMismatch,
+			Detail: counts + ", but the anchored verdict payload does NOT match the certificate's declared fields, which include these tallies"}
+	case len(verifiedOn) > 0:
+		return CheckResult{Name: name, Status: StatusVerified,
+			Detail: counts + " (and compared with the anchored verdict payload on " + strings.Join(verifiedOn, ", ") + ")"}
+	}
 	return CheckResult{Name: name, Status: StatusVerified,
-		Detail: fmt.Sprintf("passed %d + failed %d + errored %d + degraded %d of set.scenario_count %d, consistent with verdict %s (and compared with the anchored verdict payload)", t.Passed, t.Failed, t.Errored, t.Degraded, n, cert.Verdict)}
+		Detail: counts + " — internal consistency only: the anchored verdict payload was not read back, so these counts are NOT compared with it"}
+}
+
+// anchorChain extracts the chain from an anchor result name of the form "anchor v<N> <chain>".
+func anchorChain(name string) string {
+	if parts := strings.SplitN(name, " ", 3); len(parts) == 3 {
+		return parts[2]
+	}
+	return name
 }
 
 // Unanchored lists, in plain words, the certificate fields verify CANNOT confirm against a chain — so a
@@ -534,7 +565,13 @@ func Verify(ctx context.Context, cert *Certificate, svc chainread.ChainService, 
 			Detail: "read back under declared signer " + a.Signer})
 	}
 	// After the per-anchor results, so Overall's index alignment with cert.Anchors holds.
-	results = append(results, checkTallies(cert))
+	var verdictAnchors []CheckResult
+	for i := range cert.Anchors {
+		if i < len(results) && roles[i] == roleVerdict {
+			verdictAnchors = append(verdictAnchors, results[i])
+		}
+	}
+	results = append(results, checkTallies(cert, verdictAnchors))
 	if cert.Format == Format {
 		results = append(results, checkMeasurement(cert))
 	}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,6 +158,86 @@ func TestVerify_TamperedVerdictFails_Mismatch(t *testing.T) {
 	}
 	if Overall(cert, results) {
 		t.Errorf("Overall = true with a mismatched anchor, want false")
+	}
+}
+
+// The tallies line may say "compared with the anchored verdict payload" only when a verdict anchor
+// really verified.
+func talliesResult(t *testing.T, results []CheckResult) CheckResult {
+	t.Helper()
+	return resultNamed(t, results, "certificate tallies")
+}
+
+func TestVerify_TalliesLine_TamperedButInternallyConsistent_IsMismatch(t *testing.T) {
+	cert, svc, _, _ := verifyFixtureTallied(t)
+	// consistent with itself (failed 1 + passed 2 of 3, verdict failed) but not what was anchored
+	cert.Verdict = "failed"
+	cert.Tallies = Tallies{Passed: 2, Failed: 1}
+	results := Verify(context.Background(), cert, svc, nil, nil)
+	r := talliesResult(t, results)
+	t.Log(r.Line())
+	if r.Status != StatusMismatch {
+		t.Fatalf("tallies line = %s, want MISMATCH when the anchored verdict payload disagrees", r.Line())
+	}
+	if strings.Contains(r.Detail, "compared with the anchored verdict payload on") {
+		t.Errorf("a mismatching line still claims the comparison: %s", r.Line())
+	}
+}
+
+func TestVerify_TalliesLine_AnchorNotReadBack_SaysInternalConsistencyOnly(t *testing.T) {
+	cert, _, _, _ := verifyFixtureTallied(t)
+	results := Verify(context.Background(), cert, nil, nil, nil) // no --rpc: nothing is read back
+	r := talliesResult(t, results)
+	t.Log(r.Line())
+	if strings.Contains(r.Detail, "compared with the anchored verdict payload on") {
+		t.Errorf("claims a comparison with an anchor that was never read: %s", r.Line())
+	}
+	if !strings.Contains(r.Detail, "internal consistency only") {
+		t.Errorf("want an 'internal consistency only' wording: %s", r.Line())
+	}
+}
+
+func TestVerify_TalliesLine_VerifiedAnchor_NamesTheChainCompared(t *testing.T) {
+	cert, svc, _, _ := verifyFixtureTallied(t)
+	results := Verify(context.Background(), cert, svc, nil, nil)
+	r := talliesResult(t, results)
+	t.Log(r.Line())
+	if r.Status != StatusVerified || !strings.Contains(r.Detail, "(and compared with the anchored verdict payload on "+verifyChainName+")") {
+		t.Errorf("clean tallied certificate: %s", r.Line())
+	}
+}
+
+// One verdict anchor VERIFIED (read back), a second UNREACHABLE (its chain is not served): the payload
+// WAS compared on the first chain, so the line is VERIFIED naming that chain, never "not read back".
+func TestVerify_TalliesLine_OneVerifiedOneUnreachable_ClaimsComparisonOnTheVerifiedChain(t *testing.T) {
+	cert, svc, _, _ := verifyFixtureTallied(t)
+	second := cert.Anchors[1]
+	second.Chain = "other-unserved-chain"
+	second.ChainCorrelationID = "no-such-correlation-id" // the service cannot read this one back
+	cert.Anchors = append(cert.Anchors, second)
+	results := Verify(context.Background(), cert, svc, nil, nil)
+	var sawVerified, sawUnreachable bool
+	for _, r := range results {
+		t.Log(r.Line())
+		if r.Name == "anchor v3 "+verifyChainName && r.Status == StatusVerified {
+			sawVerified = true
+		}
+		if r.Name == "anchor v3 other-unserved-chain" && r.Status == StatusUnreachable {
+			sawUnreachable = true
+		}
+	}
+	if !sawVerified || !sawUnreachable {
+		t.Fatalf("fixture did not produce one verified + one unreachable verdict anchor: %+v", results)
+	}
+	r := talliesResult(t, results)
+	if r.Status != StatusVerified {
+		t.Fatalf("tallies line = %s, want VERIFIED", r.Line())
+	}
+	if !strings.Contains(r.Detail, "compared with the anchored verdict payload on "+verifyChainName) {
+		t.Errorf("want the comparison claim naming %s: %s", verifyChainName, r.Line())
+	}
+	if strings.Contains(r.Detail, "internal consistency only") {
+		t.Errorf("says the payload was not read back, which is false: %s", r.Line())
 	}
 }
 
