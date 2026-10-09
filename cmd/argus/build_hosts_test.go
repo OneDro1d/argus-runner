@@ -91,7 +91,7 @@ func TestBuildHosts_DefaultBuildPrintsTodaysAddresses(t *testing.T) {
 			t.Errorf("default build, %s: want %q in\n%s", surface, want, s[surface])
 		}
 	}
-	if !strings.Contains(s["version"], `"docs": "https://docs.example.com"`) {
+	if !strings.Contains(s["version"], `"docs": "https://docs.onedroid.ai"`) {
 		t.Errorf("default build, version: want the docs address in\n%s", s["version"])
 	}
 }
@@ -117,7 +117,7 @@ func TestBuildHosts_OverriddenBuildChangesEverySurface(t *testing.T) {
 	}
 	// Nothing of the old estate may survive in anything the binary printed.
 	for surface, out := range s {
-		for _, old := range []string{"argus-dev.onedroid.ai", "docs.example.com", "grafana.example.com"} {
+		for _, old := range []string{"argus-dev.onedroid.ai", "docs.onedroid.ai", "grafana.example.com"} {
 			if strings.Contains(out, old) {
 				t.Errorf("overridden build, %s still prints %q:\n%s", surface, old, out)
 			}
@@ -129,7 +129,7 @@ func TestBuildHosts_OverriddenBuildChangesEverySurface(t *testing.T) {
 // in-process with the fake kubectl the other doctor tests use.
 func TestBuildHosts_DocsAddressReachesTheDoctorHint(t *testing.T) {
 	for _, c := range []struct{ docs, want string }{
-		{buildinfo.DocsURL, "docs.example.com/argus-tester-guide"},
+		{buildinfo.DocsURL, "docs.onedroid.ai/argus-tester-guide"},
 		{"https://docs.example.org", "docs.example.org/argus-tester-guide"},
 	} {
 		old := buildinfo.DocsURL

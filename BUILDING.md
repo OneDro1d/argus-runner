@@ -62,7 +62,8 @@ docker build -t ghcr.io/onedro1d/argus-runner:dev .                  # slim: arg
 docker build --target ui -t ghcr.io/onedro1d/argus-runner:dev-ui .   # plus the Playwright harness and Chromium
 ```
 
-Optional build arguments: `VERSION`, `COMMIT`, `BUILD_DATE`, `ARGUS_DEFAULT_CONTROL_PLANE_URL`. Apache JMeter and the
+Optional build arguments: `VERSION`, `COMMIT`, `BUILD_DATE`, and `ARGUS_DEFAULT_CONTROL_PLANE_URL`,
+`ARGUS_DEFAULT_DOCS_URL`, `ARGUS_DEFAULT_GRAFANA_URL` (each replaces an address built into the binary). Apache JMeter and the
 PostgreSQL JDBC driver are downloaded from the Apache archive and Maven Central. Publish to your own registry; this
 repository does not publish anything by itself.
 

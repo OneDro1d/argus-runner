@@ -11,7 +11,7 @@ import (
 func TestHosts_DefaultsArePinnedToToday(t *testing.T) {
 	for name, c := range map[string]struct{ got, want string }{
 		"ControlPlaneURL": {ControlPlaneURL, "https://argus-dev.onedroid.ai"},
-		"DocsURL":         {DocsURL, "https://docs.example.com"},
+		"DocsURL":         {DocsURL, "https://docs.onedroid.ai"},
 		"GrafanaURL":      {GrafanaURL, "https://grafana.example.com"},
 	} {
 		if c.got != c.want {
@@ -21,7 +21,7 @@ func TestHosts_DefaultsArePinnedToToday(t *testing.T) {
 	if err := ValidateHosts(); err != nil {
 		t.Errorf("the defaults must pass their own validation: %v", err)
 	}
-	if got, want := DocsRef("argus-tester-guide"), "docs.example.com/argus-tester-guide"; got != want {
+	if got, want := DocsRef("argus-tester-guide"), "docs.onedroid.ai/argus-tester-guide"; got != want {
 		t.Errorf("DocsRef = %q, want %q (the hint has always been written without the scheme)", got, want)
 	}
 }

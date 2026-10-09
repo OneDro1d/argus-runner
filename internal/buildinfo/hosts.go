@@ -27,7 +27,7 @@ var (
 	// ControlPlaneURL is the control plane a tester session talks to when nothing else says so.
 	ControlPlaneURL = "https://argus-dev.onedroid.ai"
 	// DocsURL is the base of the published docs site. Hints add a path to it.
-	DocsURL = "https://docs.example.com"
+	DocsURL = "https://docs.onedroid.ai"
 	// GrafanaURL is the example managed-tier Grafana address shown in generated config text.
 	GrafanaURL = "https://grafana.example.com"
 )
@@ -85,7 +85,7 @@ func DefaultControlPlane() string { return strings.TrimRight(ControlPlaneURL, "/
 // DefaultGrafana returns the built-in example Grafana URL without a trailing slash.
 func DefaultGrafana() string { return strings.TrimRight(GrafanaURL, "/") }
 
-// DocsRef returns a docs reference for a hint, written without the scheme: "docs.example.com/path".
+// DocsRef returns a docs reference for a hint, written without the scheme: "docs.onedroid.ai/path".
 // That is how the hints have always read.
 func DocsRef(path string) string {
 	base := strings.TrimRight(DocsURL, "/")
