@@ -42,8 +42,9 @@ You need an account on the hosted control plane at `https://argus-dev.onedroid.a
 that can reach both your system and the control plane (the runner connects out only; it needs no inbound route).
 
 1. **Get the runner.**
-   Pull the image once it is published (`docker pull ghcr.io/onedro1d/argus-runner:<version>`), or build it
-   (`docker build -t argus-runner .`, see `BUILDING.md`). To get only the CLI: `go build -o argus ./cmd/argus`.
+   Pull the published image (`docker pull ghcr.io/onedro1d/argus-runner:main`; each build is also tagged
+   `sha-<commit>`, and step 4 pins it by digest), or build it (`docker build -t argus-runner .`, see
+   `BUILDING.md`). To get only the CLI: `go build -o argus ./cmd/argus`.
 
 2. **Sign in to the hosted control plane.**
 
