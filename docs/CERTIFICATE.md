@@ -55,6 +55,14 @@ digest the chain's own record does not carry — fails the reveal-anchor check.
 certificate as v1 (or the reverse) does not verify. A v1 or v2 certificate keeps verifying if it is honest.
 An older `argus` binary does not know v3 and refuses it by name; update the CLI.
 
+`argus-certificate/v4` is v3 plus a **required, non-empty `faults` list**: the faults (stop, scale, delay,
+drop, truncate) the run applied to the system under test, each with its target name, when it was applied,
+when and how it was undone, and whether a Toxiproxy was in the path. It is issued only for a run that applied
+at least one fault; every other run keeps its v3 certificate. The list is bound by the evidence-bundle hash,
+so removing or editing a fault, or hiding the list under a v3 label, fails `verify`. A v4 with an empty or
+missing list is refused. The faults are what the executor reported; `verify` says so. An older `argus` binary
+refuses v4 by name.
+
 ### Which build was running (`artifact_measurement`, v3)
 
 `verdict_record.artifact_digest` is what the tester **declared**. Before a `final` or `scheduled` run

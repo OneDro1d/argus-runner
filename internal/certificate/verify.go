@@ -129,7 +129,7 @@ func verdictPayload(cert *Certificate) ([]byte, error) {
 			RunID: cert.RunID, ArtifactDigest: cert.VerdictRecord.ArtifactDigest,
 			EvidenceBundleHash: cert.VerdictRecord.EvidenceBundleHash, Verdict: cert.Verdict,
 		})
-	case Format, FormatV2:
+	case Format, FormatV2, FormatV4:
 		return json.Marshal(VerdictTallied{
 			RunID: cert.RunID, ArtifactDigest: cert.VerdictRecord.ArtifactDigest,
 			EvidenceBundleHash: cert.VerdictRecord.EvidenceBundleHash, Verdict: cert.Verdict,
@@ -249,8 +249,17 @@ func Unanchored(cert *Certificate) []string {
 	if cert.RevealedAt != "" {
 		out = append(out, "revealed_at: the reveal anchor's digest is compared, its timestamp is not")
 	}
+	if cert.Format == FormatV4 && len(cert.Faults) > 0 {
+		out = append(out, "faults: what was done to the system under test (and when it was undone) is what the executor reported - bound to this verdict by evidence_bundle_hash, but attested by the executor, not independently observed")
+		for _, f := range cert.Faults {
+			if f.Toxiproxy {
+				out = append(out, "faults: a Toxiproxy was in the path of the connection while a link fault ran, so the connection under test was the one through the proxy")
+				break
+			}
+		}
+	}
 	switch m := cert.ArtifactMeasurement; {
-	case cert.Format != Format:
+	case !HasMeasurement(cert.Format):
 		out = append(out, fmt.Sprintf("artifact measurement: format %s carries none, so nothing in this certificate shows which build was running when the run began — only that the tester declared artifact_digest", cert.Format))
 	case m == nil:
 		// checkMeasurement reports the stripped block as a mismatch; nothing to add here
@@ -276,7 +285,17 @@ func checkMeasurement(cert *Certificate) CheckResult {
 	}
 	m := cert.ArtifactMeasurement
 	if m == nil {
-		return bad("a %s certificate must carry artifact_measurement; it has been removed", Format)
+		return bad("a %s certificate must carry artifact_measurement; it has been removed", cert.Format)
+	}
+	// The fault list is part of the record the bundle hash commits to. v4 REQUIRES one and
+	// every other format forbids it, so neither stripping the list nor hiding it under a v3 label survives.
+	switch {
+	case cert.Format == FormatV4 && len(cert.Faults) == 0:
+		return bad("a %s certificate must carry a non-empty faults list; it has been removed", FormatV4)
+	case cert.Format != FormatV4 && len(cert.Faults) > 0:
+		return bad("a %s certificate cannot carry faults (only %s does); the list was added or the format relabelled", cert.Format, FormatV4)
+	case cert.Format == FormatV4 && !m.Bound:
+		return bad("faults can only be bound to a bound measurement; this one is not")
 	}
 	if !m.Bound {
 		if m.State != artifactmeasure.StateNotMeasured || m.ScenarioEvidenceRoot != "" || len(m.Running) != 0 || m.Unresolved != 0 ||
@@ -290,6 +309,9 @@ func checkMeasurement(cert *Certificate) CheckResult {
 		Version: artifactmeasure.Version, State: m.State, Reason: m.Reason, Source: m.Source,
 		Declared: cert.VerdictRecord.ArtifactDigest, Running: orEmpty(m.Running), Unresolved: m.Unresolved,
 		CommitmentFound: orEmpty(m.CommitmentFound), CommitmentNotFound: orEmpty(m.CommitmentNotFound),
+	}
+	for _, f := range cert.Faults {
+		rec.Faults = append(rec.Faults, artifactmeasure.Fault(f))
 	}
 	if err := artifactmeasure.Check(rec, cert.VerdictRecord.ArtifactDigest); err != nil {
 		return bad("the claimed measurement contradicts itself: %v", err)
@@ -480,7 +502,7 @@ func Verify(ctx context.Context, cert *Certificate, svc chainread.ChainService, 
 		// An unknown format cannot be rebuilt into ANY payload, so nothing below could be compared:
 		// answer once, by name, and let Overall refuse it.
 		return []CheckResult{{Name: "certificate format", Status: StatusMismatch,
-			Detail: fmt.Sprintf("format %q is not one this verifier knows (want %s, %s or %s)", cert.Format, Format, FormatV2, FormatV1)}}
+			Detail: fmt.Sprintf("format %q is not one this verifier knows (want %s, %s, %s or %s)", cert.Format, FormatV4, Format, FormatV2, FormatV1)}}
 	}
 	roles := roleOfAnchors(cert.Anchors)
 
@@ -572,7 +594,7 @@ func Verify(ctx context.Context, cert *Certificate, svc chainread.ChainService, 
 		}
 	}
 	results = append(results, checkTallies(cert, verdictAnchors))
-	if cert.Format == Format {
+	if HasMeasurement(cert.Format) {
 		results = append(results, checkMeasurement(cert))
 	}
 	return results

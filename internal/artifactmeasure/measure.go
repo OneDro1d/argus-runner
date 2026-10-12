@@ -87,6 +87,25 @@ type Measurement struct {
 	// running. Recorded, not enforced: only the declared digest decides the run.
 	CommitmentFound    []string `json:"commitment_found"`
 	CommitmentNotFound []string `json:"commitment_not_found"`
+	// Faults are the faults the run's `fault` chain steps applied, in order. LAST, and
+	// omitempty: a run without a fault marshals to the bytes it always did, so its digest, its bundle hash and
+	// its certificate are unchanged. The wire shape is NOT versioned (Version stays 1) because an older
+	// control plane that drops the unknown key recomputes a different bundle hash and REFUSES the push -
+	// a fault run is rejected by name, never recorded as a fault-free one.
+	Faults []Fault `json:"faults,omitempty"`
+}
+
+// Fault is the certificate-bound projection of report.Fault: what was done to the system under test, to which
+// allowlisted name, when, and how it was undone. NO scenario-internal step name, NO URL, NO namespace.
+type Fault struct {
+	Op             string         `json:"op"`
+	Target         string         `json:"target"`
+	Params         map[string]int `json:"params,omitempty"`
+	AppliedAt      string         `json:"applied_at"`
+	RestoredAt     string         `json:"restored_at,omitempty"`
+	RestoreOutcome string         `json:"restore_outcome"`
+	// Toxiproxy: a Toxiproxy was in the path of the connection while this fault ran.
+	Toxiproxy bool `json:"toxiproxy,omitempty"`
 }
 
 func sortedUnique(in []string) []string {
@@ -183,6 +202,9 @@ func Check(m Measurement, declared string) error {
 	if m.Version != Version {
 		return fmt.Errorf("artifact measurement version %d is not %d", m.Version, Version)
 	}
+	if err := CheckFaults(m.Faults); err != nil {
+		return err
+	}
 	if d, ok := NormalizeDigest(declared); ok {
 		declared = d
 	}
@@ -220,6 +242,30 @@ func Check(m Measurement, declared string) error {
 			return &MismatchError{Declared: declared, Running: m.Running}
 		}
 		return fmt.Errorf("artifact measurement state %q is not matched or not_measured", m.State)
+	}
+	return nil
+}
+
+// CheckFaults is the shape rule for a bound fault list: an op Argus can apply, a named target, a time, and an
+// outcome from the closed set. A run whose restore FAILED is bindable - and says so on its certificate.
+func CheckFaults(fs []Fault) error {
+	for i, f := range fs {
+		switch f.Op {
+		case "stop", "scale", "delay", "drop", "truncate":
+		default:
+			return fmt.Errorf("fault %d: op %q is not one Argus applies", i+1, f.Op)
+		}
+		switch f.RestoreOutcome {
+		case "restored", "already-restored", "failed":
+		default:
+			return fmt.Errorf("fault %d: restore_outcome %q is not restored, already-restored or failed", i+1, f.RestoreOutcome)
+		}
+		if f.Target == "" || f.AppliedAt == "" {
+			return fmt.Errorf("fault %d: a fault names its target and the time it was applied", i+1)
+		}
+		if f.RestoreOutcome != "failed" && f.RestoredAt == "" {
+			return fmt.Errorf("fault %d: %s without restored_at", i+1, f.RestoreOutcome)
+		}
 	}
 	return nil
 }

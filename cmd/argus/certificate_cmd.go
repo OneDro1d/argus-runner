@@ -150,8 +150,8 @@ func cmdCertificateVerify(args []string) int {
 	if err := json.Unmarshal(b, &cert); err != nil {
 		return emitErr(exitErr, "certificate verify: parse %s: %v", rest[0], err)
 	}
-	if cert.Format != certificate.Format && cert.Format != certificate.FormatV2 && cert.Format != certificate.FormatV1 {
-		return emitErr(exitErr, "certificate verify: format %q, want %q, %q or %q", cert.Format, certificate.Format, certificate.FormatV2, certificate.FormatV1)
+	if !certificate.KnownFormat(cert.Format) {
+		return emitErr(exitErr, "certificate verify: format %q, want %q, %q, %q or %q", cert.Format, certificate.FormatV4, certificate.Format, certificate.FormatV2, certificate.FormatV1)
 	}
 
 	var allow certificate.AllowList

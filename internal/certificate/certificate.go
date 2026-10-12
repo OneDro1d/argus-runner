@@ -28,6 +28,11 @@ package certificate
 //     new chain payload shape exists; verify recomputes the hash from the block. A v3 certificate with
 //     the block stripped is refused. An older verifier does not know v3 and refuses it by name, rather
 //     than passing a document whose new binding it cannot check.
+//   - FormatV4 ("argus-certificate/v4"): v3 plus a REQUIRED, non-empty `faults` list - the faults the
+//     run's `fault` chain steps applied to the system under test. It is issued ONLY for a run that
+//     applied at least one; every other run keeps its v3 (or v2) certificate, byte for byte. The list is
+//     covered by the same anchored evidence_bundle_hash (it is part of the measurement record the hash
+//     commits to). An older verifier does not know v4 and refuses it by name.
 //
 // Format is what NEW certificates declare. FormatV1 and FormatV2 are still accepted on verify: every
 // certificate issued before v3 keeps verifying, as long as it is honest.
@@ -35,10 +40,33 @@ const (
 	Format   = "argus-certificate/v3"
 	FormatV2 = "argus-certificate/v2"
 	FormatV1 = "argus-certificate/v1"
+	FormatV4 = "argus-certificate/v4"
 )
 
-// Tallied reports whether format's verdict anchor is VerdictTallied (v2 and v3).
-func Tallied(format string) bool { return format == Format || format == FormatV2 }
+// Tallied reports whether format's verdict anchor is VerdictTallied (v2, v3 and v4).
+func Tallied(format string) bool { return format == Format || format == FormatV2 || format == FormatV4 }
+
+// HasMeasurement reports whether format carries the artifact_measurement block (v3 and v4).
+func HasMeasurement(format string) bool { return format == Format || format == FormatV4 }
+
+// KnownFormat reports whether this verifier understands format. An unknown one is refused by name.
+func KnownFormat(format string) bool {
+	return format == Format || format == FormatV2 || format == FormatV1 || format == FormatV4
+}
+
+// Fault is one fault the run applied to the system under test (v4). It is the certificate's typed projection
+// of artifactmeasure.Fault: the op, the allowlist NAME of what was faulted, the op's numbers, when it was
+// applied and undone and how, and whether a Toxiproxy was in the path. Never a scenario-internal step name,
+// a URL, a namespace or a Toxiproxy coordinate.
+type Fault struct {
+	Op             string         `json:"op"`
+	Target         string         `json:"target"`
+	Params         map[string]int `json:"params,omitempty"`
+	AppliedAt      string         `json:"applied_at"`
+	RestoredAt     string         `json:"restored_at,omitempty"`
+	RestoreOutcome string         `json:"restore_outcome"`
+	Toxiproxy      bool           `json:"toxiproxy,omitempty"`
+}
 
 // ArtifactMeasurement says whether the build that was running when the run began was the declared
 // artifact digest, and how far that statement is bound.
@@ -174,6 +202,10 @@ type Certificate struct {
 	// Anchoring is the state of the run's anchoring at issue time. Always present on a
 	// certificate the control plane issues, nil only on one issued before it existed.
 	Anchoring *Anchoring `json:"anchoring,omitempty"`
+
+	// Faults is REQUIRED and non-empty on a v4 certificate and absent on every other format.
+	// The executor attests it; the anchored evidence_bundle_hash binds it.
+	Faults []Fault `json:"faults,omitempty"`
 
 	// ArtifactMeasurement is required on a v3 certificate and absent on older ones.
 	ArtifactMeasurement *ArtifactMeasurement `json:"artifact_measurement,omitempty"`
