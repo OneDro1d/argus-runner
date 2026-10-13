@@ -129,12 +129,13 @@ func verdictPayload(cert *Certificate) ([]byte, error) {
 			RunID: cert.RunID, ArtifactDigest: cert.VerdictRecord.ArtifactDigest,
 			EvidenceBundleHash: cert.VerdictRecord.EvidenceBundleHash, Verdict: cert.Verdict,
 		})
-	case Format, FormatV2, FormatV4:
+	case Format, FormatV2, FormatV4, FormatV5:
 		return json.Marshal(VerdictTallied{
 			RunID: cert.RunID, ArtifactDigest: cert.VerdictRecord.ArtifactDigest,
 			EvidenceBundleHash: cert.VerdictRecord.EvidenceBundleHash, Verdict: cert.Verdict,
 			Tallies: VerdictTallies{
 				Passed: cert.Tallies.Passed, Failed: cert.Tallies.Failed, Errored: cert.Tallies.Errored, Degraded: cert.Tallies.Degraded,
+				NotApplicable: cert.Tallies.NotApplicable,
 			},
 			FinishedAt: cert.FinishedAt,
 		})
@@ -159,23 +160,37 @@ func checkTallies(cert *Certificate, verdictAnchors []CheckResult) CheckResult {
 	bad := func(format string, a ...any) CheckResult {
 		return CheckResult{Name: name, Status: StatusMismatch, Detail: fmt.Sprintf(format, a...)}
 	}
-	if t.Passed < 0 || t.Failed < 0 || t.Errored < 0 || t.Degraded < 0 || n < 0 {
-		return bad("a negative count (passed %d, failed %d, errored %d, degraded %d, scenario_count %d)", t.Passed, t.Failed, t.Errored, t.Degraded, n)
+	if t.Passed < 0 || t.Failed < 0 || t.Errored < 0 || t.Degraded < 0 || t.NotApplicable < 0 || n < 0 {
+		return bad("a negative count (passed %d, failed %d, errored %d, degraded %d, not_applicable %d, scenario_count %d)", t.Passed, t.Failed, t.Errored, t.Degraded, t.NotApplicable, n)
 	}
 	if cert.Format == FormatV1 && t.Degraded != 0 {
 		return bad("degraded is %d, but format %s has no degraded bucket", t.Degraded, FormatV1)
 	}
-	sum := t.Passed + t.Failed + t.Errored + t.Degraded
+	// The not_applicable bucket exists on v5 only. A count hidden under an older label is
+	// refused; and an older verifier never reaches here for a v5 certificate (it refuses the format by name).
+	if cert.Format != FormatV5 && (t.NotApplicable != 0 || cert.Verdict == VerdictNotApplicable) {
+		return bad("not_applicable is %d (verdict %s), but format %s has no not_applicable bucket (only %s does)", t.NotApplicable, cert.Verdict, cert.Format, FormatV5)
+	}
+	sum := t.Passed + t.Failed + t.Errored + t.Degraded + t.NotApplicable
 	if sum > n {
-		return bad("passed %d + failed %d + errored %d + degraded %d = %d exceeds set.scenario_count %d", t.Passed, t.Failed, t.Errored, t.Degraded, sum, n)
+		return bad("passed %d + failed %d + errored %d + degraded %d + not_applicable %d = %d exceeds set.scenario_count %d", t.Passed, t.Failed, t.Errored, t.Degraded, t.NotApplicable, sum, n)
 	}
 	switch cert.Verdict {
 	case "passed":
 		if t.Failed != 0 || t.Errored != 0 || t.Degraded != 0 {
 			return bad("verdict is passed but tallies show failed %d, errored %d, degraded %d", t.Failed, t.Errored, t.Degraded)
 		}
-		if t.Passed != n {
-			return bad("verdict is passed but passed is %d of set.scenario_count %d", t.Passed, n)
+		// not_applicable scenarios were not executed: they neither pass nor fail. A run of passes and N/A is
+		// passed, but only when something actually passed - EVERY scenario N/A is never a pass.
+		if t.Passed+t.NotApplicable != n {
+			return bad("verdict is passed but passed is %d (+ %d not_applicable) of set.scenario_count %d", t.Passed, t.NotApplicable, n)
+		}
+		if t.Passed == 0 && t.NotApplicable > 0 {
+			return bad("verdict is passed but every scenario (%d) was not_applicable - a run that verified nothing is never a pass", t.NotApplicable)
+		}
+	case VerdictNotApplicable:
+		if t.Passed != 0 || t.Failed != 0 || t.Errored != 0 || t.Degraded != 0 || t.NotApplicable != n || n == 0 {
+			return bad("verdict is not_applicable but tallies show passed %d, failed %d, errored %d, degraded %d, not_applicable %d of set.scenario_count %d (a not_applicable verdict means EVERY scenario was)", t.Passed, t.Failed, t.Errored, t.Degraded, t.NotApplicable, n)
 		}
 	case "failed":
 		if t.Failed+t.Errored == 0 {
@@ -192,7 +207,7 @@ func checkTallies(cert *Certificate, verdictAnchors []CheckResult) CheckResult {
 			return bad("verdict is degraded but passed %d of set.scenario_count %d leaves no scenario to be degraded", t.Passed, n)
 		}
 	default:
-		return bad("unknown verdict %q (want passed, failed or degraded)", cert.Verdict)
+		return bad("unknown verdict %q (want passed, failed, degraded or not_applicable)", cert.Verdict)
 	}
 	if cert.Format == FormatV1 {
 		return CheckResult{Name: name, Status: StatusVerified,
@@ -203,6 +218,9 @@ func checkTallies(cert *Certificate, verdictAnchors []CheckResult) CheckResult {
 	// least one VERIFIED -> VERIFIED naming the chain(s) it was compared on (an unreachable sibling does
 	// not void a read-back that happened); else internal consistency only.
 	counts := fmt.Sprintf("passed %d + failed %d + errored %d + degraded %d of set.scenario_count %d, consistent with verdict %s", t.Passed, t.Failed, t.Errored, t.Degraded, n, cert.Verdict)
+	if cert.Format == FormatV5 { // the line of every older format is unchanged
+		counts = fmt.Sprintf("passed %d + failed %d + errored %d + degraded %d + not_applicable %d of set.scenario_count %d, consistent with verdict %s", t.Passed, t.Failed, t.Errored, t.Degraded, t.NotApplicable, n, cert.Verdict)
+	}
 	var verifiedOn []string
 	mismatched := 0
 	for _, r := range verdictAnchors {
@@ -249,7 +267,15 @@ func Unanchored(cert *Certificate) []string {
 	if cert.RevealedAt != "" {
 		out = append(out, "revealed_at: the reveal anchor's digest is compared, its timestamp is not")
 	}
-	if cert.Format == FormatV4 && len(cert.Faults) > 0 {
+	if cert.Format == FormatV5 {
+		if len(cert.Preconditions) > 0 {
+			out = append(out, "preconditions: each result (the mechanism's id and kind, holds / absent / broken, and both controls' observations) is what the executor reported from probing its OWN namespace - bound to this verdict by evidence_bundle_hash, but attested by the executor, not independently observed")
+		}
+		if cert.Tallies.NotApplicable > 0 {
+			out = append(out, fmt.Sprintf("not_applicable: %d scenario(s) were NOT EXECUTED because the mechanism they depend on was reported absent - the count is anchored, but that the mechanism really was absent is the executor's attestation; nothing was verified about the system under test for those scenarios", cert.Tallies.NotApplicable))
+		}
+	}
+	if (cert.Format == FormatV4 || cert.Format == FormatV5) && len(cert.Faults) > 0 {
 		out = append(out, "faults: what was done to the system under test (and when it was undone) is what the executor reported - bound to this verdict by evidence_bundle_hash, but attested by the executor, not independently observed")
 		for _, f := range cert.Faults {
 			if f.Toxiproxy {
@@ -292,10 +318,22 @@ func checkMeasurement(cert *Certificate) CheckResult {
 	switch {
 	case cert.Format == FormatV4 && len(cert.Faults) == 0:
 		return bad("a %s certificate must carry a non-empty faults list; it has been removed", FormatV4)
-	case cert.Format != FormatV4 && len(cert.Faults) > 0:
-		return bad("a %s certificate cannot carry faults (only %s does); the list was added or the format relabelled", cert.Format, FormatV4)
-	case cert.Format == FormatV4 && !m.Bound:
+	case cert.Format != FormatV4 && cert.Format != FormatV5 && len(cert.Faults) > 0:
+		return bad("a %s certificate cannot carry faults (only %s and %s do); the list was added or the format relabelled", cert.Format, FormatV4, FormatV5)
+	case (cert.Format == FormatV4 || cert.Format == FormatV5) && len(cert.Faults) > 0 && !m.Bound:
 		return bad("faults can only be bound to a bound measurement; this one is not")
+	}
+	// The precondition list is part of the record the bundle hash commits to. v5 REQUIRES one
+	// (or a not_applicable tally that one must explain) and every other format forbids it.
+	switch {
+	case cert.Format != FormatV5 && len(cert.Preconditions) > 0:
+		return bad("a %s certificate cannot carry preconditions (only %s does); the list was added or the format relabelled", cert.Format, FormatV5)
+	case cert.Format == FormatV5 && len(cert.Preconditions) == 0:
+		return bad("a %s certificate must carry its preconditions list (it exists for runs that have one, or an N/A count that one explains); it has been removed", FormatV5)
+	case cert.Format == FormatV5 && !m.Bound:
+		return bad("preconditions can only be bound to a bound measurement; this one is not")
+	case cert.Format == FormatV5 && cert.Tallies.NotApplicable > 0 && !hasVerdict(cert.Preconditions, "absent"):
+		return bad("tallies show %d not_applicable scenario(s) but no precondition is recorded absent to explain them", cert.Tallies.NotApplicable)
 	}
 	if !m.Bound {
 		if m.State != artifactmeasure.StateNotMeasured || m.ScenarioEvidenceRoot != "" || len(m.Running) != 0 || m.Unresolved != 0 ||
@@ -313,6 +351,9 @@ func checkMeasurement(cert *Certificate) CheckResult {
 	for _, f := range cert.Faults {
 		rec.Faults = append(rec.Faults, artifactmeasure.Fault(f))
 	}
+	for _, p := range cert.Preconditions {
+		rec.Preconditions = append(rec.Preconditions, artifactmeasure.Precondition(p))
+	}
 	if err := artifactmeasure.Check(rec, cert.VerdictRecord.ArtifactDigest); err != nil {
 		return bad("the claimed measurement contradicts itself: %v", err)
 	}
@@ -328,6 +369,18 @@ func checkMeasurement(cert *Certificate) CheckResult {
 	}
 	return CheckResult{Name: name, Status: StatusNotBound,
 		Detail: "NOT MEASURED — " + m.Reason + " (the record is bound to the verdict, but it proves nothing about the running build)"}
+}
+
+// VerdictNotApplicable is the verdict of a run in which every scenario was not applicable (v5 only).
+const VerdictNotApplicable = "not_applicable"
+
+func hasVerdict(ps []Precondition, v string) bool {
+	for _, p := range ps {
+		if p.Verdict == v {
+			return true
+		}
+	}
+	return false
 }
 
 func orEmpty(s []string) []string {
@@ -502,7 +555,7 @@ func Verify(ctx context.Context, cert *Certificate, svc chainread.ChainService, 
 		// An unknown format cannot be rebuilt into ANY payload, so nothing below could be compared:
 		// answer once, by name, and let Overall refuse it.
 		return []CheckResult{{Name: "certificate format", Status: StatusMismatch,
-			Detail: fmt.Sprintf("format %q is not one this verifier knows (want %s, %s, %s or %s)", cert.Format, FormatV4, Format, FormatV2, FormatV1)}}
+			Detail: fmt.Sprintf("format %q is not one this verifier knows (want %s, %s, %s, %s or %s)", cert.Format, FormatV5, FormatV4, Format, FormatV2, FormatV1)}}
 	}
 	roles := roleOfAnchors(cert.Anchors)
 

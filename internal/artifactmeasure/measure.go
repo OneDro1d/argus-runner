@@ -93,6 +93,23 @@ type Measurement struct {
 	// control plane that drops the unknown key recomputes a different bundle hash and REFUSES the push -
 	// a fault run is rejected by name, never recorded as a fault-free one.
 	Faults []Fault `json:"faults,omitempty"`
+	// Preconditions are the results of the preconditions the run's set declared, in id order.
+	// LAST, omitempty, unversioned, for exactly the reason Faults is: a run without one marshals to the bytes it
+	// always did, and an older control plane that drops the unknown key recomputes a different bundle hash and
+	// REFUSES the push - a precondition run is rejected by name, never recorded as one without.
+	Preconditions []Precondition `json:"preconditions,omitempty"`
+}
+
+// Precondition is the certificate-bound projection of report.Precondition: the id and built-in kind, the
+// verdict, and both controls' observations. Executor-attested (the executor ran the probe in its own
+// namespace); bound to the verdict by the evidence bundle hash.
+type Precondition struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Verdict  string `json:"verdict"`
+	Positive string `json:"positive"`
+	Negative string `json:"negative"`
+	Residue  string `json:"residue,omitempty"`
 }
 
 // Fault is the certificate-bound projection of report.Fault: what was done to the system under test, to which
@@ -205,6 +222,9 @@ func Check(m Measurement, declared string) error {
 	if err := CheckFaults(m.Faults); err != nil {
 		return err
 	}
+	if err := CheckPreconditions(m.Preconditions); err != nil {
+		return err
+	}
 	if d, ok := NormalizeDigest(declared); ok {
 		declared = d
 	}
@@ -265,6 +285,31 @@ func CheckFaults(fs []Fault) error {
 		}
 		if f.RestoreOutcome != "failed" && f.RestoredAt == "" {
 			return fmt.Errorf("fault %d: %s without restored_at", i+1, f.RestoreOutcome)
+		}
+	}
+	return nil
+}
+
+// CheckPreconditions is the shape rule for a bound precondition list: unique ids in id order, a built-in kind,
+// a verdict from the closed set, and both observations present (a result with no evidence is not a result).
+// `broken` IS bindable: a broken instrument is a fact the certificate must state, not hide.
+func CheckPreconditions(ps []Precondition) error {
+	for i, p := range ps {
+		switch p.Kind {
+		case "networkpolicy.ingress_enforced", "networkpolicy.egress_enforced":
+		default:
+			return fmt.Errorf("precondition %d: kind %q is not a built-in one", i+1, p.Kind)
+		}
+		switch p.Verdict {
+		case "holds", "absent", "broken":
+		default:
+			return fmt.Errorf("precondition %d: verdict %q is not holds, absent or broken", i+1, p.Verdict)
+		}
+		if p.ID == "" || p.Positive == "" || p.Negative == "" {
+			return fmt.Errorf("precondition %d: a result names its id and both controls' observations", i+1)
+		}
+		if i > 0 && ps[i-1].ID >= p.ID {
+			return fmt.Errorf("precondition %d: ids are not unique and in order", i+1)
 		}
 	}
 	return nil

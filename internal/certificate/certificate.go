@@ -33,6 +33,14 @@ package certificate
 //     applied at least one; every other run keeps its v3 (or v2) certificate, byte for byte. The list is
 //     covered by the same anchored evidence_bundle_hash (it is part of the measurement record the hash
 //     commits to). An older verifier does not know v4 and refuses it by name.
+//   - FormatV5 ("argus-certificate/v5"): v4's superset for the PRECONDITION TIER. It is issued ONLY for a
+//     run that carries precondition results or at least one not_applicable scenario; every other run keeps
+//     its v1-v4 certificate, byte for byte. It adds a `not_applicable` bucket to the (anchored) tallies, a
+//     `not_applicable` verdict for a run in which every scenario was not applicable, and a `preconditions`
+//     list - each precondition's id, built-in kind, verdict and both controls' observations,
+//     executor-attested like the faults and covered by the same anchored evidence_bundle_hash. `faults`
+//     stays allowed (optional). An older verifier does not know v5 and REFUSES it by name: it must never
+//     verify a v5 certificate with the not_applicable count silently dropped.
 //
 // Format is what NEW certificates declare. FormatV1 and FormatV2 are still accepted on verify: every
 // certificate issued before v3 keeps verifying, as long as it is honest.
@@ -41,17 +49,32 @@ const (
 	FormatV2 = "argus-certificate/v2"
 	FormatV1 = "argus-certificate/v1"
 	FormatV4 = "argus-certificate/v4"
+	FormatV5 = "argus-certificate/v5"
 )
 
-// Tallied reports whether format's verdict anchor is VerdictTallied (v2, v3 and v4).
-func Tallied(format string) bool { return format == Format || format == FormatV2 || format == FormatV4 }
+// Tallied reports whether format's verdict anchor is VerdictTallied (v2 to v5).
+func Tallied(format string) bool {
+	return format == Format || format == FormatV2 || format == FormatV4 || format == FormatV5
+}
 
-// HasMeasurement reports whether format carries the artifact_measurement block (v3 and v4).
-func HasMeasurement(format string) bool { return format == Format || format == FormatV4 }
+// HasMeasurement reports whether format carries the artifact_measurement block (v3, v4 and v5).
+func HasMeasurement(format string) bool { return format == Format || format == FormatV4 || format == FormatV5 }
 
 // KnownFormat reports whether this verifier understands format. An unknown one is refused by name.
 func KnownFormat(format string) bool {
-	return format == Format || format == FormatV2 || format == FormatV1 || format == FormatV4
+	return format == Format || format == FormatV2 || format == FormatV1 || format == FormatV4 || format == FormatV5
+}
+
+// Precondition is one precondition's result on a v5 certificate: the typed projection of
+// artifactmeasure.Precondition. The id is the author's name for it; the probe ran in the executor's own
+// namespace, and nothing here is an address or a namespace.
+type Precondition struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Verdict  string `json:"verdict"` // holds | absent | broken
+	Positive string `json:"positive"`
+	Negative string `json:"negative"`
+	Residue  string `json:"residue,omitempty"`
 }
 
 // Fault is one fault the run applied to the system under test (v4). It is the certificate's typed projection
@@ -105,6 +128,9 @@ type Tallies struct {
 	Failed   int `json:"failed"`
 	Errored  int `json:"errored"`
 	Degraded int `json:"degraded,omitempty"`
+	// NotApplicable (v5 only) is the scenarios not executed because a precondition they depend on is
+	// absent. checkTallies refuses it on any other format. Anchored in the v5 verdict payload.
+	NotApplicable int `json:"not_applicable,omitempty"`
 }
 
 // Set is the certification set's own version-2 ledger commitment (SetV2), carried onto the
@@ -206,6 +232,10 @@ type Certificate struct {
 	// Faults is REQUIRED and non-empty on a v4 certificate and absent on every other format.
 	// The executor attests it; the anchored evidence_bundle_hash binds it.
 	Faults []Fault `json:"faults,omitempty"`
+
+	// Preconditions is REQUIRED (or Tallies.NotApplicable > 0) on a v5 certificate and absent on every other
+	// format. The executor attests it; the anchored evidence_bundle_hash binds it.
+	Preconditions []Precondition `json:"preconditions,omitempty"`
 
 	// ArtifactMeasurement is required on a v3 certificate and absent on older ones.
 	ArtifactMeasurement *ArtifactMeasurement `json:"artifact_measurement,omitempty"`

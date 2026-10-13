@@ -63,6 +63,13 @@ func buildVerifyFixture(t *testing.T, tallied bool) (cert *Certificate, svc chai
 // buildVerifyFixtureFor anchors a run with the given verdict and tallies (set scenario_count is 3).
 func buildVerifyFixtureFor(t *testing.T, tallied bool, verdictWord string, tl Tallies) (cert *Certificate, svc chainread.ChainService, signerAddr string, chainsPath string) {
 	t.Helper()
+	return buildVerifyFixtureBundle(t, tallied, verdictWord, tl, "")
+}
+
+// buildVerifyFixtureBundle is buildVerifyFixtureFor with the anchored evidence_bundle_hash chosen by the caller
+// ("" = the fixture's default), so a test can anchor the REAL hash of a measurement it then puts on the certificate.
+func buildVerifyFixtureBundle(t *testing.T, tallied bool, verdictWord string, tl Tallies, bundleHash string) (cert *Certificate, svc chainread.ChainService, signerAddr string, chainsPath string) {
+	t.Helper()
 	chain := newFakeChain()
 	addr, err := signerAddress(fixtureSignerKey)
 	if err != nil {
@@ -83,11 +90,14 @@ func buildVerifyFixtureFor(t *testing.T, tallied bool, verdictWord string, tl Ta
 	setRaw, _ := json.Marshal(setV2)
 	v2, v2tx := chain.anchor(t, addr, setRaw, &v1)
 	verdict := VerdictV2{RunID: "run-verify-1", ArtifactDigest: "sha256:" + fmt.Sprintf("%064d", 2), EvidenceBundleHash: "sha256:" + fmt.Sprintf("%064d", 3), Verdict: verdictWord}
+	if bundleHash != "" {
+		verdict.EvidenceBundleHash = bundleHash
+	}
 	var verdictRaw []byte
 	if tallied {
 		verdictRaw, _ = json.Marshal(VerdictTallied{
 			RunID: verdict.RunID, ArtifactDigest: verdict.ArtifactDigest, EvidenceBundleHash: verdict.EvidenceBundleHash, Verdict: verdict.Verdict,
-			Tallies: VerdictTallies{Passed: tl.Passed, Failed: tl.Failed, Errored: tl.Errored, Degraded: tl.Degraded}, FinishedAt: fixtureFinishedAt,
+			Tallies: VerdictTallies{Passed: tl.Passed, Failed: tl.Failed, Errored: tl.Errored, Degraded: tl.Degraded, NotApplicable: tl.NotApplicable}, FinishedAt: fixtureFinishedAt,
 		})
 	} else {
 		verdictRaw, _ = json.Marshal(verdict)

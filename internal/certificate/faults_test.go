@@ -46,12 +46,12 @@ func TestFormat_NewCertificatesWithoutFaultsStillDeclareV3(t *testing.T) {
 	if FormatV4 != "argus-certificate/v4" {
 		t.Fatalf("FormatV4 = %q", FormatV4)
 	}
-	for _, f := range []string{Format, FormatV2, FormatV1, FormatV4} {
+	for _, f := range []string{Format, FormatV2, FormatV1, FormatV4, FormatV5} {
 		if !KnownFormat(f) {
 			t.Errorf("%s is refused as unknown", f)
 		}
 	}
-	if KnownFormat("argus-certificate/v5") {
+	if KnownFormat("argus-certificate/v6") {
 		t.Error("an unknown format was accepted")
 	}
 	if !Tallied(FormatV4) || !HasMeasurement(FormatV4) || !HasMeasurement(Format) || HasMeasurement(FormatV2) {

@@ -32,6 +32,11 @@ type VerdictTallies struct {
 	Failed   int `json:"failed"`
 	Errored  int `json:"errored"`
 	Degraded int `json:"degraded"`
+	// NotApplicable (certificate v5) is the scenarios NOT EXECUTED because a precondition they depend on is
+	// absent. omitempty, unlike the four above: a verdict payload without any is byte-for-byte the payload
+	// every earlier run anchored, and a verifier that does not know the bucket rebuilds DIFFERENT bytes for
+	// a run that has one, so it can never read an N/A run as an honest pass.
+	NotApplicable int `json:"not_applicable,omitempty"`
 }
 
 // VerdictTallied is the verdict payload from certificate format v2 on: VerdictV2's four fields PLUS the

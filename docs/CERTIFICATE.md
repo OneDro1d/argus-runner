@@ -63,6 +63,23 @@ so removing or editing a fault, or hiding the list under a v3 label, fails `veri
 missing list is refused. The faults are what the executor reported; `verify` says so. An older `argus` binary
 refuses v4 by name.
 
+`argus-certificate/v5` is issued only for a run whose checks declared **preconditions** (a mechanism the
+check depends on, such as NetworkPolicy enforcement) or that has at least one **`not_applicable`** check;
+every other run keeps its v1 to v4 certificate, byte for byte. It adds:
+
+- a `not_applicable` count to the tallies. It is **anchored** in the verdict payload, so dropping it, moving
+  it into another bucket or relabelling the certificate as an older format fails `verify`. The counts must
+  add up: `passed + failed + errored + degraded + not_applicable == set.scenario_count`.
+- the `not_applicable` verdict, for a run in which every check was not applicable. It is never a pass:
+  nothing was verified about the system.
+- a `preconditions` list: each precondition's id, kind, result (`holds`, `absent` or `broken`) and what its
+  positive and negative controls observed. It is bound by the evidence-bundle hash. A `not_applicable` count
+  must be explained by at least one `absent` precondition.
+
+The precondition results are what the executor reported from probing its own namespace; `verify` says so.
+`faults` stays allowed on a v5. An older `argus` binary refuses v5 by name, so it can never read a v5
+certificate with the `not_applicable` count silently dropped.
+
 ### Which build was running (`artifact_measurement`, v3)
 
 `verdict_record.artifact_digest` is what the tester **declared**. Before a `final` or `scheduled` run

@@ -151,7 +151,7 @@ func cmdCertificateVerify(args []string) int {
 		return emitErr(exitErr, "certificate verify: parse %s: %v", rest[0], err)
 	}
 	if !certificate.KnownFormat(cert.Format) {
-		return emitErr(exitErr, "certificate verify: format %q, want %q, %q, %q or %q", cert.Format, certificate.FormatV4, certificate.Format, certificate.FormatV2, certificate.FormatV1)
+		return emitErr(exitErr, "certificate verify: format %q, want %q, %q, %q, %q or %q", cert.Format, certificate.FormatV5, certificate.FormatV4, certificate.Format, certificate.FormatV2, certificate.FormatV1)
 	}
 
 	var allow certificate.AllowList
