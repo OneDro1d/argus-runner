@@ -65,10 +65,15 @@ docker build --target ui -t ghcr.io/onedro1d/argus-runner:dev-ui .   # plus the 
 Optional build arguments: `VERSION`, `COMMIT`, `BUILD_DATE`, and `ARGUS_DEFAULT_CONTROL_PLANE_URL`,
 `ARGUS_DEFAULT_DOCS_URL`, `ARGUS_DEFAULT_GRAFANA_URL` (each replaces an address built into the binary). Apache JMeter and the
 PostgreSQL JDBC driver are downloaded from the Apache archive and Maven Central. Publish to your own registry; this
-repository does not publish anything by itself.
+repository has no workflow and publishes nothing by itself.
 
-The image is multi-arch capable (the binary is cross-compiled; the sampler jar is bytecode). This `Dockerfile` was
-assembled with the repository and has not been built yet: build it once before you rely on it.
+`ghcr.io/onedro1d/argus-runner` is built from this `Dockerfile` by the OneDroid team, by hand, outside this
+repository: a clean checkout of `main`, amd64 only, tagged `main` and `sha-<commit>`, with `VERSION` set to
+`0.0.0-open+<commit>`. A commit on `main` therefore has no image until the next such build; the `sha-` tag says
+which commit an image holds.
+
+The image is multi-arch capable (the binary is cross-compiled; the sampler jar is bytecode), but only amd64 is
+published.
 
 ## Layout notes
 
