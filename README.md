@@ -38,18 +38,25 @@ put on chain.
 
 ## Quickstart
 
-You need an account on the hosted control plane at `https://argus-dev.onedroid.ai`, and a Kubernetes cluster
-that can reach both your system and the control plane (the runner connects out only; it needs no inbound route).
+You need an account on the hosted control plane at `https://argus-dev.onedroid.ai` (create one there: **Sign up**
+with e-mail, Google or Microsoft; it is the evaluation environment, with no promise that data is kept, so keep
+production data out of it), a workspace in it (step 2), and a Kubernetes cluster that can reach both your system
+and the control plane (the runner connects out only; it needs no inbound route). Stuck at any step? `argus doctor`
+is read-only and prints, for each thing a first run would trip over, the command that fixes it.
 
 1. **Get the runner.**
    Pull the published image (`docker pull ghcr.io/onedro1d/argus-runner:main`; each build is also tagged
    `sha-<commit>`, and step 4 pins it by digest), or build it (`docker build -t argus-runner .`, see
    `BUILDING.md`). To get only the CLI: `go build -o argus ./cmd/argus`.
 
-2. **Sign in to the hosted control plane.**
+2. **Sign in to the hosted control plane, and make a workspace.** The sign-in opens a page in your browser where
+   you approve the CLI with the account you created. A workspace holds everything for one system under test;
+   `cloud-create-workspace` prints its id, which step 4 needs (or create it in the app, **Settings → My workspaces**).
 
    ```sh
    argus cloud-login --control-plane https://argus-dev.onedroid.ai --scope author
+   argus cloud-create-workspace --control-plane https://argus-dev.onedroid.ai --name <name>
+   argus doctor --control-plane https://argus-dev.onedroid.ai   # read-only: what a first run would trip over
    ```
 
 3. **Check your kit locally.** `examples/http-hello` is the smallest working kit (one config, one scenario).
