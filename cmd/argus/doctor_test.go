@@ -386,7 +386,7 @@ func TestDoctor_ExecutorVersionUnreachableIsUnknown(t *testing.T) {
 	}
 }
 
-// REPLAY L0929:R4 (tester verify/2026-09-29-doctor-pr326-live/R4-wrong-token.out), live against argus-dev
+// REPLAY L0929:R4 (a tester's run), live against argus-dev
 // with PR #326's binary: a wrong odts_ value in ARGUS_CP_AUTHOR_TOKEN. The control plane answered 401, and doctor
 // said the credential was ok and that the fix for the executor list was "re-run argus doctor". Re-running changes
 // nothing; the credential is the fault, and the report must say so where the credential is checked.
@@ -642,7 +642,7 @@ func TestDoctor_FailedRenewalIsUnknownWithASignInFix(t *testing.T) {
 	}
 }
 
-// REPLAY L0929:docker (tester verify/2026-09-29-312-fix-check/NOTE.md § Addendum 2). On a Coder
+// REPLAY L0929:docker (a tester's run § Addendum 2). On a Coder
 // workspace with the docker CLI and no daemon, the fix said "with the update block the control plane
 // publishes" — a block that stops at its first `docker pull`. Doctor now asks the daemon, read-only.
 func TestDoctor_NoDockerDaemonSaysTheUpdateBlockCannotRunHere(t *testing.T) {
@@ -726,7 +726,7 @@ func writeTokenFile(t *testing.T, value string) string {
 	return p
 }
 
-// REPLAY B:66 end to end (handoffs/2026-09-25-hub-runner-window-mixup.md:19-20): a Tokens-page author
+// REPLAY B:66 end to end (a tester's notes): a Tokens-page author
 // PAT went out in the wrap meant for the builder. Checked before the hand-off, the file says what it is —
 // and neither prints the value nor presents it to anyone.
 func TestDoctor_TokenFileNamesWhatItHoldsBeforeTheHandOff(t *testing.T) {
@@ -890,7 +890,7 @@ const validScenario = "# Scenario: The cloud MCP returns a clean TOOL error over
 	`{"transport":"streamable-http","tool":"author__get_executor_status","args":{"instance_id":"onedroid-selftest-unknown"},"request_id":"${cid}"}` +
 	"\n```\n\n## EXPECT\n\n### Runnable\n- result.isError == true\n\n## TIMEOUT\n30s\n\n## CLEANUP\nN/A — read-only.\n"
 
-// oldFormatScenario is A:56's pack as it was: tester-upstream-notepad scenarios-v2/SYN-S0-002-liveness.md, lines
+// oldFormatScenario is A:56's pack as it was: a tester's scenario pack, lines
 // 1-23 verbatim (its References section left out), written for executor 0.3.30. 0.3.31 made the format a strict
 // contract and refuses it.
 const oldFormatScenario = "# Scenario: Hub dev answers its liveness probe\n\n" +

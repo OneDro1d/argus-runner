@@ -42,8 +42,8 @@ func noDocker(in ExecutorInput) ExecutorInput {
 	return in
 }
 
-// REPLAY: one case per recorded incident this check claims (verify/2026-09-25-friction-investigation,
-// incidents-{A,B}-*.tsv; tagging in verify/2026-09-28-doctor-incident-tagging). The recorded state goes
+// REPLAY: one case per recorded incident this check claims (a tester's run,
+// tagging in a tester's run). The recorded state goes
 // in; the report must name the CAUSE (Detail) and the FIX (Fix). A:83 (a documented pin lagging the dev
 // builds) is tagged to this check too, but its versions were not recorded, so it has no replay here.
 func TestCheckExecutorVersion_Replay(t *testing.T) {
@@ -53,30 +53,30 @@ func TestCheckExecutorVersion_Replay(t *testing.T) {
 		detail      []string // every one must appear in Detail
 		fix         []string // every one must appear in Fix (case-insensitive)
 	}{
-		{"A:89", `handoffs/2026-09-22-en7-takeover-onboard-running.md:33 "0.3.36 runner lacks #135: always cleanup on mcp steps ignored"`,
+		{"A:89", `a tester's notes "0.3.36 runner lacks #135: always cleanup on mcp steps ignored"`,
 			asked(exec0336("sut-demo")), []string{"#135", `"always": true`, "mcp"}, []string{"0.3.37"}},
-		{"A:94", `handoffs/2026-09-22-sut-demo-live-prs-154-156.md:29 "0.3.36 lacks #135/#138/#140: passing UI rows still list bullets as unexecuted"`,
+		{"A:94", `a tester's notes "0.3.36 lacks #135/#138/#140: passing UI rows still list bullets as unexecuted"`,
 			asked(exec0336("sut-demo")), []string{"#138", "#140", "unexecuted"}, []string{"0.3.37"}},
 		{"B:15", `the tester notes "3 of 3 not evaluated (0.3.36 has no #139 cause line)"`,
 			asked(exec0336("sut-demo")), []string{"#140", "#139", "cause"}, []string{"0.3.37"}},
-		{"B:68", `handoffs/2026-09-25-hub-runner-window-mixup.md:47 "executor lost … fixed by #209, ships from v0.3.37-rc.1"`,
+		{"B:68", `a tester's notes "executor lost … fixed by #209, ships from v0.3.37-rc.1"`,
 			asked(exec0336("hub-tester")), []string{"#209", "executor lost"}, []string{"0.3.37"}},
-		{"B:77", `verify/2026-09-25-en7-sut-demo/PROOF-STATUS.md:17 "WEBUI-001 on the 0.3.36 executor lists all 4 enforced bullets under unexecuted"`,
+		{"B:77", `a tester's run "WEBUI-001 on the 0.3.36 executor lists all 4 enforced bullets under unexecuted"`,
 			asked(exec0336("sut-demo")), []string{"AC-D27", "unexecuted"}, []string{"0.3.37"}},
 		{"B:38", `the tester notes "The CP RECOMMENDS sha256:d7aff596… = 0.3.32, OLDER than ours"`,
 			asked(exec0336("sut-demo")), []string{"0.3.32", "NEWER", "DOWNGRADE", "d7aff596"}, []string{"do not run", "update block"}},
-		{"B:56", `verify/2026-09-23-hub-tester/ONBOARD-HUB.md:103 (recurrence of B:38)`,
+		{"B:56", `a tester's run (recurrence of B:38)`,
 			asked(exec0336("hub-tester")), []string{"0.3.32", "DOWNGRADE"}, []string{"do not run"}},
-		{"B:60", `handoffs/2026-09-24-hub-harness-up-9of12-green.md:42 "Never run the CP's update_command" (recurrence of B:38)`,
+		{"B:60", `a tester's notes "Never run the CP's update_command" (recurrence of B:38)`,
 			asked(exec0336("hub-tester")), []string{"0.3.32", "DOWNGRADE"}, []string{"do not run"}},
-		{"B:80", `NOTES.md:43 (09-25) "CP update_command recommends d7aff596… = 0.3.32 — a DOWNGRADE" (recurrence of B:38)`,
+		{"B:80", `a tester's notes (09-25) "CP update_command recommends d7aff596… = 0.3.32 — a DOWNGRADE" (recurrence of B:38)`,
 			asked(exec0336("hub-tester")), []string{"0.3.32", "DOWNGRADE"}, []string{"do not run"}},
-		{"A:95", `tester-upstream-notepad handoffs/2026-09-22-sut-demo-live-prs-154-156.md:30 "'\"' or '\\' in a ${VAR} value silently empties app_url (ui_scenario.go:54); app_url expanded twice."`,
+		{"A:95", `a tester's notes "'\"' or '\\' in a ${VAR} value silently empties app_url (ui_scenario.go:54); app_url expanded twice."`,
 			asked(exec0336("sut-demo")), []string{"#160", "quote or backslash", "${VAR}", "APP_URL"}, []string{"0.3.37"}},
-		{"B:28", `handoffs/2026-09-23-sut-demo-59-59-prs-awaiting-merge.md:65 "quote/backslash in ${VAR} empties the UI payload, internal/argus/ui_scenario.go:53-56"`,
+		{"B:28", `a tester's notes "quote/backslash in ${VAR} empties the UI payload, internal/argus/ui_scenario.go:53-56"`,
 			asked(exec0336("sut-demo")), []string{"#160", "quote or backslash", "payload"}, []string{"0.3.37"}},
 		// Rows recorded after the 09-25 investigation, each with its own source.
-		{"T0928:312", `verify/2026-09-28-before-trial/trial-timeline.txt:87 "no runner id paired for this instance … before author_get_report can relay to it" — the trial agent then called 19 reds "Memstore gaps"`,
+		{"T0928:312", `a tester's run "no runner id paired for this instance … before author_get_report can relay to it" — the trial agent then called 19 reds "Memstore gaps"`,
 			asked(exec0336("sut-demo")), []string{"#286", "author_get_report", "why"}, []string{"0.3.40"}},
 		{"GH:307", `issue #307 (AC-D50): "7 registrations, 7 destructions, 0 survivors across compose, k3d and managed AKS"; the 0.3.36 kit has the same probe (argus-kit-0.3.36/onboarding/onboard.sh:3784-3789)`,
 			asked(exec0336("sut-demo")), []string{"#308", "AC-D50", "destroy"}, []string{"0.3.43"}},

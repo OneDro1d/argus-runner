@@ -21,9 +21,9 @@ import (
 
 // The real line shape, measured against the shared Loki (content shortened; no value of a real line is kept).
 const (
-	plainWarn  = `10:06:24.852569 main-engine WARN: [PollTick] skipping duplicate ack`
-	plainInfo  = `10:06:25.101113 main-engine INFO: [PollTick] tick complete`
-	plainError = `10:06:26.000001 main-engine ERROR: [Settle] order rejected`
+	plainWarn  = `10:06:24.852569 main-engine WARN: [Tick] skipping duplicate ack`
+	plainInfo  = `10:06:25.101113 main-engine INFO: [Tick] tick complete`
+	plainError = `10:06:26.000001 main-engine ERROR: [Worker] job rejected`
 	// the RE2 expression a plain-text instance declares as observability.loki.log_regex
 	plainRegex = `^(?P<time>\S+) (?P<service>\S+) (?P<level>[A-Z]+): `
 )
@@ -83,7 +83,7 @@ func (s *simShared) metricQueries() []string {
 	return append([]string(nil), s.metric...)
 }
 
-func arbStream(lines ...string) []simStream {
+func engineStream(lines ...string) []simStream {
 	return []simStream{{labels: map[string]string{"cluster": "cluster-a", "namespace": "sut-ns", "container": "main-engine", "pod": "main-engine-0"}, lines: lines}}
 }
 
@@ -111,7 +111,7 @@ func levelQuery(t *testing.T, src *SharedLogSource, level string) string {
 
 // THE LIVE FINDING, reproduced: lines of the real plain-text shape, a json-format instance, `level=error`.
 func TestParseHealth_PlainTextLinesAgainstTheJSONFormatIsUnparsed(t *testing.T) {
-	sim := &simShared{streams: arbStream(plainWarn, plainInfo, plainError)}
+	sim := &simShared{streams: engineStream(plainWarn, plainInfo, plainError)}
 	l := &Loki{BaseURL: sim.server(t).URL, Shared: shSource()} // Format json
 	q := levelQuery(t, shSource(), "error")
 	t.Logf("shared-mode LogQL, level=error claim on the json format:\n%s", q)
@@ -142,7 +142,7 @@ func TestParseHealth_PlainTextLinesAgainstTheJSONFormatIsUnparsed(t *testing.T) 
 // Some lines parse: the zero is a real zero and is kept.
 func TestParseHealth_SomeLinesParseKeepsTheZero(t *testing.T) {
 	good := `{"level":"info","msg":"fine"}`
-	sim := &simShared{streams: arbStream(plainWarn, good, plainInfo)}
+	sim := &simShared{streams: engineStream(plainWarn, good, plainInfo)}
 	l := &Loki{BaseURL: sim.server(t).URL, Shared: shSource()}
 	read := l.ReadLogs(levelQuery(t, shSource(), "error"), pwFrom, pwTo)
 	if read.Err != nil || read.Unparsed != nil || read.NoStream || len(read.Lines) != 0 {
@@ -156,7 +156,7 @@ func TestParseHealth_SomeLinesParseKeepsTheZero(t *testing.T) {
 // No probe when it cannot matter: a non-empty read, a query with no parser stage, an own Loki.
 func TestParseHealth_NoProbeWhenItCannotMatter(t *testing.T) {
 	t.Run("lines were found", func(t *testing.T) {
-		sim := &simShared{streams: arbStream(`{"level":"error"}`)}
+		sim := &simShared{streams: engineStream(`{"level":"error"}`)}
 		l := &Loki{BaseURL: sim.server(t).URL, Shared: shSource()}
 		read := l.ReadLogs(levelQuery(t, shSource(), "error"), pwFrom, pwTo)
 		if len(read.Lines) != 1 || len(sim.metricQueries()) != 0 {
@@ -164,7 +164,7 @@ func TestParseHealth_NoProbeWhenItCannotMatter(t *testing.T) {
 		}
 	})
 	t.Run("a correlation query has no parser stage", func(t *testing.T) {
-		sim := &simShared{streams: arbStream(plainInfo)}
+		sim := &simShared{streams: engineStream(plainInfo)}
 		l := &Loki{BaseURL: sim.server(t).URL, Shared: shSource()}
 		q, _ := l.CorrelationQuery(shCID, "", "")
 		read := l.ReadLogs(q, pwFrom, pwTo)
@@ -173,7 +173,7 @@ func TestParseHealth_NoProbeWhenItCannotMatter(t *testing.T) {
 		}
 	})
 	t.Run("a source query with no derived label has no parser stage", func(t *testing.T) {
-		sim := &simShared{streams: arbStream(plainInfo)}
+		sim := &simShared{streams: engineStream(plainInfo)}
 		l := &Loki{BaseURL: sim.server(t).URL, Shared: shSource()}
 		q, _ := l.SourceQuery(map[string]string{"service": "main-engine"}, "no-such-text", "")
 		read := l.ReadLogs(q, pwFrom, pwTo)
@@ -272,7 +272,7 @@ func TestPlainTextRegex_ExtractsLevelAndServiceFromTheRealLineShape(t *testing.T
 		t.Fatalf("extracted %v", got)
 	}
 	// and through LogQL: the generated `level=WARN` query selects the line, `| service=` selects it by the extracted group
-	streams := arbStream(plainWarn, plainInfo, plainError)
+	streams := engineStream(plainWarn, plainInfo, plainError)
 	q := levelQuery(t, plainSource(), "WARN")
 	if got := simQuery(t, q, streams); !reflect.DeepEqual(got, []string{plainWarn}) {
 		t.Fatalf("level=WARN must select exactly the WARN line, got %v\nquery %s", got, q)
@@ -306,7 +306,7 @@ func TestPlainTextRegex_GeneratedLogQL(t *testing.T) {
 // A level claim is judged: a plain-text SUT with its format declared selects ERROR lines, and a quiet window is a real zero.
 func TestPlainTextRegex_ReadsAndJudgesLevel(t *testing.T) {
 	t.Run("an ERROR line is found", func(t *testing.T) {
-		sim := &simShared{streams: arbStream(plainWarn, plainError)}
+		sim := &simShared{streams: engineStream(plainWarn, plainError)}
 		l := &Loki{BaseURL: sim.server(t).URL, Shared: plainSource()}
 		read := l.ReadLogs(levelQuery(t, plainSource(), "ERROR"), pwFrom, pwTo)
 		if read.Err != nil || len(read.Lines) != 1 || read.Lines[0].Line != plainError || read.Unparsed != nil {
@@ -314,7 +314,7 @@ func TestPlainTextRegex_ReadsAndJudgesLevel(t *testing.T) {
 		}
 	})
 	t.Run("no ERROR line: the expression reads the others, so the zero is real", func(t *testing.T) {
-		sim := &simShared{streams: arbStream(plainWarn, plainInfo)}
+		sim := &simShared{streams: engineStream(plainWarn, plainInfo)}
 		l := &Loki{BaseURL: sim.server(t).URL, Shared: plainSource()}
 		read := l.ReadLogs(levelQuery(t, plainSource(), "ERROR"), pwFrom, pwTo)
 		if read.Err != nil || len(read.Lines) != 0 || read.Unparsed != nil || read.NoStream {
@@ -328,7 +328,7 @@ func TestPlainTextRegex_ReadsAndJudgesLevel(t *testing.T) {
 	t.Run("an expression that matches none of the lines is Unparsed (format regexp)", func(t *testing.T) {
 		src := shSource()
 		src.Regexp = `^level=(?P<level>[a-z]+) ` // a logfmt-ish expression on these plain lines
-		sim := &simShared{streams: arbStream(plainWarn, plainInfo)}
+		sim := &simShared{streams: engineStream(plainWarn, plainInfo)}
 		l := &Loki{BaseURL: sim.server(t).URL, Shared: src}
 		read := l.ReadLogs(levelQuery(t, src, "error"), pwFrom, pwTo)
 		if read.Err != nil || read.Unparsed == nil || read.Unparsed.Format != "regexp" || read.Unparsed.Lines != 2 {

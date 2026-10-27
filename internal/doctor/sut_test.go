@@ -26,7 +26,7 @@ func withSUT(e ExecutorStatus, state string, checkedAt *time.Time) ExecutorStatu
 }
 
 // documenso is the first open-source SUT onboarded on the compose tier (tester
-// verify/2026-10-01-documenso-native): its base_url is the in-network name http://documenso:3100/api/v2,
+// a tester's run): its base_url is the in-network name http://documenso:3100/api/v2,
 // which the executor can dial and the operator's host cannot.
 func documenso(state string, checkedAt *time.Time) ExecutorStatus {
 	e := exec0336("documenso-local")

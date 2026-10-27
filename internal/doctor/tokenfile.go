@@ -165,7 +165,7 @@ func CheckTokenFile(in TokenFileInput) Check {
 }
 
 // runnerFix mints the file the runner side needs, in a session file of its own so the operator's author
-// session is not replaced — the order handoffs/2026-09-25-hub-runner-window-mixup.md settled on.
+// session is not replaced — the order a tester's notes settled on.
 func runnerFix(cp, path string) string {
 	return "ARGUS_SESSION_FILE=$HOME/.config/argus/session-runner.json argus cloud-login --control-plane " + orURL(cp) +
 		" --scope runner --token-out " + path + " (a session of its own, so your author session is not replaced), then check it: " +
