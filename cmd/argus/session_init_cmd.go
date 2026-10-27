@@ -71,7 +71,7 @@ const builderUsageText = `usage: argus builder init <app> [--dir <notepad-dir>] 
         Run it once to write the files; it prints the ONE thing you must do: paste your builder token into
         builder.env after ARGUS_BUILDER_TOKEN_<APP>=. Run it again: it then calls tools/list on the control
         plane WITH THAT TOKEN and
-          - FAILS loudly (exit 3) unless every tool returned is runner__* (a builder must never see an
+          - FAILS loudly (exit 3) unless every tool returned is runner_* (a builder must never see an
             author tool: a token that lists one has author scope and would expose the tester's checks);
           - REFUSES (exit 3) if the control plane answers with an OAuth/sign-in challenge (HTTP 401 +
             WWW-Authenticate) instead of tools: a builder must never go through a sign-in prompt, which
@@ -219,7 +219,7 @@ func mustAbs(p string) string {
 }
 
 // finishBuilderInit is the builder's verification: with no token yet, say what to paste; with one, call
-// tools/list with it and refuse unless it returns only runner__* tools. .mcp.json is wired only on success.
+// tools/list with it and refuse unless it returns only runner_* tools. .mcp.json is wired only on success.
 func finishBuilderInit(res *sessioninit.Result, mcpPath string) int {
 	// unwire pulls back an "argus" entry an earlier run wrote, on EVERY path that does not end in a verified
 	// token: the usage text promises it, and a stale entry keeps pointing a session at a token that is gone,
@@ -288,7 +288,7 @@ func finishBuilderInit(res *sessioninit.Result, mcpPath string) int {
 	if werr != nil {
 		return emitErr(exitErr, "builder init: wiring %s: %v", mcpPath, werr)
 	}
-	fmt.Printf("PASS: tools/list returned %d tools, all runner__* (no author tool visible).\n", len(tools))
+	fmt.Printf("PASS: tools/list returned %d tools, all runner_* (no author tool visible).\n", len(tools))
 	if changed {
 		fmt.Printf("wrote  %s (entry %q)\n", mcpPath, sessioninit.MCPKey)
 	} else {

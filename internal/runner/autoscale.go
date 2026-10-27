@@ -19,7 +19,7 @@ import (
 )
 
 // Right-sizing on the k8s tiers (UC196 / §D-3.1.1 ADR-11). An idle-parked instance scales its
-// executor Deployment DOWN to a cheap floor (keeping its runner__* endpoint reachable); a triggered
+// executor Deployment DOWN to a cheap floor (keeping its runner_* endpoint reachable); a triggered
 // run scales it back to min-3 (active instances honour min-3). Default posture = scale-idle-down.
 //
 // The executor scales its OWN Deployment via the same in-cluster ServiceAccount that UC069 uses for

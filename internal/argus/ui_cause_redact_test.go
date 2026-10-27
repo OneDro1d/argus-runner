@@ -54,7 +54,7 @@ func TestUIScenario_CauseRedactsTheURL(t *testing.T) {
 
 	t.Run("from the JSON report", func(t *testing.T) {
 		var saw string
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			saw = appURL
 			dir := filepath.Join(vendorDir, "argus-out")
 			if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -71,7 +71,7 @@ func TestUIScenario_CauseRedactsTheURL(t *testing.T) {
 
 	t.Run("from stderr", func(t *testing.T) {
 		var saw string
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			saw = appURL
 			return 1, true, "Error: page.goto: net::ERR_CONNECTION_REFUSED at " + appURL + "\nCall log:"
 		}
@@ -166,7 +166,7 @@ func TestUIScenario_EveryObservedBranchIsRedacted(t *testing.T) {
 
 	t.Run("no Playwright artifact: Classify's first stderr line, behind colour codes", func(t *testing.T) {
 		sc := uiScenario(t, "http://fakeuser:${ZZ_FAKE_TOKEN}@127.0.0.1:59997/app?token=${ZZ_FAKE_TOKEN}", "dom has .banner")
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			return 1, false, "\x1b[2m\x1b[22m\n\x1b[31mError: page.goto: net::ERR_CONNECTION_REFUSED at " + appURL + "\x1b[39m\nCall log:"
 		}
 		res := runUIScenario(sc, "tr-152-1", t.TempDir())
@@ -178,7 +178,7 @@ func TestUIScenario_EveryObservedBranchIsRedacted(t *testing.T) {
 
 	t.Run("a failed backend-errors bullet quoting the response URL", func(t *testing.T) {
 		sc := uiScenario(t, "http://127.0.0.1:59997/app?code=${ZZ_APP_CODE}", "no backend 4xx/5xx")
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			if len(asserts) != 1 {
 				t.Fatalf("fixture: want 1 declared bullet, got %d", len(asserts))
 			}
@@ -204,7 +204,7 @@ func TestUIScenario_EveryObservedBranchIsRedacted(t *testing.T) {
 
 	t.Run("a secret in the URL path (review point 4)", func(t *testing.T) {
 		sc := uiScenario(t, "http://127.0.0.1:59997/${ZZ_FAKE_TOKEN}/app", "dom has .banner")
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			return 1, false, "Error: page.goto: net::ERR_CONNECTION_REFUSED at " + appURL
 		}
 		noLeak(t, runUIScenario(sc, "tr-152-3", t.TempDir()), "at http://127.0.0.1:59997/${ZZ_FAKE_TOKEN}/app")

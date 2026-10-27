@@ -171,11 +171,12 @@ func (d *DockerRunner) ExecCleanup(form scenario.CleanupForm, body string, props
 	switch form {
 	case scenario.CleanupBash:
 		cmd := exec.CommandContext(ctx, "docker", "compose", "-f", d.ComposeFile, "exec", "-T", svc, "sh", "-c", body)
+		started := time.Now()
 		if err := cmd.Run(); err != nil {
 			if ctx.Err() != nil {
 				return errCleanupTimeout
 			}
-			return errCleanupFailed
+			return bashCleanupErr(err, time.Since(started))
 		}
 		return nil
 	case scenario.CleanupSQL:
@@ -206,4 +207,19 @@ func (d *DockerRunner) ExecCleanup(form scenario.CleanupForm, body string, props
 var (
 	errCleanupTimeout = errors.New("cleanup timed out")
 	errCleanupFailed  = errors.New("cleanup did not complete")
+	// errCleanupShellRefused (#709): a bash block exited 2 within a second — dash's
+	// syntax-error exit. Only the exit code and the duration were looked at, never any output.
+	errCleanupShellRefused = errors.New("cleanup refused by the shell")
 )
+
+// shellRefusedWithin is how fast a status-2 exit must come to be read as the shell refusing the script.
+const shellRefusedWithin = time.Second
+
+// bashCleanupErr classifies a failed `sh -c` cleanup from its exit code and duration alone.
+func bashCleanupErr(err error, elapsed time.Duration) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 2 && elapsed < shellRefusedWithin {
+		return errCleanupShellRefused
+	}
+	return errCleanupFailed
+}

@@ -90,6 +90,46 @@ func NativeEngineTag(s *Scenario) string {
 	return ""
 }
 
+// RunnerKind names the runner a scenario is handed to at run time.
+type RunnerKind string
+
+const (
+	RunnerAMQPLoad RunnerKind = "amqp-load"
+	RunnerHTTPLoad RunnerKind = "http-load"
+	RunnerChain    RunnerKind = "chain"
+	RunnerMCP      RunnerKind = "mcp"
+	RunnerUI       RunnerKind = "ui"
+	// RunnerPlain is the JMeter path chosen by layer (a plain TRIGGER request).
+	RunnerPlain RunnerKind = "plain"
+)
+
+// ⛔ RunnerKindOf IS THE ONE FUNCTION THAT DECIDES WHICH RUNNER A SCENARIO GETS. The run dispatch
+// (argus.runOneScenarioWithLogs) AND the money guard (MoneyGuardViolations, MoneyWriteAmountViolations)
+// both switch on it, so the guard judges the scenario AS the runner it will get. The order is the
+// dispatch's: the AMQP Load layer, the HTTP Load layer, then the tags chain, mcp, ui, else plain.
+// (the guard used to pick by tag in the order mcp, ui, chain and ignore the layer, so a
+// "ui, chain" file was judged as a ui entry and then RUN as a chain.)
+func RunnerKindOf(s *Scenario) RunnerKind {
+	switch PrimaryLayer(s) {
+	case AMQPLoadLayer:
+		return RunnerAMQPLoad
+	case HTTPLoadLayer:
+		return RunnerHTTPLoad
+	}
+	if s == nil {
+		return RunnerPlain
+	}
+	switch {
+	case contains(s.Tags, ChainTag):
+		return RunnerChain
+	case contains(s.Tags, MCPTag):
+		return RunnerMCP
+	case contains(s.Tags, UITag):
+		return RunnerUI
+	}
+	return RunnerPlain
+}
+
 // JudgedByResponseCode reports whether this scenario's verdict will be decided by comparing HTTP
 // response codes to the declared `status=` — i.e. whether it lands on argus.judge().
 //

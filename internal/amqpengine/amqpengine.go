@@ -86,6 +86,12 @@ type Outcome struct {
 	OK   bool   // true only when the broker accepted the operation outright
 	Code int    // the AMQP reply code (403, 406, 404, ...); 0 on success or when no channel-level code was observed
 	Text string // redacted human-readable detail; "" on a plain success
+	// TimedOut is true ONLY when ConsumeDelivery's own wait ran out on a healthy, open consumer with
+	// no message delivered. Code == 0 does NOT mean that: a closed consumer channel, the engine
+	// watchdog tearing the connection down, and a channel/connection error that carries no AMQP code
+	// all have Code 0 too. A caller that reads "nothing arrived" as "the queue is empty"
+	// (`queue is empty`) must test this field, never Code == 0.
+	TimedOut bool
 }
 
 // ok is the shared "the broker accepted this" Outcome.

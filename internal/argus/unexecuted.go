@@ -174,7 +174,7 @@ func unexecutedRunnable(s *scenario.Scenario, enforced []string) []report.Unexec
 				// severity.go accepts any assertion shape on a chain, and ParseChainClaims skips a
 				// bullet with no `step` prefix — so it is declared as a check and judged by nobody.
 				add(b, "not executed: a chain's runnable bullet must name a step — \"- step <name>: <assertion>\" (V31-002)")
-			case kind[name] != "mcp" && kind[name] != "http" && kind[name] != "amqp":
+			case kind[name] != "mcp" && kind[name] != "http" && kind[name] != "amqp" && kind[name] != "db" && kind[name] != "logs" && kind[name] != "bus":
 				// the orphan guard only checks that the NAME exists; ExpectProblems skips non-mcp
 				// steps and the runner's ui branch ignores claims.
 				//

@@ -23,8 +23,8 @@ func TestLoadErrorsGroupsTransportFailuresByReason(t *testing.T) {
 	ss = append(ss, LoadSample{StartMs: 1000, ElapsedMs: 5, Code: "Non HTTP response code: org.apache.http.conn.HttpHostConnectException", Message: "Non HTTP response message: Connection refused"})
 	got := LoadErrorsFrom(ss, nil)
 	want := []LoadError{
-		{Reason: "java.net.SocketException: Network is unreachable", Count: 2},
-		{Reason: "org.apache.http.conn.HttpHostConnectException: Connection refused", Count: 1},
+		{Reason: "java.net.SocketException: Network is unreachable", Kind: "other", Count: 2},
+		{Reason: "org.apache.http.conn.HttpHostConnectException: Connection refused", Kind: "refused", Count: 1},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("errors = %+v, want %+v", got, want)

@@ -30,13 +30,7 @@ func (e savedNotNumberError) Error() string {
 		"cannot be made (the value is held out)"
 }
 
-func isNumericBodyOp(op string) bool {
-	switch op {
-	case mcp.BodyGTOp, mcp.BodyGTEOp, mcp.BodyLTOp, mcp.BodyLTEOp:
-		return true
-	}
-	return false
-}
+func isNumericBodyOp(op string) bool { return mcp.IsNumericOp(op) } // orderings, `==` and `within`
 
 // bindBodyAsserts returns a per-execution COPY of asserts with ${saved.<var>} bound into every Value
 // (bindSaved: the args' grammar, the args' error naming every unbound variable). A numeric comparison
@@ -56,7 +50,9 @@ func bindBodyAsserts(asserts []mcp.BodyAssert, vars map[string]string) ([]mcp.Bo
 		if isNumericBodyOp(out[i].Op) {
 			if name, whole := scenario.SavedRefWhole(written); whole {
 				f, perr := strconv.ParseFloat(strings.TrimSpace(v), 64)
-				if perr != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+				// `==` and `within` compare exactly and read only a plain decimal (mcp.ExactNumber).
+				exactOnly := (out[i].Op == mcp.BodyEQOp || out[i].Op == mcp.BodyWithinOp) && !mcp.ExactNumber(v)
+				if perr != nil || math.IsNaN(f) || math.IsInf(f, 0) || exactOnly {
 					return nil, savedNotNumberError{name: name}
 				}
 			}
@@ -64,23 +60,6 @@ func bindBodyAsserts(asserts []mcp.BodyAssert, vars map[string]string) ([]mcp.Bo
 		out[i].Value = v
 	}
 	return out, nil
-}
-
-// keepSavedThresholdsAsWritten returns bound with every numeric assertion whose threshold is a whole
-// ${saved.<var>} put back AS WRITTEN (from written), so a report never shows the saved value.
-func keepSavedThresholdsAsWritten(written, bound mcp.Expect) mcp.Expect {
-	if len(written.Body) != len(bound.Body) {
-		return bound
-	}
-	out := bound
-	out.Body = make([]mcp.BodyAssert, len(bound.Body))
-	copy(out.Body, bound.Body)
-	for i, w := range written.Body {
-		if _, whole := scenario.SavedRefWhole(w.Value); whole && isNumericBodyOp(w.Op) {
-			out.Body[i] = w
-		}
-	}
-	return out
 }
 
 // needsBodyAsserts is the rule-3 question ("can this step be given its inputs at all?") for a step's
@@ -185,6 +164,7 @@ const minRedactedSavedLen = 6
 // the longer one's replacement. Plain and JSON-escaped spellings, as redactSavedIn. exempt (may be "")
 // is the one variable left alone: the claim's own numeric threshold.
 func redactEverySaved(observed string, vars map[string]string, exempt string) string {
+	observed = maskJSONSavedText(observed, vars) // a JSON-saved value is a structure: masked as a subtree too
 	names := make([]string, 0, len(vars))
 	for name, v := range vars {
 		if len(v) >= minRedactedSavedLen && name != exempt {

@@ -21,7 +21,7 @@ func TestRouterPrincipal_NeverSeesTheBuilderNamespace(t *testing.T) {
 			return mcpserver.Ok(map[string]any{"ok": true})
 		},
 	}
-	srv, err := mcpserver.NewServerWithAuth(Authenticator(tbl), append(Tools(tbl, &fakeFwd{}), stub)...)
+	srv, err := mcpserver.NewServerWithAuth(Authenticator(tbl), stub)
 	if err != nil {
 		t.Fatal(err)
 	}

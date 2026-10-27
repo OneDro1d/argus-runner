@@ -9,7 +9,10 @@ package report
 // ⛔ CUSTODY (UI-REWORK DESIGN §0.1 / AMQP design §4.5). These are MEASUREMENTS of what the broker did:
 // session counts, rates, microsecond quantiles, error classes by count, blocked windows. They carry NO
 // threshold (the declared targets live in the scenario's `## LOAD`, which is holdout material), no
-// credential, no broker address and no message content. They are author/product-hat readable like every
+// credential and no broker address. Two fields hold text that can come from outside: a blocked period's
+// Reason (the broker's words) and an error reason's Reason (the load tool's message, ErrorReasons). They stay
+// in the full report; the limited report and the results push carry LoadStepWithoutTexts (AC-F2.2: their
+// words, counts and times, never the text). They are author/product-hat readable like every
 // other observed number, and they are NEVER copied into a builder-token projection (RelayedReport has
 // no field for them; a test pins that).
 
@@ -34,11 +37,14 @@ type Quantiles struct {
 }
 
 // BlockedPeriod is one stretch during which the broker held the publisher blocked (a memory/disk alarm).
-// UntilMs == 0 means the step ended while the broker was still blocking.
+// UntilMs == 0 means the step ended while the broker was still blocking. Reason is the broker's own words and stays
+// in the full report; Kind (AC-F2.2) is memory, disk or other (BlockedKind), and the limited report and the results
+// push carry only Kind and the times (LoadStepWithoutTexts).
 type BlockedPeriod struct {
 	SinceMs int64  `json:"since_ms"`
 	UntilMs int64  `json:"until_ms"`
 	Reason  string `json:"reason,omitempty"`
+	Kind    string `json:"kind,omitempty"`
 }
 
 // LoadRampEntry is one load scenario's ramp as it rides the wire and sits in the ledger
@@ -86,8 +92,9 @@ type LoadStep struct {
 	// ResponseUs (HTTP Load) is the request -> response time of every request of the steady
 	// window, in microseconds (the JTL `elapsed` x 1000). nil on an AMQP step, whose latency is PublishDeliverUs.
 	ResponseUs *Quantiles `json:"response_us,omitempty"`
-	// ErrorReasons (HTTP Load) are the transport failures of the window grouped by reason, exactly the plain
-	// `## LOAD` record's `errors` (report.LoadErrorsFrom: at most 8, URL-reduced and credential-scrubbed at the
-	// source). Errors keeps the closed class counts; this says why. Absent when there were none.
+	// ErrorReasons (HTTP Load) are the transport failures of the window grouped by reason and word, exactly the plain
+	// `## LOAD` record's `errors` (report.LoadErrorsFrom: at most 8 reasons, URL-reduced and credential-scrubbed at the
+	// source). Errors keeps the closed class counts; this says why. Absent when there were none. The limited report
+	// and the results push carry only each entry's word and count (LoadStepWithoutTexts, AC-F2.2).
 	ErrorReasons []LoadError `json:"error_reasons,omitempty"`
 }

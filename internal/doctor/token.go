@@ -17,7 +17,7 @@ const (
 	// KindNone: no credential.
 	KindNone TokenKind = "none"
 	// KindAuthorPAT: an `odts_…` personal access token — long-lived, author hat, minted by
-	// `argus cloud-mint-token`. It is what a human or an agent presents to the author__* tools.
+	// `argus cloud-mint-token`. It is what a human or an agent presents to the author_* tools.
 	KindAuthorPAT TokenKind = "author-pat"
 	// KindJWT: a JSON Web Token — the control plane's own RS256 access token (15-minute life, scope
 	// `author` or `runner`), or another issuer's. Its claims can be READ locally; only the control

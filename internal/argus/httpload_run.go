@@ -1,6 +1,7 @@
 package argus
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -157,9 +158,17 @@ func runHTTPLoad(c *config.Config, s *scenario.Scenario, corr, resultsDir string
 		return res
 	}
 	base, err := DeriveProps(c, s, corr)
+	if sres, ok := sessionRefusal(s, corr, err); ok {
+		sres.LoadDriver, sres.LoadTarget = "http", s.Target
+		return sres
+	}
 	if err != nil {
 		return targetRefused(s, corr, err)
 	}
+	// a ramp outlives a 60 s session token, so each step re-checks the token's life before it
+	// is driven (clerksession refreshes it when under its floor). A step longer than the token's life is still
+	// a limit: use a jwt_template with a longer lifetime (documented in HOW-TO-ARGUS-CONFIG.md).
+	sessKey, viaSession := clerkHeaderKey(c, sel, s)
 	// What a transport failure's text may carry: every declared credential and every secret prop of the request
 	// (an Authorization header value, an author header marked secret).
 	var secrets []string
@@ -185,6 +194,14 @@ func runHTTPLoad(c *config.Config, s *scenario.Scenario, corr, resultsDir string
 		if i > 0 {
 			httpLoadSleep(time.Duration(p.SettleSeconds) * time.Second)
 		}
+		if viaSession && i > 0 {
+			tok, terr := sessionBearer(c, sessKey)
+			if terr != nil {
+				runFailure = terr.Error()
+				break
+			}
+			base["auth.header"] = "Bearer " + tok
+		}
 		props := httpLoadStepProps(base, p, n)
 		jtl := filepath.Join(resultsDir, fmt.Sprintf("http-load__%s__step%d.jtl", s.ID, i+1))
 		_ = os.Remove(jtl) // JMeter -l APPENDS; start each step fresh
@@ -201,7 +218,12 @@ func runHTTPLoad(c *config.Config, s *scenario.Scenario, corr, resultsDir string
 			genShare = &v
 		}
 
-		rows, _ := amqpload.ReadJTL(jtl)
+		rows, rerr := amqpload.ReadJTL(jtl, jtlMemory())
+		if errors.Is(rerr, amqpload.ErrJTLTooLarge) {
+			// a step that wrote more samples than the executor holds is never judged on a prefix.
+			runFailure = "step " + strconv.Itoa(i+1) + ": " + rerr.Error()
+			break
+		}
 		st := httpload.AggregateStep(rows, httpload.StepInput{
 			Step: i + 1, Users: n, RampSeconds: p.RampSeconds, ScenarioID: s.ID,
 			TargetP95Ms: p.TargetP95Ms, MaxErrorRate: p.MaxErrorRate, Scrub: scrub,

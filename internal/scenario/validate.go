@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Error is a single validation failure with a 1-based line number (VR-A10).
@@ -100,7 +99,7 @@ func Validate(text string) (*Scenario, []Error) {
 
 	// VR10-S3-5 (config-free half): the **Target** word means one thing per layer — where it has
 	// none (Web UI, External Delivery, a chain's Metadata) it is refused here by name, so
-	// author__validate_scenario reports it at write time. Whether the NAME exists is checked
+	// author_validate_scenario reports it at write time. Whether the NAME exists is checked
 	// against the config by validate-config --scenarios and at run preflight.
 	if s.Target != "" {
 		if _, terr := TargetKind(s); terr != nil {
@@ -230,9 +229,9 @@ func Validate(text string) (*Scenario, []Error) {
 	// for it, and THIS is where an author is refused.
 	//
 	// ⛔ IT LIVES IN Validate, NOT IN argus.ExpectProblems. There are three author paths and only ONE
-	// of them adds ExpectProblems (toolcore.ValidateScenario); author__write_scenario and the control
+	// of them adds ExpectProblems (toolcore.ValidateScenario); author_write_scenario and the control
 	// plane's write call Validate ALONE. A rule added to ExpectProblems is therefore REPORTED by
-	// author__validate_scenario and SILENTLY BYPASSED by the two paths that actually SAVE the file —
+	// author_validate_scenario and SILENTLY BYPASSED by the two paths that actually SAVE the file —
 	// the author is told the scenario is invalid and stores it anyway. Guarded by
 	// TestWriteRefusesEverythingValidateRefuses.
 	//
@@ -275,6 +274,44 @@ func Validate(text string) (*Scenario, []Error) {
 				})
 				break
 			}
+		}
+		// The same refusal, by the same dispatch question, for the claim forms added
+		// after it: numeric equality, tolerance, the negatives, absence and `every` are judged in Go only.
+		for _, a := range bodyAsserts {
+			if IsNewClaimForm(a) {
+				errs = append(errs, Error{
+					Line: s.sectionStart("EXPECT", metaLine),
+					Message: "the claim forms `body has <field> == <number>`, `within <tolerance> of <number>`, `body not " +
+						"contains|matching`, `not containing|matching|equals`, `body has no <field>` and `body every <array-path> " +
+						"has …` are only evaluated by the chain `http` step, the chain `mcp` step and the `mcp` engine (they judge " +
+						"them in Go) — this scenario carries no `chain`/`mcp`/`ui` tag, so it would reach a JMeter template that " +
+						"does not understand them. Move this claim to a chain `http` step or an `mcp` scenario",
+				})
+				break
+			}
+		}
+	}
+	// `elapsed` exists only as a chain `http` step claim (`- step <name>: elapsed < 500ms`).
+	// Written as a bare bullet it opens with neither `body` nor `step`, and would be read as prose.
+	for _, b := range s.RunnableExpect() {
+		if ClaimsToBeElapsed(bulletText(b)) {
+			errs = append(errs, Error{
+				Line: s.sectionStart("EXPECT", metaLine),
+				Message: fmt.Sprintf("EXPECT bullet %q: `elapsed` is a claim of a chain `http` step — write `- step <name>: elapsed < "+
+					"<N>ms`; on a plain scenario or any other engine it would prove nothing", bulletText(b)),
+			})
+		}
+	}
+
+	// ── — A STATUS CLAIM TAKES EXACTLY ONE CODE ──────────────────────────────────────
+	// `status=200/201` (also `,` `|` `or`) used to be read as `status=200`: statusDeclRe's trailing `\b`
+	// matches before the separator, so the second code was dropped with no error and the run judged 200
+	// alone. Refused here by the SAME function the executor calls (CheckDeclaredStatuses), so a file the
+	// validator passes is never one the runner reads differently. A chain http step's claim
+	// (`step <n>: status=200/201`) is refused by HTTPStepClaims below, per step.
+	for _, b := range s.RunnableExpect() {
+		if why := StatusClaimProblem(b); why != "" {
+			errs = append(errs, Error{Line: s.sectionStart("EXPECT", metaLine), Message: why})
 		}
 	}
 
@@ -395,12 +432,18 @@ func Validate(text string) (*Scenario, []Error) {
 						continue
 					}
 					// AC-D18b: an amqp step too — its only verdict is its `broker …` claim.
-					if (st.Type != "mcp" && st.Type != "http" && st.Type != "amqp") || len(claims[st.Name]) > 0 {
+					if (st.Type != "mcp" && st.Type != "http" && st.Type != "amqp" && st.Type != "db" && st.Type != "logs" && st.Type != "bus") || len(claims[st.Name]) > 0 {
 						continue
 					}
 					minimum := "result.isError == false"
+					if st.Type == "logs" || st.Type == "bus" {
+						minimum = "body has count >= 1" // the document is {"count": N, "lines": [...]}; bus: {"count": N, ...}
+					}
 					if st.Type == "amqp" {
 						minimum = "broker accepts` or `- step " + st.Name + ": broker refuses with <code>"
+					}
+					if st.Type == "db" {
+						minimum = "body has row_count >= 1" // the document is {"row_count": N, "rows": [...]}
 					}
 					errs = append(errs, Error{
 						Line: expLine,
@@ -426,18 +469,42 @@ func Validate(text string) (*Scenario, []Error) {
 			// `always`), url_env as a NAME, the per-op fields, and exactly the two `broker …` claim
 			// forms — plus a `broker …` claim on any other step type, refused.
 			errs = append(errs, amqpStepErrors(steps, rawSteps, claims, s.sectionStart("TRIGGER", metaLine), expLine)...)
+			// FAULT STEP SHAPE: the op, its fields and bounds, and no claim on a fault step.
+			errs = append(errs, faultStepErrors(steps, rawSteps, claims, s.sectionStart("TRIGGER", metaLine), expLine)...)
+			// DB STEP SHAPE AND CLAIMS (dbstep.go): the read-only query, the params, the
+			// bounds, the stray fields, the `body …` claim grammar - and, for EVERY step, a type that is
+			// none of ChainStepTypes is refused (door A used to leave that to the executor's preflight).
+			errs = append(errs, dbStepErrors(steps, rawSteps, claims, s.sectionStart("TRIGGER", metaLine), expLine)...)
+			// LOGS STEP SHAPE AND CLAIMS (logsstep.go): scope, labels, the line filters,
+			// window and settle, the stray fields, the `body …` claim grammar.
+			errs = append(errs, logsStepErrors(steps, rawSteps, claims, s.sectionStart("TRIGGER", metaLine), expLine)...)
+			// BUS STEP SHAPE AND CLAIMS (busstep.go): the binding, `where`, `wait`, the stray fields,
+			// the position (not first), the `body ...` claim grammar and the anchor rule for absence claims.
+			errs = append(errs, busStepErrors(steps, rawSteps, claims, s.sectionStart("TRIGGER", metaLine), expLine)...)
+			// MCP STEP SHAPE (mcpstep.go): the stray fields, `extract`, `unavailable`, and
+			// `poll` with the `idempotent` it requires.
+			errs = append(errs, mcpStepErrors(steps, rawSteps, claims, s.sectionStart("TRIGGER", metaLine))...)
 
 			// P4 — every `save` entry is judged once (SaveProblem), on whatever step carries one.
 			for _, st := range steps {
-				for _, why := range SaveProblems(st.Save) {
+				for _, why := range append(SaveProblems(st.Save), SaveFromProblems(st)...) {
 					errs = append(errs, Error{
 						Line:    s.sectionStart("TRIGGER", metaLine),
 						Message: fmt.Sprintf("step %q: %s", st.Name, why),
 					})
 				}
 			}
+			// A JSON-saved variable has one kind and stands only in a body or args.
+			for _, is := range SavedJSONProblems(steps, claims) {
+				errs = append(errs, Error{
+					Line:    s.sectionStart("TRIGGER", metaLine),
+					Message: fmt.Sprintf("step %q: %s", is.Step, is.Why),
+				})
+			}
 			// — the `unreachable` claim's own shape rules.
 			errs = append(errs, unreachableStepErrors(steps, claims, s.sectionStart("TRIGGER", metaLine))...)
+			// `elapsed` on any step that is not an http step.
+			errs = append(errs, elapsedStepErrors(steps, claims, s.sectionStart("TRIGGER", metaLine))...)
 			// P2 — a numeric threshold `${saved.<var>}` must be saved by an EARLIER step.
 			for _, why := range savedThresholdProblems(steps, claims) {
 				errs = append(errs, Error{Line: expLine, Message: why})
@@ -511,27 +578,12 @@ func Validate(text string) (*Scenario, []Error) {
 								"(e.g. `status=200`)", st.Name, st.Name),
 						})
 					}
-					if to, terr := time.ParseDuration(st.Poll.Timeout); terr != nil {
+					// the poll block's own rules are ChainPollProblems (dbstep.go), shared with the db step
+					for _, why := range ChainPollProblems(st.Poll) {
 						errs = append(errs, Error{
-							Line: s.sectionStart("TRIGGER", metaLine),
-							Message: fmt.Sprintf("step %q declares `poll.timeout` %q, which is not a valid "+
-								"duration (Go syntax: \"180s\", \"3m\") (AC-D20)", st.Name, st.Poll.Timeout),
+							Line:    s.sectionStart("TRIGGER", metaLine),
+							Message: fmt.Sprintf("step %q %s", st.Name, why),
 						})
-					} else if to > 10*time.Minute {
-						errs = append(errs, Error{
-							Line: s.sectionStart("TRIGGER", metaLine),
-							Message: fmt.Sprintf("step %q declares `poll.timeout` of %s, which is more than the "+
-								"10m bound on a chain step's poll (AC-D20)", st.Name, to),
-						})
-					}
-					if st.Poll.Interval != "" {
-						if _, ierr := time.ParseDuration(st.Poll.Interval); ierr != nil {
-							errs = append(errs, Error{
-								Line: s.sectionStart("TRIGGER", metaLine),
-								Message: fmt.Sprintf("step %q declares `poll.interval` %q, which is not a valid "+
-									"duration (Go syntax: \"5s\") (AC-D20)", st.Name, st.Poll.Interval),
-							})
-						}
 					}
 				}
 				if i < len(rawSteps) {
@@ -649,6 +701,7 @@ func Validate(text string) (*Scenario, []Error) {
 	errs = append(errs, amqpLoadErrors(s, text, metaLine)...)
 	errs = append(errs, httpLoadErrors(s, text, metaLine)...)
 	errs = append(errs, compareErrors(s, text, metaLine)...)
+	errs = append(errs, preconditionErrors(s, text, metaLine)...)
 
 	return s, errs
 }

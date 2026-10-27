@@ -34,6 +34,9 @@ import (
 // HTTPTarget is one HTTP surface of the SUT: targets.http and every targets.http_targets.<name>.
 type HTTPTarget struct {
 	BaseURL string `yaml:"base_url"`
+	// Auth is a NAMED target's own credentials; for a scenario that selects this target
+	// it wins over targets.auth. Refused on the plain targets.http slot, whose credentials are targets.auth.
+	Auth *AuthTarget `yaml:"auth"`
 }
 
 // MCPAuth is an MCP target's static auth.
@@ -84,12 +87,28 @@ type MQTarget struct {
 	// SUT's. An absent entry binds with "", which is correct for a `fanout` exchange and wrong for
 	// a `topic` one — validate-config says so rather than letting the run discover it.
 	RoutingKeys map[string]string `yaml:"routing_keys"`
+	// For the `bus` chain step (bus.go). None of them holds a credential; the executor must be
+	// upgraded BEFORE a config carries them (targets keys are strict, an older executor refuses the file).
+	Vhost    string               `yaml:"vhost"`    // optional: the vhost the URL must name (a typo catcher)
+	Envelope *BusEnvelope         `yaml:"envelope"` // where the run's correlation id travels in this broker's messages
+	Streams  map[string]BusStream `yaml:"streams"`  // named bindings (e.g. the platform's log exchange)
+	// URLEnvName is the NAME in `url: ${NAME}`, read before expandEnv filled the value in (never from YAML).
+	URLEnvName string `yaml:"-"`
 }
 
-// AuthTarget is targets.auth — a type and a token, never an address.
+// AuthTarget is targets.auth and an http target's `auth:` — a type and a credential, never an address.
+// `bearer` carries one static token. `clerk_session` carries the NAMES of two environment
+// variables and mints a short-lived Clerk session token per run (clerksession.go); the keys after
+// BearerToken apply to it alone, and a block that sets them without the type is refused at load.
 type AuthTarget struct {
 	Type        string `yaml:"type"`
 	BearerToken string `yaml:"bearer_token"`
+
+	SecretKeyEnv            string `yaml:"secret_key_env"`              // NAME of the env var holding the Clerk SECRET key (sk_…)
+	UserIDEnv               string `yaml:"user_id_env"`                 // NAME of the env var holding the Clerk user id (user_…)
+	JWTTemplate             string `yaml:"jwt_template"`                // optional Clerk JWT template; "" = the default session token
+	APIURL                  string `yaml:"api_url"`                     // optional Backend API base; "" = https://api.clerk.com
+	AllowClerkSessionOnProd bool   `yaml:"allow_clerk_session_on_prod"` // explicit opt-in on a production-looking instance; default false
 }
 
 // Targets is the `targets:` node. KEYS ARE STRICT HERE — and only here in this build (SA §0.14
@@ -117,6 +136,10 @@ type Targets struct {
 }
 
 type Config struct {
+	// Sessions is the run's live Clerk session source. Runtime only: argus.RunAll attaches it
+	// for one run and revokes it at the end; YAML never sets it.
+	Sessions SessionSource `yaml:"-"`
+
 	Project struct {
 		Name string `yaml:"name"`
 	} `yaml:"project"`
@@ -178,6 +201,25 @@ type Config struct {
 			// config.expand-env -- never a literal in a rendered manifest) and into obsquery.Loki
 			// (query, HTTP Basic auth) -- see k8srender.go / internal/obsquery/obsquery.go.
 			Credential string `yaml:"credential"`
+			// SharedCluster declares that observability.loki.url is an environment's SHARED
+			// Loki whose promtail does NOT label by Argus's names (argus_instance, project, service, level,
+			// correlation_id, event_type): it stamps only cluster (an external label), namespace, pod,
+			// container, node and app. The value is that external `cluster` label of the cluster this
+			// instance runs on (a hosted AKS cluster, e.g. "cluster-a"), which keeps a query from matching a same-named
+			// namespace another cluster ships into the same Loki. When set (and only under --obs adopt, which
+			// render-k8s enforces), the logs chain step, get_sagas / tail_logs and the saga-presence template
+			// select {cluster=<this>, namespace=<ARGUS_SUT_NAMESPACE>} and derive level / correlation_id /
+			// event_type at QUERY time. Empty (every existing config) = the per-instance Loki's ingest-time labels.
+			SharedCluster string `yaml:"shared_cluster"`
+			// LogRegex (live check 2026-10-19) declares a PLAIN-TEXT log format for a SHARED-Loki
+			// instance: an RE2 expression with NAMED groups, rendered as LogQL `| regexp "<expr>"`. The groups
+			// `level`, `correlation_id` and `saga_marker` are the labels the step claims read (a claim on a label
+			// whose group the expression lacks is refused, never invented); any other group is extracted but unused.
+			// Example for `10:06:24.852569 arb-engine WARN: [PollTick] ...`:
+			//   '^(?P<time>\S+) (?P<service>\S+) (?P<level>[A-Z]+): '
+			// ONLY read when shared_cluster is set: the ingest-time pipelines (promtail, collect-logs) parse json|logfmt
+			// and have no regex stage, so it is refused without shared_cluster rather than silently ignored.
+			LogRegex string `yaml:"log_regex"`
 		} `yaml:"loki"`
 		// Pushgateway (T3.2, E3 adopt mode) is the operator's OWN Prometheus Pushgateway, used
 		// only when --obs=adopt. OPTIONAL, unlike loki.url in adopt mode: a Pushgateway is a
@@ -277,20 +319,22 @@ type Config struct {
 	// repository at Argus's conventional paths. Optional; every declared path must exist at load
 	// time. See package.go.
 	Package *Package `yaml:"package"`
-	// MoneyHandling (T5.4) declares that this SUT moves real money. It turns on the money-path
-	// guard (scenario.MoneyGuardViolations) at BOTH doors: Validate refuses every scenario that is
-	// not a plain HTTP GET, names an order/quote/swap/rebalance/claim path, or runs a CLEANUP; and
-	// the run refuses the same scenarios again before firing (argus.runOneScenario), because a file
-	// can reach a run without passing the validator. Absent = false = nothing changes. TOP-LEVEL
-	// and explicit on purpose: the rule it enforces lived only in runbook prose until now, and a
-	// generating agent was free not to read it.
+	// MoneyHandling (T5.4; the OWNER'S switch since) is a switch the SUT's owner sets
+	// in the owner's own config: "Argus refuses what my money_writes.allow does not name". Argus has no
+	// opinion about what a system's checks may do and does not care whether a system moves money. It
+	// turns on the money-path guard (scenario.MoneyGuardViolations) at EVERY door: Validate refuses every
+	// scenario the list does not name — one that is not a plain HTTP GET, names an
+	// order/quote/swap/rebalance/claim path, calls a tool, drives a bus, a database or a logs step, or
+	// runs a CLEANUP; the control plane refuses the same at authoring; and the run refuses them again
+	// before firing (argus.runOneScenario), because a file can reach a run without passing the
+	// validator. Absent = false = nothing is enforced. TOP-LEVEL and explicit on purpose.
 	MoneyHandling bool `yaml:"money_handling"`
-	// MoneyWrites (money_writes follow-up, 2026-09-26) declares the EXACT (method, path) writes —
-	// each optionally a bounded real spend — the SUT's own tester allows Argus to attempt against a
-	// money-handling SUT. Valid only beside MoneyHandling: true (moneywrites.go's validate). Absent =
-	// nil = nothing is exempted from MoneyGuardViolations' GET-only/money-verb-path rule, exactly
-	// as before this field existed. See internal/scenario/moneywrites.go for the allowlist type and
-	// the spend check this block feeds.
+	// MoneyWrites (money_writes follow-up, 2026-09-26; every engine) is the owner's
+	// list: the EXACT HTTP (method, path) requests — each optionally a bounded real spend — and the
+	// bus ops, tool calls, db and logs steps the owner allows Argus to run against a SUT that set
+	// MoneyHandling: true. Valid only beside it (moneywrites.go's validate). Absent = nil = nothing is
+	// allowed beyond what MoneyGuardViolations has always allowed. See internal/scenario/moneywrites.go
+	// for the allowlist type and the spend check this block feeds.
 	MoneyWrites *MoneyWritesConfig `yaml:"money_writes"`
 	// MessageSchemas (ARGUS-DESIGN-GENERIC-SCHEMA-MESSAGES-2026-09-28, design §1) declares the wire
 	// schemas an `amqp` chain step's `schema`+`record` publish or `schema` consume may reference by
@@ -318,6 +362,13 @@ type Config struct {
 	// Names only, never values. TOP-LEVEL for the same reason as load_allowed_targets: an older
 	// executor ignores it silently. See checkenv.go.
 	CheckEnv []string `yaml:"check_env"`
+	// FaultAllowedTargets lists the Deployments and Toxiproxy links a `fault` chain step may
+	// break. TOP-LEVEL for load_allowed_targets' reason. Absent / empty / a name not listed = no fault may
+	// run: the default. See faultallowed.go.
+	FaultAllowedTargets *FaultAllow `yaml:"fault_allowed_targets"`
+	// PreconditionProbe is the precondition probe's image and bounds. TOP-LEVEL for the same
+	// reason; absent = the built-in defaults. See preconditionprobe.go.
+	PreconditionProbe *PreconditionProbe `yaml:"precondition_probe"`
 }
 
 // ── Argus-owned resolvers (RO-05/07/08/10, D5) ────────────────────────────
@@ -431,6 +482,43 @@ func (c *Config) LokiURL() string {
 // require the key explicitly rather than resolving it away.
 func (c *Config) LokiURLConfigured() string {
 	return strings.TrimSpace(c.Observability.Loki.URL)
+}
+
+// sharedClusterRe is a Loki label value Argus will place in a selector without ever needing an escape.
+var sharedClusterRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// SharedLokiCluster is observability.loki.shared_cluster, trimmed: the value of the
+// shared promtail's external `cluster` label for this instance's cluster, or "" when the Loki is the
+// instance's own. Non-empty is what switches the log readers to cluster+namespace selectors and
+// query-time parsing.
+func (c *Config) SharedLokiCluster() string {
+	return strings.TrimSpace(c.Observability.Loki.SharedCluster)
+}
+
+// SharedLokiLogRegex is observability.loki.log_regex VERBATIM (whitespace can be part of an expression): the SUT's
+// plain-text line format for query-time parsing in shared-Loki mode, or "" (blank, or json | logfmt per LogFormat).
+func (c *Config) SharedLokiLogRegex() string {
+	if strings.TrimSpace(c.Observability.Loki.LogRegex) == "" {
+		return ""
+	}
+	return c.Observability.Loki.LogRegex
+}
+
+// SharedLokiWarnings are the advisory limits of reading a shared Loki through the environment's shared
+// promtail; nil when the Loki is the instance's own.
+func (c *Config) SharedLokiWarnings() []string {
+	if c.SharedLokiCluster() == "" {
+		return nil
+	}
+	return []string{
+		"observability.loki.shared_cluster is set: logs are read from the environment's SHARED Loki through its shared promtail. " +
+			"That promtail DROPS lines above its per-node readline_rate (5000 lines/s on a hosted AKS cluster, readline_rate_drop: true) " +
+			"and Argus cannot see a drop, so a noisy node can make a line that was logged read as absent - a `count == 0` claim is " +
+			"only as sound as the shipper's delivery; keep the SUT's log volume below that rate during a check.",
+		"observability.loki.shared_cluster is set: the shared promtail batches pushes (batchwait: 1s) and ships over a WAN link, " +
+			"so a line reaches Loki seconds after it was logged. Keep a logs step's settle at or above 2s (its default) and use `poll` " +
+			"for a claim that a line EXISTS; a saga-presence check already polls.",
+	}
 }
 
 // LokiPushURLConfigured is the operator's HOSTED Loki PUSH endpoint (observability.loki.push_url,
@@ -779,6 +867,31 @@ func (c *Config) validateObservabilityBackend() error {
 	if cred := strings.TrimSpace(c.Observability.Loki.Credential); cred != "" && !bsCredentialVarRe.MatchString(cred) {
 		return errors.New("observability.loki.credential must be a single ${VAR} reference (e.g. ${LOKI_CREDENTIAL}) — never a literal credential committed to the file")
 	}
+	// the shared-Loki log source needs the Loki it describes, and a value that can sit in a
+	// LogQL selector as it is. Checked unconditionally, like the credential rule above.
+	if sc := c.SharedLokiCluster(); sc != "" {
+		if bsSet {
+			return errors.New("observability.loki.shared_cluster selects a shared Loki, but this config selects observability.betterstack")
+		}
+		if c.LokiURLConfigured() == "" {
+			return errors.New("observability.loki.shared_cluster is set but observability.loki.url is not - it names the cluster label of the shared Loki that url points at")
+		}
+		if !sharedClusterRe.MatchString(sc) {
+			return fmt.Errorf("observability.loki.shared_cluster %q is not a cluster label value (letters, digits, '.', '_' and '-', starting with a letter or digit)", sc)
+		}
+	}
+	if rx := c.SharedLokiLogRegex(); rx != "" {
+		if c.SharedLokiCluster() == "" {
+			return errors.New("observability.loki.log_regex is only read in shared-Loki mode (observability.loki.shared_cluster): the ingest-time " +
+				"promtail and collect-logs pipelines parse json and logfmt only, so it would be silently ignored there")
+		}
+		if lf := strings.TrimSpace(c.Observability.Loki.LogFormat); lf != "" && !strings.EqualFold(lf, "json") {
+			return fmt.Errorf("observability.loki.log_regex and observability.loki.log_format %q both declare the line format - give one", lf)
+		}
+		if err := validateLogRegex(rx); err != nil {
+			return fmt.Errorf("observability.loki.log_regex: %w", err)
+		}
+	}
 	if !bsSet {
 		return nil
 	}
@@ -919,6 +1032,10 @@ func Load(path string) (*Config, error) {
 	if missing := c.expandEnv(); len(missing) > 0 {
 		return nil, fmt.Errorf("unresolved ${VAR} in %s — set %s (add the value to the product folder's .env — the onboarder loads the ${VAR} names your argus-config references from there; for direct host runs export it; never commit the value)", path, strings.Join(missing, "; "))
 	}
+	// the production guard's second signal needs the resolved environment.
+	if err := c.validateClerkLiveKey(); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return c, nil
 }
 
@@ -953,9 +1070,22 @@ func parseConfig(b []byte, path string) (*Config, error) {
 	if err := c.Targets.checkNames(); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// the NAME each broker `url` references, then the bus declarations (envelope, streams, vhost).
+	c.setBusDerived()
+	if err := c.validateBusDeclarations(); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
 	// S9: every load_allowed_targets entry names a real broker target, is bounded, and
 	// is not a shared/production-looking broker. Load time IS validate time.
 	if err := c.validateLoadAllowed(); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	// every fault_allowed_targets entry is well-formed and not production-looking.
+	if err := c.validateFaultAllowed(); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	// the precondition probe's image and bounds are well-formed.
+	if _, err := c.PreconditionProbeSettings(); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	// VR10-R1-1: a malformed rate_limit declaration fails LOUDLY here — load time IS validate time
@@ -970,7 +1100,7 @@ func parseConfig(b []byte, path string) (*Config, error) {
 	}
 	// money_writes (2026-09-26 follow-up): valid only beside money_handling: true, and every entry
 	// checked in full — load time IS validate time, the same rule RateLimit/Package just followed.
-	if err := c.MoneyWrites.validate(c.MoneyHandling); err != nil {
+	if err := c.MoneyWrites.validate(c.MoneyHandling, &c.Targets); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	// UI-7a: summary_metrics is checked in full at load time too, and its keys are
@@ -1019,6 +1149,11 @@ func parseConfig(b []byte, path string) (*Config, error) {
 	if err := c.validateCheckEnv(); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// auth.type clerk_session: both references, a well-formed api_url/template, and the
+	// production guard — load time IS validate time. The refusal never echoes a value.
+	if err := c.validateClerkSession(); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
 	return &c, nil
 }
 
@@ -1046,6 +1181,11 @@ type strictTargetsDoc struct {
 	// silently lose the operator's ceiling. (An OLD executor never saw this field: the key falls into its
 	// inline map below and is ignored -- TestLoadAllowed_OldExecutorDecodesIgnoring.)
 	LoadAllowedTargets map[string]LoadAllow `yaml:"load_allowed_targets"`
+	// fault_allowed_targets joins it for the same reason: a mistyped `namespce` must be
+	// refused by name, not parsed to an empty namespace.
+	FaultAllowedTargets *FaultAllow `yaml:"fault_allowed_targets"`
+	// precondition_probe joins it: a mistyped `ready_timeut` is refused by name.
+	PreconditionProbe *PreconditionProbe `yaml:"precondition_probe"`
 	// test_targets joins the strict node for the same reason: a mistyped key inside an entry (e.g.
 	// "namespce") would otherwise parse to a zero value and silently drop the field. Strict only for
 	// binaries that know the key; an older executor never sees it as strict (it is in its inline Rest).
@@ -1104,12 +1244,19 @@ var targetPlaces = []struct {
 	{reflect.TypeOf(MCPAuth{}), "an mcp target's auth block"},
 	{reflect.TypeOf(DBTarget{}), "a database target (targets.database or targets.database_targets.<name>)"},
 	{reflect.TypeOf(MQTarget{}), "a message_broker target (targets.message_broker or targets.message_broker_targets.<name>)"},
-	{reflect.TypeOf(AuthTarget{}), "targets.auth"},
+	{reflect.TypeOf(BusEnvelope{}), "a message_broker target's envelope"},
+	{reflect.TypeOf(BusCorrelationSource{}), "a message_broker target's envelope.correlation entry (set exactly one)"},
+	{reflect.TypeOf(BusStream{}), "a message_broker target's streams entry"},
+	{reflect.TypeOf(AuthTarget{}), "an http auth block (targets.auth or targets.http_targets.<name>.auth)"},
 	{reflect.TypeOf(RateLimit{}), "rate_limit"},
 	{reflect.TypeOf(RateLimitSignature{}), "rate_limit.signature"},
 	{reflect.TypeOf(RateLimitPause{}), "rate_limit.pause"},
 	{reflect.TypeOf(Package{}), "package"},
 	{reflect.TypeOf(LoadAllow{}), "a load_allowed_targets entry"},
+	{reflect.TypeOf(FaultAllow{}), "fault_allowed_targets"},
+	{reflect.TypeOf(FaultDeployment{}), "a fault_allowed_targets.deployments entry"},
+	{reflect.TypeOf(FaultLink{}), "a fault_allowed_targets.links entry"},
+	{reflect.TypeOf(PreconditionProbe{}), "precondition_probe"},
 	{reflect.TypeOf(testtargets.Target{}), "test_targets"},
 	{reflect.TypeOf(testtargets.Match{}), "a test_targets entry's match"},
 	{reflect.TypeOf(OpenShellObs{}), "observability.openshell"},
@@ -1271,6 +1418,9 @@ func (c *Config) EnvRefs() []EnvRef {
 func (c *Config) walkCredentialFields(repl func(field, label string) string) {
 	http := func(t *HTTPTarget, at string) {
 		t.BaseURL = repl(t.BaseURL, at+".base_url")
+		if t.Auth != nil {
+			t.Auth.BearerToken = repl(t.Auth.BearerToken, at+".auth.bearer_token")
+		}
 	}
 	mcp := func(t *MCPTarget, at string) {
 		t.BaseURL = repl(t.BaseURL, at+".base_url")
@@ -1590,9 +1740,9 @@ func needsPlainMCPTarget(s *scenario.Scenario) bool {
 		return true
 	}
 	for _, st := range steps {
-		// An mcp step carrying its OWN server_url never reads the plain slot (an explicit step
-		// server_url wins over targets.mcp.base_url). A "${VAR}" url is accepted too: validate
-		// cannot know the environment the run will have.
+		// GitHub #618: an mcp step carrying its OWN server_url never reads the plain slot
+		// (chain_scenario.go: an explicit step server_url wins over targets.mcp.base_url). A
+		// "${VAR}" url is accepted too: validate cannot know the environment the run will have.
 		if st.Type == "mcp" && st.Target == "" && strings.TrimSpace(st.ServerURL) == "" {
 			return true
 		}
@@ -1643,6 +1793,10 @@ var (
 	// has no header-name field and `mtls` has no cert/key pair, so neither could be honoured even
 	// if something read this value.
 	authTypesSupported = []string{"bearer"}
+	// httpAuthTypesSupported: the plain-HTTP request path (targets.auth and an http target's auth) also
+	// serves clerk_session. MCP auth does not: an MCP call never goes through the
+	// `auth.header` path the session token rides, so authTypesSupported stays what MCP checks against.
+	httpAuthTypesSupported = []string{"bearer", ClerkSessionType}
 )
 
 // targetTypeError returns a ConfigError when declared is a non-empty, non-"none" value outside
@@ -1688,7 +1842,12 @@ func (c *Config) targetTypeErrors() []ConfigError {
 		}
 	}
 	if t := c.Targets.Auth; t != nil {
-		add(targetTypeError("targets.auth", t.Type, authTypesSupported))
+		add(targetTypeError("targets.auth", t.Type, httpAuthTypesSupported))
+	}
+	for _, n := range sortedKeys(c.Targets.HTTPTargets) {
+		if t := c.Targets.HTTPTargets[n]; t != nil && t.Auth != nil {
+			add(targetTypeError("targets.http_targets."+n+".auth", t.Auth.Type, httpAuthTypesSupported))
+		}
 	}
 	if t := c.Targets.MCP; t != nil && t.Auth != nil {
 		add(targetTypeError("targets.mcp.auth", t.Auth.Type, authTypesSupported))
@@ -1716,7 +1875,13 @@ func (c *Config) Validate(scenariosDir string) ([]ConfigError, int, error) {
 	// inflates scenarios_found and the count matches list/run exactly.
 	for _, d := range scenario.DiscoverFiles(scenariosDir) {
 		count++
-		// T5.4: a money-handling SUT may only be READ. Checked FIRST and for EVERY scenario —
+		// a bus step's target and stream must exist in THIS config. Reported for every scenario, before the
+		// money guard (which `continue`s), so one run of validate-config shows both kinds of mismatch.
+		if rel, rerr := filepath.Rel(scenariosDir, d.Path); rerr == nil {
+			errs = append(errs, c.busScenarioErrors(d.Scenario, filepath.ToSlash(rel))...)
+		}
+		// T5.4: a money-handling SUT refuses what its owner's list does not name.
+		// Checked FIRST and for EVERY scenario —
 		// including the mcp/chain ones the coverage walk below `continue`s past — and a refused
 		// scenario is not checked further.
 		if c.MoneyHandling {
@@ -1858,6 +2023,31 @@ func PathFromURL(raw string) string {
 	}
 	return raw
 }
+
+// validateLogRegex checks a log_regex the way LogQL's `| regexp` will read it: RE2, at least one NAMED group, group
+// names that are Loki label names. (It is embedded in a quoted LogQL literal, so any text is safe there.)
+func validateLogRegex(rx string) error {
+	re, err := regexp.Compile(rx)
+	if err != nil {
+		return fmt.Errorf("not a valid RE2 expression: %v", err)
+	}
+	named := 0
+	for _, n := range re.SubexpNames() {
+		if n == "" {
+			continue
+		}
+		named++
+		if !logRegexGroupRe.MatchString(n) {
+			return fmt.Errorf("group name %q is not a Loki label name", n)
+		}
+	}
+	if named == 0 {
+		return errors.New("needs at least one named group, e.g. (?P<level>[A-Z]+)")
+	}
+	return nil
+}
+
+var logRegexGroupRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 var _ = strconv.Itoa // reserved for future numeric knobs
 var _ = url.Parse

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OneDro1d/argus-runner/internal/argus"
 	"github.com/OneDro1d/argus-runner/internal/federation"
 	"github.com/OneDro1d/argus-runner/internal/mcp"
 	"github.com/OneDro1d/argus-runner/internal/obslog"
@@ -45,7 +46,7 @@ type Client struct {
 
 	// Outbox, when set, makes ReportUp's terminal push DURABLE (F1). It lives on the Client rather
 	// than the Executor because ReportUp has callers that never build an Executor — the MCP
-	// runner__run seam and the `run` CLI — and those were exactly the ones still losing results
+	// runner_run seam and the `run` CLI — and those were exactly the ones still losing results
 	// after the executor's own path had been fixed.
 	Outbox *Outbox
 
@@ -608,9 +609,28 @@ func (c *Client) BeginRun(ctx context.Context, runID, scope string) error {
 // the next one re-arms the row). It also keeps the instance_run_lock (RecordResults releases on
 // TERMINAL status only).
 func (c *Client) PushHeartbeat(ctx context.Context, runID, rrID, scope string, startedAt time.Time) error {
-	return c.Push(ctx, federation.ResultsPush{
+	return c.PushHeartbeatTally(ctx, runID, rrID, scope, startedAt, nil)
+}
+
+// PushHeartbeatTally is PushHeartbeat carrying the run's counts so far. tally nil sends today's heartbeat
+// (four zeros), byte for byte. With one, the tallies are the checks finished so far (total = their sum, so the
+// counts always add up, mid-run as at the end) and `planned` is how many the run selected.
+//
+// ⛔ COUNTS ONLY. The push carries NO scenario list, id, per-check outcome, summary or hash, and must never
+// gain one: the control plane stamps scenarios.last_run_outcome for every entry of a push's scenario list, so
+// a list on a heartbeat would mark checks while the run is still going. TestHeartbeat_CarriesCountsOnly.
+func (c *Client) PushHeartbeatTally(ctx context.Context, runID, rrID, scope string, startedAt time.Time, tally *argus.Tally) error {
+	push := federation.ResultsPush{
 		RunID: runID, RunRequestID: rrID, Scope: scope, Status: "running", StartedAt: &startedAt,
-	})
+	}
+	if tally != nil {
+		s := tally.Snapshot()
+		push.Tallies = federation.Tallies{
+			Passed: s.Passed, Failed: s.Failed, Errored: s.Errored, Degraded: s.Degraded, NotApplicable: s.NotApplicable,
+			Total: s.Total, Planned: s.Planned,
+		}
+	}
+	return c.Push(ctx, push)
 }
 
 func (c *Client) Push(ctx context.Context, push federation.ResultsPush) error {
@@ -664,13 +684,16 @@ func (c *Client) Push(ctx context.Context, push federation.ResultsPush) error {
 
 // CommandResult (AC-17) carries a relayed builder command's answer back — this executor's OWN push,
 // exactly like Push above, never a control-plane-initiated call. result carries the verb's own
-// (already custody-reduced) answer; errStr is set instead when the command could not be answered.
-func (c *Client) CommandResult(ctx context.Context, commandID string, result json.RawMessage, errStr string) error {
+// (already custody-reduced) answer; cmdErr is set instead when the command could not be answered.
+//
+// AC-F1: it takes the ERROR, never a string, and sends only Argus's own words for it (commandErrorText) — so no
+// caller can hand the control plane an app's text as a command's error.
+func (c *Client) CommandResult(ctx context.Context, commandID string, result json.RawMessage, cmdErr error) error {
 	tok, err := c.mint()
 	if err != nil {
 		return err
 	}
-	push := federation.CommandResult{CommandID: commandID, Result: result, Error: errStr}
+	push := federation.CommandResult{CommandID: commandID, Result: result, Error: commandErrorText(cmdErr)}
 	if c.hub != nil {
 		args := toArgs(push)
 		args["envelope"] = tok

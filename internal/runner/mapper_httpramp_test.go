@@ -44,6 +44,14 @@ func TestMapReport_AnHTTPRampRidesTheWireWithDriverHTTP(t *testing.T) {
 	if s := h.Steps[1]; s.ResponseUs == nil || s.ResponseUs.P95 != 400000 || s.Errors["status:503"] != 14500 || len(s.ErrorReasons) != 1 {
 		t.Errorf("the breaking step lost its facts on the wire: %+v", s)
 	}
+	// AC-F2.2: the error reasons ride as a word and a count (an entry written without a kind is classified from its
+	// reason), never the load tool's message
+	if s := h.Steps[1]; s.ErrorReasons[0] != (report.LoadError{Kind: "refused", Count: 500}) {
+		t.Errorf("error_reasons on the wire = %+v, want refused x 500 and no reason", s.ErrorReasons)
+	}
+	if strings.Contains(string(push.LoadRamp), "Connection refused") || strings.Contains(string(push.LoadRamp), "HttpHostConnectException") {
+		t.Errorf("the load tool's message rode the wire: %s", push.LoadRamp)
+	}
 	if got[0].Driver != "amqp" || got[0].StoppedAtStep != 0 {
 		t.Errorf("the AMQP entry changed: %+v", got[0])
 	}

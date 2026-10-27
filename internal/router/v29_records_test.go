@@ -68,9 +68,11 @@ func TestRecords_AFolderRefersToARecordAndRoutesWithItsToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tgt, err := f.Route("author__list_scenarios", "inst-1")
+	// AC-D69: the author plane's address and token come from AuthorTarget — the one function the session builder and
+	// the author call path both use (Route serves the runner tools only).
+	tgt, err := f.AuthorTarget()
 	if err != nil {
-		t.Fatalf("Route(author): %v", err)
+		t.Fatalf("AuthorTarget: %v", err)
 	}
 	if tgt.Token != "odts_aaaa" || tgt.URL != cpURL || tgt.Plane != "author" {
 		t.Fatalf("author target = %+v, want the record's token and URL", tgt)
@@ -119,7 +121,7 @@ func TestRecords_TwoUsersOneMachine_EachFolderUsesItsOwnRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tgt, err := fb.Route("author__list_scenarios", "ib")
+	tgt, err := fb.AuthorTarget()
 	if err != nil || tgt.Token != "odts_bbbb" {
 		t.Fatalf("user_b's folder must route with user_b's token: %+v %v", tgt, err)
 	}
@@ -201,7 +203,7 @@ func TestRecords_LegacyStateIsLiftedOnLoad(t *testing.T) {
 		t.Fatal(err)
 	}
 	fa, _ := tbl.Resolve("rt-a")
-	if tgt, err := fa.Route("author__list_scenarios", "ia"); err != nil || tgt.Token != "odts_old2" {
+	if tgt, err := fa.AuthorTarget(); err != nil || tgt.Token != "odts_old2" {
 		t.Fatalf("a lifted folder (nameless ref) must route with the named record's token: %+v %v", tgt, err)
 	}
 }

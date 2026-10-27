@@ -80,12 +80,19 @@ type Report struct {
 	Layers         []Layer `json:"layers"`
 	// BuildRecordObjectID (AC-10) is the Memstore object id the runner got back after writing this
 	// build-mode run's argus.build_record into the developer's own library through the customer's
-	// hub — so runner__get_report can answer with it. Empty for a final/scheduled run (no build
+	// hub — so runner_get_report can answer with it. Empty for a final/scheduled run (no build
 	// record is ever written for one) and for a build run that had no hub/token configured.
 	BuildRecordObjectID string `json:"build_record_object_id,omitempty"`
 	// BuildRecordNote (AC-10) says WHY no build record was written for a build-mode run — the hub or
 	// the runner's own token was absent — so the gap is a reported state, never a silent skip.
 	BuildRecordNote string `json:"build_record_note,omitempty"`
+	// ClaimsAsWritten (AC-F2) is the writer's stamp that every claim text in this report — assertions_enforced,
+	// failure.expected, failed_claims[].claim, unexecuted, failed_body_check — is as the author wrote it: a value
+	// saved from the app's answer appears as its ${saved.<var>} placeholder, never as the value. Set by
+	// argus.summarize, the one place a run's report is built. A report written by an older executor lacks it (an mcp
+	// chain step there printed the bound value into its claim list), so get_limited_report refuses such a report
+	// instead of sending its claims (internal/runner/limitedreport.go). omitempty: absent means not vouched for.
+	ClaimsAsWritten bool `json:"claims_as_written,omitempty"`
 	// Environment (P3 #23, tester msgbus 2026-09-27) is the SUT namespace's Kubernetes shape at
 	// the moment of this run — pods, workloads, nodes, and a stable fingerprint — captured ONLY when
 	// this run declared at least one `## LOAD` profile (internal/argus.captureEnvironmentIfNeeded).
@@ -96,6 +103,16 @@ type Report struct {
 	// 'it breaks under load'; we must say 'this environment, with these resources, breaks under this
 	// load'".
 	Environment *envcapture.Capture `json:"environment,omitempty"`
+	// Faults is every fault the run's `fault` chain steps applied to the system under
+	// test, in the order applied, across all scenarios. omitempty: a run that applied none is byte-
+	// identical to a report written before fault steps existed. A certifying run's list rides its
+	// certificate (internal/artifactmeasure.Fault), bound into the anchored evidence_bundle_hash.
+	Faults []Fault `json:"faults,omitempty"`
+	// Preconditions is every precondition the run's set declared, with its result, in id
+	// order. omitempty: a run whose set declares none is byte-identical to a report written before the tier
+	// existed. A certifying run's list rides its certificate (internal/artifactmeasure.Precondition), bound
+	// into the anchored evidence_bundle_hash.
+	Preconditions []Precondition `json:"preconditions,omitempty"`
 }
 
 type Summary struct {
@@ -111,6 +128,11 @@ type Summary struct {
 	// DISTINCT from both Passed and Failed — never counted in either, the same reasoning that
 	// keeps RateLimitedScenarios out of them. omitempty: a run with no load profile is byte-unchanged.
 	Degraded int `json:"degraded,omitempty"`
+	// NotApplicable counts scenarios NOT EXECUTED because a precondition they depend on is absent
+	// (StatusNotApplicable). DISTINCT from Passed, Failed and Errored: it is never counted in
+	// any of them, and Passed + Failed + Errored + Degraded + NotApplicable (+ Skipped) == Total. omitempty:
+	// a run with no precondition is byte-unchanged.
+	NotApplicable int `json:"not_applicable,omitempty"`
 	// ── the rate limit (VR10-R1 / V28-009) ─────────────────────────────────────────────────
 	// ALL omitempty: a run that never met a rate limit produces a byte-identical report, which is
 	// the whole reason these ride the existing `errored` path instead of inventing a fourth status.
@@ -138,7 +160,8 @@ type ScenarioResult struct {
 	ID string `json:"id"`
 	// passed | failed | skipped | error (execution/harness failure — DEC-07/VR-L3) | degraded
 	// (AC-11 — a load-mode scenario that passed its own assertions while the SUT was in distress;
-	// see StatusDegraded).
+	// see StatusDegraded) | not_applicable (not executed: a precondition it depends on is
+	// absent; see StatusNotApplicable).
 	Status        string   `json:"status"`
 	DurationMs    int      `json:"duration_ms"`
 	CorrelationID string   `json:"correlation_id,omitempty"`
@@ -156,6 +179,13 @@ type ScenarioResult struct {
 	// Extending is established practice here (`steps`, `req_success`, `assertions_enforced` are all
 	// extensions) — but it IS an extension, and the spec is updated with it in the same change.
 	Cleanup []CleanupResult `json:"cleanup,omitempty"`
+	// Faults are the faults THIS scenario's `fault` steps applied, in order, with how
+	// each was undone. Like Cleanup it NEVER touches the verdict. omitempty keeps a scenario without a
+	// fault step byte-identical.
+	Faults []Fault `json:"faults,omitempty"`
+	// NotApplicable says WHY this scenario was not executed: set exactly when Status is
+	// StatusNotApplicable. omitempty keeps every other row byte-identical.
+	NotApplicable *NotApplicable `json:"not_applicable,omitempty"`
 	// Residue (VR12-CH1 rule 7) — ONE line, on the terminal AND in report.json, when a scenario
 	// ended with something it created possibly still on the SUT: a step was not fired, or a step
 	// that runs after the break failed. ⛔ ABSENCE OF CLEANUP MUST NEVER BE SILENT.
@@ -189,6 +219,12 @@ type ScenarioResult struct {
 	// RetryAfterMs is what the SUT asked us to wait. Runtime-only (json:"-"): it is the run loop's
 	// input, and the same number is already spelled out in the observed line a human reads.
 	RetryAfterMs int `json:"-"`
+	// RefusedBeforeFiring is set by a run-door refusal that returned before anything was fired (the money
+	// guard, the read-only VERIFY rule, a scenario that declares nothing). Runtime-only (json:"-"): the run
+	// loop reads it to record the scenario's CLEANUP blocks as not run instead of executing them
+	//.
+	RefusedBeforeFiring bool `json:"-"`
+
 	// Requests is the per-request distribution source (r3, 1a′): one sample per request stamped
 	// at its REAL fire-time, fed to the Loki request-event push so Panel A can plot the genuine
 	// within-run distribution. Runtime-only (json:"-") — it is NOT part of the report contract
@@ -357,6 +393,15 @@ type SandboxPolicyEvent struct {
 // asked, under duress". It NEVER supersedes a genuine failure or the existing throttled-`error`
 // (429) case — both are decided first; DEGRADED only ever replaces what would otherwise be `passed`.
 const StatusDegraded = "degraded"
+
+// StatusNotApplicable marks a scenario that was NOT EXECUTED because a precondition it
+// depends on is absent: the positive control showed the mechanism's path alive and the negative control showed
+// a denied path NOT refused, so the mechanism the check relies on does nothing in this environment. The check
+// could only have reported the instrument, never the system under test. It is NOT a pass (nothing was
+// verified), NOT a failure (the system was not shown wrong) and NOT an error (the instrument is fine: it
+// measured that the mechanism is absent). A BROKEN precondition (the positive control failed, or the probe
+// could not be set up) is the opposite: the instrument is broken, so its dependents end `error`.
+const StatusNotApplicable = "not_applicable"
 
 // LoadStats are the load-mode (AC-11, mode 2) percentile + error-rate figures computed from one
 // scenario's JMeter .jtl SUT-trigger samples, plus the breach/survival verdict against the
@@ -588,23 +633,64 @@ type StepResult struct {
 	// each claim that did not hold — AS WRITTEN (`${saved.<var>}` left unbound) — with the value the
 	// SUT showed for that claim's field on the LAST attempt of the step (a polled step: the last poll).
 	// A claim that held is not listed. EVERY claim that did not hold is listed, in the order the claims
-	// were written, up to the backstop MaxFailedClaims; each observed value is cut to
-	// MaxFailedClaimObserved bytes (see FailedClaim). Past the backstop the rest are COUNTED in
-	// FailedClaimsOmitted, never silently dropped.
+	// were written, up to the backstop MaxFailedClaims; each observed
+	// value is cut to MaxFailedClaimObserved bytes (see FailedClaim). Past the backstop the rest are
+	// COUNTED in FailedClaimsOmitted, never silently dropped.
 	//
 	// ⛔ AUTHOR-ONLY, AND IT CARRIES THE SUT'S OBSERVED VALUES: redactExpected NILs it for the product
 	// hat (internal/toolcore), it is not among the fields runner.RelayedReport copies, and it never
 	// enters the federation push. A saved value is never printed here either: the claim is the written
 	// text, and an observed value equal to a saved value is shown as its placeholder.
 	FailedClaims []FailedClaim `json:"failed_claims,omitempty"`
-	// FailedClaimsOmitted is how many claims did NOT hold on the same attempt FailedClaims came from
-	// but are not listed there because the list reached MaxFailedClaims (the events_omitted
-	// precedent). Absent (0) means the list is complete.
+	// FailedClaimsOmitted is how many claims did NOT hold on the same
+	// attempt FailedClaims came from but are not listed there because the list reached MaxFailedClaims
+	// (the events_omitted precedent). Absent (0) means the list is complete.
 	//
 	// ⛔ AUTHOR-ONLY, LIKE FailedClaims: redactExpected zeroes it BY NAME for the product hat, it is not
 	// among the fields runner.RelayedReport copies, and it never enters the federation push. It is NEVER
 	// written into Observed or any product-hat text — how many hidden claims failed is holdout material.
 	FailedClaimsOmitted int `json:"failed_claims_omitted,omitempty"`
+	// BodyExcerpt is at most MaxBodyExcerpt bytes of the response body of a chain `http`
+	// step that ended `failed` because its STATUS claim missed (a polled step: the last attempt's body).
+	// It exists so the author can read the system's own error message without reproducing the call. Not
+	// set on a pass, on a body-claim miss (the failed claim shows the observed value) or on a transport
+	// error (no body). Credentials and every saved value are redacted BEFORE the cut.
+	// A chain `db` step also uses it, for the DATABASE'S OWN MESSAGE when the server refused the statement
+	// (its Observed carries the SQLSTATE only: the message quotes the query and can quote a bound parameter).
+	//
+	// ⛔ AUTHOR-ONLY, AND IT CARRIES THE SUT'S OWN WORDS: redactExpected NILs it for the product hat
+	// (internal/toolcore), it is not among the fields runner.RelayedReport copies, and it never enters the
+	// federation push (ResultsPush has no place for it).
+	BodyExcerpt string `json:"body_excerpt,omitempty"`
+	// ElapsedMs is how long a chain `http` step's ONE request took, in milliseconds: from
+	// just before it was sent to the moment the whole response body had been read. With `poll` it is the
+	// LAST attempt's (the one whose claims are judged), never the poll's total. Recorded pass or fail on every
+	// http step that got a response; absent (nil) when no response arrived. A pointer, so a genuine 0 is
+	// written and absence stays absence.
+	//
+	// It is the SYSTEM'S OWN BEHAVIOUR, not an expected value: BOTH hats read it (redactExpected leaves it
+	// alone). The bound of an `elapsed` claim is the expected value, and is never written next to it.
+	ElapsedMs *int64 `json:"elapsed_ms,omitempty"`
+	// ObservedStatus (AC-F2.1) is the HTTP status code of the response a chain `http` step judged (with `poll`, the
+	// LAST attempt's, the same rule as ElapsedMs), on a pass and on a fail — also when a save failed or the body was
+	// over the limit after that response arrived, and the response that made an `unreachable` step fail. Never the
+	// expected status. Recorded only when it is a three-digit status code, 100-999 (internal/chain observedHTTPStatus):
+	// Go's HTTP/1.1 client accepts "000" or "+42" and its HTTP/2 client any integer, so anything else is not written.
+	// Absent (0) when the step judged no response: a transport error (a redirect chain that does not end is one), the
+	// chain's deadline, a money-path refusal (a redirect the rule refused included, although a 3xx arrived), a binding
+	// error. ObservedStatus at the scenario level is a different field (the JMeter engine's).
+	//
+	// ObservedSQLState (AC-F2.1) is the SQLSTATE of the database error that ended a chain `db` step's query — the
+	// server refused the statement, or stopped it while it ran (57014, statement timeout) — recorded only when it is
+	// exactly 5 characters, each 0-9 or A-Z (internal/chain observedSQLState): the code the server sent, never its
+	// message, which can quote the query and a bound value (that goes to BodyExcerpt). Absent on a pass, a claim
+	// failure, and when the database could not be reached or did not answer.
+	//
+	// Both are the SYSTEM'S OWN BEHAVIOUR, not an expected value: BOTH hats read them (redactExpected leaves them
+	// alone), and author_get_report_limited sends them (runner.limitedSent). omitempty keeps every other step's bytes,
+	// and so a report's evidence hash, as they were.
+	ObservedStatus   int    `json:"observed_status,omitempty"`
+	ObservedSQLState string `json:"observed_sqlstate,omitempty"`
 	// RanAfterFailure marks a step that executed AFTER the chain's first failure (VR12-CH1 rule 4).
 	// Its status carries the same fact, but a machine consumer should not have to parse a string.
 	RanAfterFailure bool `json:"ran_after_failure,omitempty"`
@@ -634,6 +720,9 @@ const MaxFailedClaims = 100
 // one FailedClaim carries. An unscoped claim (`body contains …`) is judged against the whole response,
 // and an unbounded echo of a response is its own leak.
 const MaxFailedClaimObserved = 200
+
+// MaxBodyExcerpt is the longest body excerpt (in bytes, before FailedClaimTruncatedSuffix) a failed step carries.
+const MaxBodyExcerpt = 512
 
 // FailedClaimTruncatedSuffix ends an observed value that was cut to MaxFailedClaimObserved bytes.
 const FailedClaimTruncatedSuffix = "... (truncated)"
@@ -774,6 +863,8 @@ func ModeIsCertifying(mode string) bool { return mode != "" && mode != "build" &
 func (r *Report) WithholdScenarios() {
 	r.Layers = []Layer{}
 	r.Environment = nil
+	r.Faults = nil        // which links and deployments a hidden set breaks is the set's content
+	r.Preconditions = nil // which mechanisms a hidden set depends on is the set's content
 	r.BuildRecordObjectID = ""
 	r.BuildRecordNote = ""
 	r.Note = "this run is not a build run: its per-scenario results belong to the author (author_get_report); the verdict and tallies above are all a builder is given"

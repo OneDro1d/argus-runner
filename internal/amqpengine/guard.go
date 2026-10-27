@@ -35,9 +35,14 @@ type channel interface {
 	ConsumeWithContext(ctx context.Context, queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error)
 	QueueDeclare(name string, durable, autoDelete, exclusive, noWait bool, args amqp.Table) (amqp.Queue, error)
 	ExchangeDeclare(name, kind string, durable, autoDelete, internal, noWait bool, args amqp.Table) error
+	QueueBind(name, key, exchange string, noWait bool, args amqp.Table) error
 	QueueDelete(name string, ifUnused, ifEmpty, noWait bool) (int, error)
 	QueueUnbind(name, key, exchange string, args amqp.Table) error
 	ExchangeDelete(name string, ifUnused, noWait bool) error
+	// Qos, NotifyCancel and Cancel serve a long-lived subscription (Subscribe).
+	Qos(prefetchCount, prefetchSize int, global bool) error
+	NotifyCancel(c chan string) chan string
+	Cancel(consumer string, noWait bool) error
 }
 
 // connection is the slice of *amqp.Connection the engine drives.
@@ -47,6 +52,8 @@ type connection interface {
 	// abort tears the connection down WITHOUT waiting for the broker.
 	abort()
 	NotifyBlocked(receiver chan amqp.Blocking) chan amqp.Blocking
+	// NotifyClose reports the connection's close (a subscription is lost with it).
+	NotifyClose(receiver chan *amqp.Error) chan *amqp.Error
 }
 
 // realConn adapts *amqp.Connection to connection.

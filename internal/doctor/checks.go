@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -96,7 +97,7 @@ func refused(c *Check, in CredentialInput) {
 	case r.Status == 403:
 		c.Detail = "the control plane at " + cp + " accepted it, then refused it for the author API (" + r.Msg + "): it signs in, " +
 			"but not as an author. The usual cause is a builder token (#259: runner scope, same odts_ prefix as an author PAT) or a " +
-			"runner-scope sign-in; the author__* tools (propose, validate, write, request_run) refuse both."
+			"runner-scope sign-in; the author_* tools (propose, validate, write, request_run) refuse both."
 	default:
 		c.Detail = "the control plane at " + cp + " refused it (" + r.Msg + "): it does not accept this credential at all. It was " +
 			"revoked, has expired, was mistyped or cut short in a paste, or was issued by another control plane."
@@ -122,9 +123,9 @@ func credentialKind(in CredentialInput) Check {
 	case KindAuthorPAT:
 		c.Subject = in.Source + ": an odts_ PAT"
 		c.Status = StatusOK
-		c.Detail = "long-lived. Most likely an author PAT, the default kind, which drives the author__* tools (propose, validate, write, " +
+		c.Detail = "long-lived. Most likely an author PAT, the default kind, which drives the author_* tools (propose, validate, write, " +
 			"request_run) — but a builder token (#259: runner scope, one workspace or, by explicit choice, all of the owner's, minted on the Tokens page) has the same odts_ prefix, " +
-			"and the author__* tools refuse one. Only the control plane's Tokens page shows which this is. "
+			"and the author_* tools refuse one. Only the control plane's Tokens page shows which this is. "
 		if in.Accepted {
 			c.Detail += acceptedSentence(in)
 		} else {
@@ -212,7 +213,7 @@ func credentialKind(in CredentialInput) Check {
 		// onboarding lost a day to exactly this — a runner token saved where an author token was expected,
 		// every author verb refused, no message saying why.
 		c.Status = StatusWarn
-		c.Detail = "a RUNNER-scope token: a builder presents it to runner__run. The author__* tools (propose, validate, write, " +
+		c.Detail = "a RUNNER-scope token: a builder presents it to runner_run. The author_* tools (propose, validate, write, " +
 			"request_run) refuse it. " + c.Detail
 		c.Fix = login
 		return c
@@ -267,7 +268,21 @@ type ConfigInput struct {
 	// Targets is how many targets the parsed config declares, counted by the enumeration validate-config
 	// probes (toolcore.TargetCount); nil = no --config, or it did not parse.
 	Targets *int
+	// Unprobed lists the hosts chain steps under ScenariosDir dial by their own full URL that no target names
+	// (toolcore.UnprobedChainHosts): the executor's SUT probe never dials them. Read only when Validated.
+	Unprobed []UnprobedHost
 }
+
+// UnprobedHost is one host:port scenarios dial that no argus-config target names, with how many scenarios
+// dial it and the first of them, so a reader can open one.
+type UnprobedHost struct {
+	Addr      string
+	Scenarios int
+	First     string
+}
+
+// unprobedShown is how many unprobed hosts a report names before it says "and N more".
+const unprobedShown = 5
 
 // CheckConfig answers the question every config-reading command asks first, in the doctor's terms.
 func CheckConfig(in ConfigInput) Check {
@@ -318,6 +333,27 @@ func CheckConfig(in ConfigInput) Check {
 		found = append(found, strings.Join(in.Portless, ", ")+" names no port, so Argus reaches it on :8080 (its own default), "+
 			"not on :80 as a browser would.")
 		fixes = append(fixes, "write the port the service listens on into "+strings.Join(in.Portless, ", ")+" (for example http://<service>:80)")
+	}
+	if len(in.Unprobed) > 0 {
+		// a tester's machine, 2026-10-08: one target, and 216 of 364 scenarios calling two more engines by full URL.
+		hosts := append([]UnprobedHost(nil), in.Unprobed...)
+		sort.SliceStable(hosts, func(i, j int) bool { return hosts[i].Scenarios > hosts[j].Scenarios })
+		total := 0
+		var named []string
+		for i, h := range hosts {
+			total += h.Scenarios
+			if i < unprobedShown {
+				named = append(named, fmt.Sprintf("%s (%d %s, e.g. %s)", h.Addr, h.Scenarios, plural(h.Scenarios, "scenario", "scenarios"), orNone(h.First)))
+			}
+		}
+		if len(hosts) > unprobedShown {
+			named = append(named, fmt.Sprintf("and %d more", len(hosts)-unprobedShown))
+		}
+		found = append(found, fmt.Sprintf("%d scenarios call hosts no target here names, by a full URL in a chain step: %s. "+
+			"The executor's SUT probe dials only this config's targets, so sut-reachable's answer says nothing about these hosts: "+
+			"one that is down or misnamed shows only as red scenarios at run time.", total, strings.Join(named, ", ")))
+		fixes = append(fixes, "to have the executor probe them, declare each under targets.http_targets.<name>.base_url "+
+			"(the scenarios can keep their full URLs); or prove each route first with a one-request chain scenario that calls it")
 	}
 	if len(in.Unset) > 0 {
 		found = append(found, "unset or empty here: "+strings.Join(in.Unset, ", ")+". A run started from this machine refuses "+
@@ -609,4 +645,11 @@ func human(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%d days", int(d.Hours()/24))
 	}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }

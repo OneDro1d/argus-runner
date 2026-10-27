@@ -35,6 +35,7 @@ var usageCommands = []string{
 	"cloud-switch-workspace",
 	"cloud-teardown",
 	"cloud-verify",
+	"collect-logs", // the pod-log collector of render-k8s --sut-logs-via api
 	"delete-scenario",
 	"doctor",
 	"get-dashboard-url",

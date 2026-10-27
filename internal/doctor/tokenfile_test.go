@@ -64,7 +64,7 @@ func TestCheckTokenFile_Replay(t *testing.T) {
 		if c.Status != StatusOK {
 			t.Fatalf("status = %q, want ok; detail: %s", c.Status, c.Detail)
 		}
-		for _, s := range []string{"runner__run accepts it", "12m", "nothing renews"} {
+		for _, s := range []string{"runner_run accepts it", "12m", "nothing renews"} {
 			if !strings.Contains(c.Detail, s) {
 				t.Errorf("detail does not say %q: %s", s, c.Detail)
 			}
@@ -96,11 +96,11 @@ func TestCheckTokenFile(t *testing.T) {
 		{"runner token, two minutes left", tokenFile(path, jwtIn("runner", 2*time.Minute), "", now),
 			StatusWarn, []string{"expires in 2m", "Vault wrap"}, []string{"--scope runner"}},
 		{"author-scope access token meant for the runner side", tokenFile(path, jwtIn("author", 10*time.Minute), "runner", now),
-			StatusFail, []string{"AUTHOR-scope", "runner__run refuses it"}, []string{"--scope runner", "--token-out /home/x/runner-token.txt"}},
+			StatusFail, []string{"AUTHOR-scope", "runner_run refuses it"}, []string{"--scope runner", "--token-out /home/x/runner-token.txt"}},
 		{"runner token meant for the author side", tokenFile(path, jwtIn("runner", 10*time.Minute), "author", now),
-			StatusFail, []string{"RUNNER-scope", "author__* tools refuse it"}, []string{"Tokens page", "--token-for author", "/home/x/author-token.txt"}},
+			StatusFail, []string{"RUNNER-scope", "author_* tools refuse it"}, []string{"Tokens page", "--token-for author", "/home/x/author-token.txt"}},
 		{"author-scope access token for the author side lasts 15 minutes", tokenFile(path, jwtIn("author", 10*time.Minute), "author", now),
-			StatusOK, []string{"author__* tools accept it", "10m", "Tokens page"}, nil},
+			StatusOK, []string{"author_* tools accept it", "10m", "Tokens page"}, nil},
 		{"PAT for the author side", tokenFile(path, pat, "author", now),
 			StatusOK, []string{"author PAT", "builder token", "Tokens page"}, nil},
 		{"PAT, side not said", tokenFile(path, pat, "", now),

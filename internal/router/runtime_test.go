@@ -107,7 +107,7 @@ func TestState_RoundTripsThroughDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := f.Route("runner__run", "suta"); got.Token != "author-suta" {
+	if got := f.Upstreams["suta"]; got.Token != "author-suta" {
 		t.Errorf("upstream token did not survive the round trip: %+v", got)
 	}
 }

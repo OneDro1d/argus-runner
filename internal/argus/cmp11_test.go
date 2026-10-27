@@ -210,6 +210,10 @@ func normalizedRow(t *testing.T, row report.ScenarioResult) string {
 	steps := append([]report.StepResult(nil), row.Steps...)
 	for i := range steps {
 		steps[i].CorrelationID = ""
+		// a chain http step records how long its request took. It is a clock reading like
+		// DurationMs above: two runs of one check differ in it (0 ms and 1 ms made this comparison fail one
+		// run in a few), so it is removed with the other clock parts.
+		steps[i].ElapsedMs = nil
 	}
 	row.Steps = steps
 	b, err := json.Marshal(row)

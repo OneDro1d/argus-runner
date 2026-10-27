@@ -27,7 +27,7 @@ type SetSource struct {
 }
 
 // ErrNoSetAvailable is the UC061 structured refusal: no cache AND no reachable control plane.
-var ErrNoSetAvailable = errors.New("no scenario set available — connect to the control plane once or use author__request_run")
+var ErrNoSetAvailable = errors.New("no scenario set available — connect to the control plane once or use author_request_run")
 
 type cacheFile struct {
 	Scope     string                       `json:"scope"`
@@ -93,14 +93,22 @@ func (e *Executor) DirectRun(ctx context.Context, cachePath, scope string, sel f
 	// a direct run has no run_request_id — it is triggered locally, not enqueued (UC062).
 	a := &federation.RunAssignment{Scope: src.Scope, Selection: sel, SetHash: src.SetHash, Scenarios: src.Scenarios, RunID: preRunID}
 	var stopHB func()
+	runCtx := ctx
 	if fenced {
-		stopHB = e.startHeartbeat(ctx, preRunID, "", src.Scope) // W1/3: keep the fenced run alive under the watchdog
+		// W1/3: keep the fenced run alive under the watchdog. Its heartbeat carries the counts so far too, the
+		// same as a federated run's: the run loop writes the tally through runCtx, the ticker reads it.
+		tally := argus.NewTally()
+		stopHB = e.startHeartbeatTally(ctx, preRunID, "", src.Scope, tally)
+		runCtx = withTally(ctx, tally)
 	}
-	push, err := e.Run(ctx, a)
+	push, err := e.Run(runCtx, a)
 	if stopHB != nil {
 		stopHB()
 	}
 	if err != nil {
+		// AC-F1: the abort push below carries Argus's own words only; the whole error is said HERE, in this executor's
+		// own output, which is where the sentence it sends points.
+		e.log("run failed: %s", localDetail(err))
 		// The run never produced a push — release the held fence with a minimal terminal 'failed'
 		// push (records the aborted run honestly AND frees the lock; §D-3.1.2). DETACHED context:
 		// the run error may BE a ctx cancellation (Ctrl-C / deadline) — the abort must still land
@@ -111,9 +119,10 @@ func (e *Executor) DirectRun(ctx context.Context, cachePath, scope string, sel f
 			// 019: the DIRECT path carries its reason too. A direct run that aborts writes the same
 			// "status=failed, tallies 0/0" row a federated one does, and it is read from the same
 			// Runs page — so leaving this one silent would fix half the estate and quietly keep the
-			// other half undiagnosable.
+			// other half undiagnosable. AC-F1: Argus's own words only, never the app's (ownwords.go). The caller gets
+			// the same error value, whose text is its words; the whole detail is in the "run failed" line logged above.
 			abort := federation.ResultsPush{RunID: preRunID, Scope: src.Scope, Status: "failed",
-				SetHash: src.SetHash, StartedAt: &now, FinishedAt: &now, FailureReason: err.Error()}
+				SetHash: src.SetHash, StartedAt: &now, FinishedAt: &now, FailureReason: failureReason(err)}
 			if oerr := e.Outbox.Put(abort); oerr != nil {
 				e.log("WARNING: could not queue the abort push durably: %v", oerr)
 			}

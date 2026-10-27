@@ -182,7 +182,7 @@ func TestV30003_TheListsAreLoadedFromTheSchema(t *testing.T) {
 		// ARGUS-CMP-2: the ninth section. The ONLY existing assertion this PR changes.
 		t.Errorf("the nine sections came back as %q", got)
 	}
-	if got := strings.Join(MetadataKeys(), ","); got != "ID,Layer,Tags,Target" {
+	if got := strings.Join(MetadataKeys(), ","); got != "ID,Layer,Tags,Target,Preconditions,Depends on" { // adds the last two
 		t.Errorf("the Metadata keys came back as %q — `Priority` must be gone (VR12-M2)", got)
 	}
 	if got := strings.Join(DispatchTags(), ","); got != "chain,mcp,ui,http" {

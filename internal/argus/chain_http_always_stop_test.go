@@ -33,8 +33,13 @@ func TestHTTPStep_WrongStatusFailsEvenWhenTheBodyMatches(t *testing.T) {
 	if len(res.Steps) != 1 || res.Steps[0].Observed == "" {
 		t.Fatalf("want one failed step naming the status, got %+v", res.Steps)
 	}
-	if got := res.Steps[0].Observed; !strings.Contains(got, "500") || !strings.Contains(got, "201") {
-		t.Errorf("the failure must name the observed 500 and the declared 201: %q", got)
+	// the declared 201 is an expected value, so the builder-visible text no longer names it;
+	// the author-only failed claim does.
+	if got := res.Steps[0].Observed; !strings.Contains(got, "500") || strings.Contains(got, "201") {
+		t.Errorf("the failure must name the observed 500 and NOT the declared 201: %q", got)
+	}
+	if fc := res.Steps[0].FailedClaims; len(fc) != 1 || fc[0].Claim != "status = 201" {
+		t.Errorf("the declared 201 belongs in the author-only failed claim: %+v", fc)
 	}
 }
 

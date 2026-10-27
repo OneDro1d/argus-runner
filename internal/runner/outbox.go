@@ -158,6 +158,15 @@ func (o *Outbox) read(path string) (*entry, error) {
 	return &e, nil
 }
 
+// has reports whether a terminal push for runID is queued.
+func (o *Outbox) has(runID string) bool {
+	if !o.enabled() {
+		return false
+	}
+	_, err := os.Stat(o.path(runID))
+	return err == nil
+}
+
 // Ack removes an entry the control plane has confirmed. Absent is success — Ack is idempotent.
 func (o *Outbox) Ack(runID string) error {
 	if !o.enabled() {
@@ -283,7 +292,11 @@ func (o *Outbox) Drain(ctx context.Context, push func(context.Context, federatio
 			o.log("outbox: %s is unreadable (%v) — left in place for inspection", filepath.Base(p), rerr)
 			continue
 		}
-		if perr := push(ctx, e.Push); perr != nil {
+		// AC-F2.2: an entry queued before an upgrade can hold a load ramp with the load tool's message or the
+		// broker's words; it leaves as words, counts and times, like a fresh push (loadRampWire).
+		out := e.Push
+		out.LoadRamp = loadRampWithoutTexts(out.LoadRamp)
+		if perr := push(ctx, out); perr != nil {
 			now := time.Now().UTC()
 			e.Attempts++
 			e.LastAttempt = &now

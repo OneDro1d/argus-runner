@@ -80,7 +80,7 @@ func TestCheckExecutorVersion_Replay(t *testing.T) {
 			asked(exec0336("sut-demo")), []string{"#286", "author_get_report", "why"}, []string{"0.3.40"}},
 		{"GH:307", `issue #307 (AC-D50): "7 registrations, 7 destructions, 0 survivors across compose, k3d and managed AKS"; the 0.3.36 kit has the same probe (argus-kit-0.3.36/onboarding/onboard.sh:3784-3789)`,
 			asked(exec0336("sut-demo")), []string{"#308", "AC-D50", "destroy"}, []string{"0.3.43"}},
-		{"L0929:docker", `tester verify/2026-09-29-312-fix-check/NOTE.md § Addendum 2: the fix said "with the update block the control plane publishes", the block runs docker pull, and docker info here says "dial unix /var/run/docker.sock: connect: no such file or directory"`,
+		{"L0929:docker", `a tester's run § Addendum 2: the fix said "with the update block the control plane publishes", the block runs docker pull, and docker info here says "dial unix /var/run/docker.sock: connect: no such file or directory"`,
 			noDocker(asked(dockerBlock(exec0336("sut-demo")))), []string{"#135"}, []string{"cannot run on this host", "docker.sock", "ask your control-plane operator", "kit and kubeconfig paths"}},
 	}
 	for _, tc := range cases {
@@ -109,9 +109,63 @@ func TestCheckExecutorVersion_Replay(t *testing.T) {
 	}
 }
 
+// REPLAY of a tester's rows (a tester's run): an executor on 0.3.65 — the kit the pilot instance was onboarded with — was reported
+// "current, with every fix this doctor knows of", because the table stopped at 0.3.43. Each of these cost
+// a run or a triage pass before it was traced to the executor.
+func TestCheckExecutorVersion_ReplayThreeEngines(t *testing.T) {
+	exec0365 := ExecutorStatus{InstanceID: "pilot", RunnerVersion: "0.3.65", VersionState: federation.FloorCurrent,
+		MinSupported: "0.3.0", MinRecommended: "0.3.65", RecommendedImage: "argus-executor@sha256:0365"}
+	cases := []struct {
+		row, source string
+		detail      []string
+		fix         []string
+	}{
+		{"F15", `a tester's findings "chain http steps send no X-Correlation-Id": Loki and the sagas view empty for every chain scenario`,
+			[]string{"#610", "#606", "X-Correlation-Id"}, []string{"0.3.66: #610"}},
+		{"F19", `a tester's run EXPECT.md "chain HTTP steps cut at 30 s whatever ## TIMEOUT said, reported as SUT unreachable"`,
+			[]string{"#623", "#621", "30 s", "SUT unreachable"}, []string{"0.3.68: #623"}},
+		{"F20", `a tester's run EXPECT.md "two Go comparisons listed 10 failed claims where 11 were predicted"`,
+			[]string{"#633", "#632", "at most 10"}, []string{"0.3.68"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.row, func(t *testing.T) {
+			c := CheckExecutorVersion(asked(exec0365))
+			if c.Status != StatusWarn {
+				t.Errorf("%s: status = %q, want warn — 0.3.65 lacks the fix\nsource: %s\ndetail: %s", tc.row, c.Status, tc.source, c.Detail)
+			}
+			for _, s := range tc.detail {
+				if !strings.Contains(c.Detail, s) {
+					t.Errorf("%s: detail does not name %q\nsource: %s\ndetail: %s", tc.row, s, tc.source, c.Detail)
+				}
+			}
+			for _, s := range tc.fix {
+				if !strings.Contains(c.Fix, s) {
+					t.Errorf("%s: fix does not say %q\nfix: %s", tc.row, s, c.Fix)
+				}
+			}
+		})
+	}
+	t.Run("0.3.68 carries all three", func(t *testing.T) {
+		e := exec0365
+		e.RunnerVersion, e.MinRecommended = "0.3.68", "0.3.68"
+		c := CheckExecutorVersion(asked(e))
+		if c.Status != StatusOK || strings.Contains(c.Detail, "#610") || strings.Contains(c.Detail, "#633") {
+			t.Fatalf("got %+v", c)
+		}
+	})
+	t.Run("0.3.66 has the correlation id, not the 0.3.68 fixes", func(t *testing.T) {
+		e := exec0365
+		e.RunnerVersion, e.MinRecommended = "0.3.66", "0.3.66"
+		c := CheckExecutorVersion(asked(e))
+		if strings.Contains(c.Detail, "#610") || !strings.Contains(c.Detail, "#623") {
+			t.Fatalf("got %+v", c)
+		}
+	})
+}
+
 func TestCheckExecutorVersion(t *testing.T) {
-	current := ExecutorStatus{InstanceID: "sut-demo", RunnerVersion: "0.3.44", VersionState: federation.FloorCurrent,
-		MinSupported: "0.3.0", MinRecommended: "0.3.44", RecommendedImage: "argus-executor@sha256:06dc0675"}
+	current := ExecutorStatus{InstanceID: "sut-demo", RunnerVersion: "0.3.68", VersionState: federation.FloorCurrent,
+		MinSupported: "0.3.0", MinRecommended: "0.3.68", RecommendedImage: "argus-executor@sha256:06dc0675"}
 
 	// THE RULE: a check that could not ask is unknown, never ok — and says why it did not ask.
 	t.Run("not asked is unknown, with the reason and a fix", func(t *testing.T) {

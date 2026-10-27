@@ -9,13 +9,16 @@ package amqpload
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/OneDro1d/argus-runner/internal/memlimit"
 	"github.com/OneDro1d/argus-runner/internal/report"
 	"github.com/OneDro1d/argus-runner/internal/scenario"
 )
@@ -49,8 +52,61 @@ type Outcome struct {
 	Observed string // reality only (VR-C8): never a declared threshold
 }
 
+// JTLRowsFloor is the floor of the most data rows ReadJTL will hold for one step: the cap at the default 1536Mi
+// executor, below it, or when no memory limit can be read. Past the cap ReadJTL returns a *TooLargeError and no
+// rows, and the run loops end the scenario `error` with its words: a ramp that wrote more samples than the cap
+// was never judged, and it is never judged on a prefix.
+//
+// WHY 500,000 AT THE DEFAULT: AggregateStep keeps about four copies of a step's rows at once (the
+// rows, the filtered rows, the latency list, the per-sample list of the HTTP twin), roughly 400 bytes per sample in
+// all. 500,000 samples is about 200 MB at the peak, inside the share of a 1536Mi executor the Go runtime is given
+// (internal/memlimit) beside the JMeter JVM. Before the cap the whole file was read into a [][]string and then
+// into a []Row, and a long or wide step took the executor to 1.0-1.16 GB, where the kernel ended it mid-run.
+//
+// THE CAP GROWS WITH THE MEMORY THE EXECUTOR IS GIVEN: a fixed number would end a step `error`
+// at any container size, and the advice to add memory could not help. JTLRowCap scales this floor by the memory
+// budget relative to the default container (memlimit.Budget.Scale), so 3Gi admits 1,000,000 rows and 4Gi
+// 1,333,333; at the default container, below it, or when no limit can be read it is exactly this floor.
+const JTLRowsFloor = 500_000
+
+// JTLRowCap is the most data rows ReadJTL will hold for one step with the memory b: JTLRowsFloor scaled by b.
+func JTLRowCap(b memlimit.Budget) int { return b.Scale(JTLRowsFloor) }
+
+// ErrJTLTooLarge is what ReadJTL's error matches (errors.Is) when a step wrote more samples than the cap. The
+// error itself is a *TooLargeError, which carries the numbers.
+var ErrJTLTooLarge = errors.New("the load step wrote more samples than the executor holds in memory to judge a step")
+
+// TooLargeError is the error ReadJTL returns when a step wrote more rows than its cap, with the words a tester can
+// act on: the cap that was hit, the samples seen and the memory limit the cap was derived from.
+type TooLargeError struct {
+	Cap     int    // the cap that was hit
+	Seen    int    // the data rows counted
+	SeenAll bool   // true: Seen is the whole file; false: the count stopped at a read error, so there were at least Seen
+	Basis   string // the memory limit the cap came from (memlimit.Budget.Basis)
+}
+
+// Is makes errors.Is(err, ErrJTLTooLarge) true.
+func (e *TooLargeError) Is(target error) bool { return target == ErrJTLTooLarge }
+
+func (e *TooLargeError) Error() string {
+	seen := strconv.Itoa(e.Seen)
+	if !e.SeenAll {
+		seen = "at least " + seen
+	}
+	return fmt.Sprintf("the load step wrote %s samples, more than the cap of %d samples the executor holds in memory to judge a step at its memory limit (%s); "+
+		"the step was NOT judged. The cap grows with that limit (%d samples per %d MiB): give the executor more memory (onboard with --executor-memory), "+
+		"or lower the number of users, the rate or the step duration",
+		seen, e.Cap, e.Basis, JTLRowsFloor, memlimit.DefaultContainerBytes>>20)
+}
+
 // ReadJTL parses a JTL CSV by header name (never by position: JMeter's column order is configuration).
-func ReadJTL(path string) ([]Row, error) {
+// It reads one record at a time, and returns a *TooLargeError (with no rows) when the file has more than
+// JTLRowCap(b) data rows.
+func ReadJTL(path string, b memlimit.Budget) ([]Row, error) {
+	return readJTL(path, JTLRowCap(b), b.Basis)
+}
+
+func readJTL(path string, max int, basis string) ([]Row, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -58,15 +114,16 @@ func ReadJTL(path string) ([]Row, error) {
 	defer f.Close()
 	rd := csv.NewReader(f)
 	rd.FieldsPerRecord = -1
-	recs, err := rd.ReadAll()
+	rd.ReuseRecord = true
+	first, err := rd.Read()
+	if err == io.EOF {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	if len(recs) < 2 {
-		return nil, nil
-	}
 	head := map[string]int{}
-	for i, h := range recs[0] {
+	for i, h := range first {
 		head[h] = i
 	}
 	get := func(rec []string, k string) string {
@@ -75,13 +132,39 @@ func ReadJTL(path string) ([]Row, error) {
 		}
 		return ""
 	}
+	// Labels and codes repeat on every row: one copy of each is kept, and a field never pins the whole record
+	// string it was cut from.
+	intern := map[string]string{}
+	keep := func(v string) string {
+		if len(v) > 64 {
+			return strings.Clone(v)
+		}
+		if c, ok := intern[v]; ok {
+			return c
+		}
+		c := strings.Clone(v)
+		if len(intern) < 1024 {
+			intern[c] = c
+		}
+		return c
+	}
 	var rows []Row
-	for _, rec := range recs[1:] {
+	for {
+		rec, err := rd.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) >= max {
+			return nil, tooLarge(rd, max, basis)
+		}
 		ts, _ := strconv.ParseInt(get(rec, "timeStamp"), 10, 64)
 		el, _ := strconv.Atoi(get(rec, "elapsed"))
 		rows = append(rows, Row{
-			TimeStampMs: ts, ElapsedMs: el, Label: get(rec, "label"), Code: get(rec, "responseCode"),
-			Message: get(rec, "responseMessage"), FailureMessage: get(rec, "failureMessage"),
+			TimeStampMs: ts, ElapsedMs: el, Label: keep(get(rec, "label")), Code: keep(get(rec, "responseCode")),
+			Message: keep(get(rec, "responseMessage")), FailureMessage: keep(get(rec, "failureMessage")),
 			Success: strings.EqualFold(get(rec, "success"), "true"),
 		})
 	}
@@ -194,7 +277,9 @@ func AggregateStep(rows []Row, in StepInput) report.LoadStep {
 				if m := reasonRe.FindStringSubmatch(r.Message); m != nil {
 					reason = strings.TrimSpace(m[1])
 				}
-				cur = &report.BlockedPeriod{SinceMs: since, Reason: reason}
+				// AC-F2.2: the word (memory, disk, other) is what the limited report and the results push carry; the
+				// broker's words stay in the full report (report.LoadStepWithoutTexts).
+				cur = &report.BlockedPeriod{SinceMs: since, Reason: reason, Kind: report.BlockedKind(reason)}
 			}
 		case r.Success && cur != nil && strings.Contains(r.Message, wasBlocked):
 			cur.UntilMs = r.TimeStampMs
@@ -325,6 +410,9 @@ func Verdict(p *scenario.AMQPLoadProfile, steps []report.LoadStep) Outcome {
 		case report.LoadStepBlocked:
 			reason := ""
 			if len(s.Blocked) > 0 && s.Blocked[0].Reason != "" {
+				// ⛔ AC-F2.2: this quotes the broker's own words (Reason) into failure.observed. It is safe ONLY because
+				// failure.observed is in limitedNotSent (internal/runner/limitedreport.go) and the results push carries
+				// no Observed (internal/runner/mapper.go). Never add failure.observed to the keep list.
 				reason = ": " + s.Blocked[0].Reason
 			}
 			return Outcome{"failed", fmt.Sprintf("blocked by broker%s — the broker held the publisher blocked at step %d of %d (%d sessions) and the ramp stopped there",
@@ -370,4 +458,22 @@ func describe(s report.LoadStep) string {
 		extra = ", the load generator itself was the limit"
 	}
 	return fmt.Sprintf("%s, delivered/sent %.3f%s", p95, s.DeliveredRatio, extra)
+}
+
+// tooLarge builds the error for a file that has just shown its (max+1)th data row: it goes on reading the rest of
+// the records WITHOUT keeping them, so the words can say how many samples the step wrote. A read error ends the
+// count early and the words then say "at least".
+func tooLarge(rd *csv.Reader, max int, basis string) *TooLargeError {
+	e := &TooLargeError{Cap: max, Seen: max + 1, Basis: basis}
+	for {
+		_, err := rd.Read()
+		if err == io.EOF {
+			e.SeenAll = true
+			return e
+		}
+		if err != nil {
+			return e
+		}
+		e.Seen++
+	}
 }

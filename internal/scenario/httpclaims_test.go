@@ -96,9 +96,11 @@ func TestParseBodyAsserts_SavedThresholdIsKeptAsWritten(t *testing.T) {
 	if got[0].Op != BodyGT || got[0].Value != "${saved.n}" || got[0].Field != "count" {
 		t.Errorf("the assertion must carry the placeholder verbatim to be bound at run time: %+v", got[0])
 	}
-	_, errs = ParseBodyAsserts([]string{"body has count == ${saved.n}"})
-	if len(errs) == 0 {
-		t.Error("`==` stays unsupported")
+	// `==` is legal now (numeric equality). It was refused by name before; this is the one
+	// assertion that changed. `=>` and `=<` stay refused (TestParseBodyAsserts_BadOperatorRefusedByName).
+	eq, errs := ParseBodyAsserts([]string{"body has count == ${saved.n}"})
+	if len(errs) != 0 || len(eq) != 1 || eq[0].Op != BodyEQ || eq[0].Value != "${saved.n}" {
+		t.Errorf("`==` against a saved value must parse and keep the placeholder as written: %+v %v", eq, errs)
 	}
 }
 

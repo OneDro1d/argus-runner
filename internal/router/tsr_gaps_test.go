@@ -114,14 +114,14 @@ func TestTSR6_TwoInstancesFromOneFolderResolveIndependently(t *testing.T) {
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
-	a, err := f.Route("runner__run", "suta")
-	if err != nil {
-		t.Fatalf("suta: %v", err)
+	// (Through the router, each call reaching its own executor with its own token:
+	// TestRunnerCall_TwoInstancesOfOneFolderEachReachTheirOwnExecutor.)
+	for _, id := range []string{"suta", "sutb"} {
+		if err := f.checkInstance(id); err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
 	}
-	b, err := f.Route("runner__run", "sutb")
-	if err != nil {
-		t.Fatalf("sutb: %v", err)
-	}
+	a, b := f.Upstreams["suta"], f.Upstreams["sutb"]
 	if a.URL == b.URL {
 		t.Fatalf("both instances routed to the SAME upstream (%s) — one folder could not drive two SUTs", a.URL)
 	}

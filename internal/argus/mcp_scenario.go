@@ -198,6 +198,12 @@ type expectBullet struct {
 // double quotes, never %q-escaped, so the author can grep for it), names the accepted forms and,
 // where cheap, the nearest one.
 func classifyExpectBullet(raw string) (expectBullet, error) {
+	return classifyExpectBulletFor(raw, false)
+}
+
+// classifyExpectBulletFor is classifyExpectBullet; allowExtracted is true for the claims of a chain mcp step, the only
+// place `body extracted …` is a claim.
+func classifyExpectBulletFor(raw string, allowExtracted bool) (expectBullet, error) {
 	clause := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "-"))
 	low := strings.ToLower(clause)
 	// Gate-2 F1 (VR10-S2-6): ONE assertion per bullet. The chain path refuses a `;`-joined string by name; the
@@ -223,11 +229,20 @@ func classifyExpectBullet(raw string) (expectBullet, error) {
 	// VR10-S2-7 survives unchanged (an uncompilable `matching` regex is an authoring error, never a
 	// red step against the SUT): compilability is checked inside the shared parser and surfaces here
 	// as the refusal it always was.
+	// `elapsed` is a chain http step's claim. An mcp engine would read the bullet as
+	// prose (it carries neither an operator word nor a field-ish token) and prove nothing, so it is refused by name.
+	if scenario.ClaimsToBeElapsed(clause) {
+		return expectBullet{}, fmt.Errorf("bullet not understood: \"%s\" — `elapsed` is a claim of a chain `http` step only (it times that step's one HTTP request); an mcp call has no such claim", clause)
+	}
 	if scenario.ClaimsToBeBodyAssert(clause) {
 		if carriesPlaneAssertion(low) {
 			return expectBullet{}, fmt.Errorf("bullet not understood: \"%s\" — it carries a content assertion beside the plane phrase; write one bullet per assertion (`- body contains <value>` and the plane bullet, e.g. `- result.isError == false`)", clause)
 		}
-		if _, errs := scenario.ParseBodyAsserts([]string{clause}); len(errs) > 0 {
+		parse := scenario.ParseBodyAsserts
+		if allowExtracted {
+			parse = scenario.ParseMCPStepBodyAsserts
+		}
+		if _, errs := parse([]string{clause}); len(errs) > 0 {
 			return expectBullet{}, fmt.Errorf("bullet not understood: \"%s\" — %v", clause, errs[0])
 		}
 		return expectBullet{kind: expectBody}, nil
@@ -306,9 +321,14 @@ func nearestExpectForm(low string) string {
 // validate time. The body fields are filled by scenario.ParseBodyAsserts — the SAME parser the HTTP
 // path uses, and it keeps EVERY assertion rather than the first of each kind (VR12-E8 R1).
 func parseExpectPlane(expect []string) (mcp.Expect, error) {
+	return parseExpectPlaneFor(expect, false)
+}
+
+// parseExpectPlaneFor is parseExpectPlane; allowExtracted is true for a chain mcp step (`body extracted …`).
+func parseExpectPlaneFor(expect []string, allowExtracted bool) (mcp.Expect, error) {
 	want := mcp.Expect{ErrorPlane: mcp.PlaneNone}
 	for _, e := range expect {
-		b, err := classifyExpectBullet(e)
+		b, err := classifyExpectBulletFor(e, allowExtracted)
 		if err != nil {
 			return mcp.Expect{}, err
 		}
@@ -322,7 +342,11 @@ func parseExpectPlane(expect []string) (mcp.Expect, error) {
 	// VR12-E8 R1/R5: EVERY body assertion, ANDed — on the single-MCP path AND on every chain step,
 	// which both reach this function. a tester scoped his row to the status layer; the defect was
 	// shared, so a chain step declaring two content assertions was dropping the second too.
-	asserts, berrs := ParseBodyAsserts(expect)
+	parseBody := ParseBodyAsserts
+	if allowExtracted {
+		parseBody = scenario.ParseMCPStepBodyAsserts
+	}
+	asserts, berrs := parseBody(expect)
 	if len(berrs) > 0 {
 		// R3: a bullet that claims to be a body assertion and parses as none is an ERROR here, not a
 		// silent skip. This is the very `continue` V29-020 identified as the moment the product
@@ -343,7 +367,7 @@ type ExpectProblem struct {
 
 // ExpectProblems is the validate-time surface of the classifier — the same rules the run applies
 // at preflight, applied to EVERY bullet so the author sees all of them at once. `argus
-// validate-config --scenarios` and `author__validate_scenario` both call it (through toolcore).
+// validate-config --scenarios` and `author_validate_scenario` both call it (through toolcore).
 // Only mcp and chain scenarios are this parser's business: an HTTP scenario's `body has` goes to
 // the JSR223 path, and a chain scenario's own EXPECT section is documentation — the runner judges
 // its steps' `expect` (specs/17-chain-scenarios.md).
@@ -379,7 +403,7 @@ func ExpectProblems(s *scenario.Scenario) []ExpectProblem {
 				continue
 			}
 			for _, b := range claims[st.Name] {
-				if _, err := classifyExpectBullet(b); err != nil {
+				if _, err := classifyExpectBulletFor(b, true); err != nil {
 					out = append(out, ExpectProblem{Step: st.Name, Bullet: b, Message: "step \"" + st.Name + "\" EXPECT " + err.Error()})
 				}
 			}
@@ -493,7 +517,9 @@ func runMCPScenario(c *config.Config, s *scenario.Scenario, corr string) report.
 	cl := &mcp.Client{ServerURL: serverURL, Transport: mcp.Transport(orDefault(spec.Transport, mcpT.TransportOrDefault())), Token: resolveVars(mcpT.Token(), corr), Timeout: callTimeout, RateLimit: rateLimitSpec(c),
 		// VR12-T3 path 2: the author's own TRIGGER headers. resolveVars is already applied to the
 		// token on this path, so ${VAR}/${cid}/${correlation_id} resolution is the same mechanism, not a new one.
-		ExtraHeaders: resolvedHeaders(s, corr)}
+		ExtraHeaders: resolvedHeaders(s, corr),
+		// a money-handling run does not follow a redirect (the owner's list names the target).
+		NoRedirects: c != nil && c.MoneyHandling}
 	// Patch #3: record the end-to-end call duration so the runner-native MCP path feeds
 	// argus_scenario_duration_seconds (the HTTP/JMeter path already does) — otherwise the
 	// "Slowest scenarios" dashboard panel is empty for every MCP SUT.

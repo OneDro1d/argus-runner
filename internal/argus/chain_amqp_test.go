@@ -3,6 +3,7 @@ package argus
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,13 @@ type argusFakeBroker struct {
 	closed      int
 	dialError   error
 	consumeBody []byte // TestAMQPChain_ConsumeBodyClaimResolvesCid8 — the delivered message a `consume` returns
+	//
+	consumeEncoding string
+	consumed        []string
+	waits           []time.Duration
+	listens         [][4]string
+	binds           [][3]string
+	deleted         []string
 }
 
 func (f *argusFakeBroker) PublishConfirmed(_, _ string, body []byte, props amqpengine.Props) amqpengine.Outcome {
@@ -39,16 +47,34 @@ func (f *argusFakeBroker) PublishConfirmed(_, _ string, body []byte, props amqpe
 	f.props = append(f.props, props)
 	return f.outcome
 }
-func (f *argusFakeBroker) Consume(string, time.Duration) (amqpengine.Outcome, []byte) {
+func (f *argusFakeBroker) ConsumeDelivery(queue string, wait time.Duration) (amqpengine.Outcome, amqpengine.Delivery) {
 	f.other++
-	return f.outcome, f.consumeBody
+	f.consumed = append(f.consumed, queue)
+	f.waits = append(f.waits, wait)
+	return f.outcome, amqpengine.Delivery{Body: f.consumeBody, ContentEncoding: f.consumeEncoding}
+}
+
+// Listen / BindQueue record what the chain asked of the broker.
+func (f *argusFakeBroker) Listen(queue, exchange, routingKey string, ttl int) amqpengine.Outcome {
+	f.other++
+	f.listens = append(f.listens, [4]string{queue, exchange, routingKey, strconv.Itoa(ttl)})
+	return f.outcome
+}
+func (f *argusFakeBroker) BindQueue(queue, exchange, routingKey string) amqpengine.Outcome {
+	f.other++
+	f.binds = append(f.binds, [3]string{queue, exchange, routingKey})
+	return f.outcome
 }
 func (f *argusFakeBroker) DeclareQueue(string) amqpengine.Outcome { f.other++; return f.outcome }
 func (f *argusFakeBroker) DeclareExchange(string, string) amqpengine.Outcome {
 	f.other++
 	return f.outcome
 }
-func (f *argusFakeBroker) DeleteQueue(string) amqpengine.Outcome { f.other++; return f.outcome }
+func (f *argusFakeBroker) DeleteQueue(name string) amqpengine.Outcome {
+	f.other++
+	f.deleted = append(f.deleted, name)
+	return f.outcome
+}
 func (f *argusFakeBroker) UnbindQueue(string, string, string) amqpengine.Outcome {
 	f.other++
 	return f.outcome

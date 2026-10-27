@@ -1,6 +1,7 @@
 package argus
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/avroschema"
 	"github.com/OneDro1d/argus-runner/internal/chain"
 	"github.com/OneDro1d/argus-runner/internal/config"
+	"github.com/OneDro1d/argus-runner/internal/fault"
 	"github.com/OneDro1d/argus-runner/internal/mcp"
 	"github.com/OneDro1d/argus-runner/internal/report"
 	"github.com/OneDro1d/argus-runner/internal/scenario"
@@ -97,8 +99,8 @@ func mayRefire(s *scenario.Scenario) bool {
 		return true
 	}
 	for _, st := range steps {
-		if st.Type == "amqp" {
-			return false
+		if st.Type == "amqp" || st.Type == "bus" {
+			return false // a re-fire reuses the correlation id, so a late message of attempt 1 would count for attempt 2
 		}
 	}
 	return true
@@ -158,7 +160,7 @@ func uiStep(name, spec, appURL, vendorDir string) chain.Step {
 		if appURL == "" {
 			appURL = os.Getenv("APP_URL")
 		}
-		exitCode, hasResults, stderr := uiRun(vendorDir, []string{spec}, appURL, cid, nil, "")
+		exitCode, hasResults, stderr := uiRun(vendorDir, []string{spec}, appURL, cid, nil, "", 0)
 		status, observed := ui.Classify(exitCode, hasResults, stderr)
 		return report.StepResult{Status: status, Observed: observed}
 	}}
@@ -186,6 +188,13 @@ func runChainScenarioWithMoneyWrites(c *config.Config, s *scenario.Scenario, cor
 // = records nothing, byte-identical to before ARGUS-CMP-3).
 func runChainScenarioWithOutputs(c *config.Config, s *scenario.Scenario, corr, vendorDir string,
 	moneyAllow scenario.MoneyWriteAllowlist, moneyLedger *scenario.MoneySpendLedger, oc *outputCtx) report.ScenarioResult {
+	return runChainScenarioWithFaults(c, s, corr, vendorDir, moneyAllow, moneyLedger, oc, faultEnv{})
+}
+
+// runChainScenarioWithFaults is runChainScenarioWithOutputs plus where the run keeps its fault state
+// . A zero faultEnv refuses any chain that carries a fault step.
+func runChainScenarioWithFaults(c *config.Config, s *scenario.Scenario, corr, vendorDir string,
+	moneyAllow scenario.MoneyWriteAllowlist, moneyLedger *scenario.MoneySpendLedger, oc *outputCtx, fe faultEnv) report.ScenarioResult {
 	// VR10-S3: a chain selects its MCP target PER STEP; a Metadata **Target** is refused, not ignored.
 	if _, terr := scenario.TargetKind(s); terr != nil {
 		return targetRefused(s, corr, terr)
@@ -257,12 +266,74 @@ func runChainScenarioWithOutputs(c *config.Config, s *scenario.Scenario, corr, v
 			}
 		}
 	}
+	// THE ALLOWLIST DOOR, before any step is even assembled: a chain naming a fault target
+	// the operator did not list is refused WHOLE, so a later bad step cannot leave an earlier fault applied.
+	if step, why := faultPreflight(c, s, specs, claims, fe); why != "" {
+		return preflightChainFail(s, corr, step, why)
+	}
+	var faults *fault.Manager
+	if scenario.HasFaultStep(specs) {
+		faults = newFaultManager(c, corr, fe)
+	}
+	// Second door: the SAME function scenario.Validate asks (one kind per saved variable, and a
+	// JSON-saved variable only in a body or args), so a file that reached a run without the validator is refused
+	// by name with the same sentence, before any step runs.
+	if issues := scenario.SavedJSONProblems(specs, claims); len(issues) > 0 {
+		return preflightChainFail(s, corr, issues[0].Step, issues[0].Why)
+	}
+	// The db step's door: the read-only rules again (one implementation with the validator), the
+	// `${…}` rules, the claim grammar, the target and its URL - for EVERY db step, before the first step of the chain
+	// is built, so a refusal leaves nothing fired and nothing half-assembled.
+	dbSteps, dbStep, dbWhy := dbPreflight(c, s, specs, pristineSteps, claims, corr)
+	if dbWhy != "" {
+		return preflightChainFail(s, corr, dbStep, dbWhy)
+	}
+	// The logs step's door: shape, scope, labels, line filters and claims again (one implementation
+	// with the validator), then the environment - a Loki this executor reads, not BetterStack - for EVERY logs step,
+	// before the first step of the chain is built.
+	logsSteps, logsStep, logsWhy := logsPreflight(c, s, specs, pristineSteps, claims, corr, fe, time.Now())
+	if logsWhy != "" {
+		return preflightChainFail(s, corr, logsStep, logsWhy)
+	}
+	// The bus step's door: shape, binding, `where`, wait, position and claims again (one implementation
+	// with the validator), then the environment - the broker target, its envelope, its url reference, its vhost - for EVERY
+	// bus step, before the first step of the chain is built. Nothing is dialled yet: arming is below, after the build loop.
+	busSteps, busRef := busPreflight(c, s, specs, pristineSteps, claims, corr)
+	if busRef != nil {
+		return busResult(s, corr, busRef)
+	}
+	// The mcp step's door: the stray fields, `extract`, `unavailable` and `poll` (which needs
+	// `idempotent`) again, one implementation with the validator, before the first step of the chain is built.
+	mcpOpts, mcpStepName, mcpWhy := mcpPreflight(c, s, specs, pristineSteps, claims)
+	if mcpWhy != "" {
+		return preflightChainFail(s, corr, mcpStepName, mcpWhy)
+	}
+	// the signing keys. A key that is undeclared, unset or not Ed25519 is the harness's problem, not
+	// the system's: the scenario is `error` (grey), nothing is fired, and the sentence names the reference only.
+	signPlans, signStepName, signWhy := signPreflight(c, specs, pristineSteps)
+	if signWhy != "" {
+		return report.ScenarioResult{ID: s.ID, CorrelationID: corr, Status: report.StatusError,
+			Failure: &report.Failure{Observed: "chain step '" + signStepName + "': " + signWhy + " - preflight, nothing was sent"}}
+	}
+	for i, p := range signPlans {
+		o := mcpOpts[i]
+		o.Sign = p
+		mcpOpts[i] = o
+	}
+	// every queue a `listen` step makes is deleted when the chain ends, on every path (passed,
+	// failed, errored, abandoned, a panic). A delete that fails never changes the verdict: it is logged, and the
+	// queue's own x-expires reaps it. Cleanup is idempotent. A chain refused at preflight made nothing, so it
+	// deletes nothing.
+	listenReg := chain.NewListenRegistry()
+	defer listenReg.Cleanup(dialAMQPBroker)
+	// the taps the bus steps read; filled by armBus after the build loop, before chain.Run.
+	busTaps := map[int]chain.BusTap{}
 	var steps []chain.Step
 	hasHTTPStep := false
 	for i, st := range specs {
 		// P4, second door (scenario.Validate is the first): a `save` regex must compile and carry
 		// exactly one capture group — refused BY NAME before anything runs.
-		if why := scenario.SaveProblems(st.Save); len(why) > 0 {
+		if why := append(scenario.SaveProblems(st.Save), scenario.SaveFromProblems(st)...); len(why) > 0 {
 			return preflightChainFail(s, corr, st.Name, why[0])
 		}
 		switch st.Type {
@@ -308,7 +379,9 @@ func runChainScenarioWithOutputs(c *config.Config, s *scenario.Scenario, corr, v
 			}
 			cl := &mcp.Client{ServerURL: serverURL, Transport: mcp.Transport(orDefault(st.Transport, mcpT.TransportOrDefault())), Token: resolveVars(mcpT.Token(), corr), Timeout: stepTimeout, RateLimit: rateLimitSpec(c),
 				// VR12-T3 path 3: the scenario's headers are the default for every step.
-				ExtraHeaders: resolvedHeaders(s, corr)}
+				ExtraHeaders: resolvedHeaders(s, corr),
+				// a money-handling run does not follow a redirect (the owner's list names the target).
+				NoRedirects: c != nil && c.MoneyHandling}
 			// VR10-S2 / CR-1: a step `expect` the parser cannot classify (or a `;`-joined string)
 			// fails the chain at PREFLIGHT, naming the step and quoting the bullet — nothing is called.
 			want, err := chainStepExpect(st, claims[st.Name])
@@ -319,7 +392,7 @@ func runChainScenarioWithOutputs(c *config.Config, s *scenario.Scenario, corr, v
 			// the deprecated step `expect`; `${saved.…}` is still bound later, at run time, by
 			// bindExpect — this fills only the run's own id.
 			want = fillCorrelationIDInChecks(want, corr)
-			step := chain.MCPStep(st.Name, cl, st.Tool, argsJSON, want, st.Save)
+			step := chain.MCPStepWith(st.Name, cl, st.Tool, argsJSON, want, st.Save, mcpOpts[i])
 			if st.Always {
 				step = chain.MCPCleanup(step) // AC-D20 — every cleanup step the suite ships is an mcp step
 			}
@@ -381,6 +454,11 @@ func runChainScenarioWithOutputs(c *config.Config, s *scenario.Scenario, corr, v
 				// of the spec (parseChainSpec), so it cannot break the body either.
 				bodyTmpl, _ = substituteVars(string(st.Body), corr, true, false)
 			}
+			// a JSON-string body under the step's own non-JSON Content-Type is sent as its TEXT.
+			textTmpl, textBody := chainTextBody(st, stepHeaders, corr)
+			if textBody {
+				bodyTmpl = textTmpl
+			}
 			wantStatus, bodyWant, err := httpStepExpect(claims[st.Name])
 			if err != nil {
 				return preflightChainFail(s, corr, st.Name, err.Error())
@@ -391,7 +469,8 @@ func runChainScenarioWithOutputs(c *config.Config, s *scenario.Scenario, corr, v
 				if st.Poll != nil || st.Always {
 					return preflightChainFail(s, corr, st.Name, "a step that claims `unreachable` may not carry `poll` or `always` — it is judged once")
 				}
-				steps = append(steps, chain.UnreachableHTTPStep(st.Name, method, url, headers, bodyTmpl, moneyAllow, moneyLedger))
+				steps = append(steps, chain.UnreachableHTTPStep(st.Name, method, url, headers, bodyTmpl, moneyAllow, moneyLedger,
+					chain.WithTextBody(textBody), chain.WithMoneyHandling(c != nil && c.MoneyHandling)))
 				continue
 			}
 			// Fix for the cid-in-chain-claims defect: the mcp step's claims have carried the run's
@@ -411,9 +490,17 @@ func runChainScenarioWithOutputs(c *config.Config, s *scenario.Scenario, corr, v
 				}
 				poll = &chain.Poll{Timeout: timeout, Interval: interval}
 			}
+			// the step's `elapsed` claim (nil when it declares none), parsed by the parser
+			// scenario.Validate used (it was already accepted by httpStepExpect above).
+			elapsedClaim, eerr := scenario.HTTPStepElapsed(claims[st.Name])
+			if eerr != nil {
+				return preflightChainFail(s, corr, st.Name, eerr.Error())
+			}
 			hasHTTPStep = true
 			steps = append(steps, chain.HTTPStepWithOutput(st.Name, method, url, headers, bodyTmpl, wantStatus, bodyWant, st.Save, poll, st.Always, moneyAllow, moneyLedger,
-				oc.chainCapture(c, s, st)))
+				oc.chainCapture(c, s, st), chain.WithElapsed(elapsedClaim), chain.WithBodyScrub(credentialScrub(c)), chain.WithTextBody(textBody),
+				// a money-handling run judges the resolved request (chain.moneyResolvedRefusal).
+				chain.WithMoneyHandling(c != nil && c.MoneyHandling)))
 		case "amqp":
 			// AC-D18b. Validation refuses every one of these at seed time; the runner refuses them
 			// AGAIN, because a file can reach a run without passing through the validator, and what
@@ -423,14 +510,46 @@ func runChainScenarioWithOutputs(c *config.Config, s *scenario.Scenario, corr, v
 			if i < len(pristineSteps) {
 				pristineRecord = pristineSteps[i].Record
 			}
-			spec, want, why := amqpStepSpec(st, pristineRecord, claims[st.Name], declaredQueues, declaredExchanges, corr, c)
+			spec, want, why := amqpStepSpec(st, pristineRecord, claims[st.Name], declaredQueues, declaredExchanges, corr, c, specs, i)
 			if why != "" {
 				return preflightChainFail(s, corr, st.Name, why)
 			}
-			steps = append(steps, chain.AMQPStep(st.Name, spec, want, dialAMQPBroker))
+			steps = append(steps, chain.AMQPStep(st.Name, spec, want, dialAMQPBroker,
+				chain.WithListenRegistry(listenReg), chain.WithSave(st.Save)))
+		case "fault":
+			// . Shape, claims and allowlist were refused by faultPreflight above.
+			steps = append(steps, chain.FaultStep(st.Name, faults, faultSpecOf(st), st.Always))
+		case "db":
+			// . Shape, query, claims and target were refused by dbPreflight above.
+			d := dbSteps[i]
+			steps = append(steps, chain.DBStep(st.Name, d.spec, d.want, st.Save, d.poll, st.Always, dialPostgres))
+		case "logs":
+			// . Shape, claims and the executor's Loki were checked by logsPreflight above.
+			l := logsSteps[i]
+			steps = append(steps, chain.LogsStep(st.Name, l.spec, l.want, st.Save, l.poll, st.Always, fe.Logs))
+		case "bus":
+			// . Shape, claims and the broker target were checked by busPreflight above; the subscription is
+			// armed below, after the loop, and the step reads it at run time.
+			idx := i
+			b := busSteps[i]
+			steps = append(steps, chain.BusStep(st.Name, b.spec, b.want, st.Save, func() chain.BusTap { return busTaps[idx] }))
 		default:
-			return preflightChainFail(s, corr, st.Name, "unknown chain step type "+strconv.Quote(st.Type))
+			// the same sentence the authoring validator uses (scenario.UnknownStepTypeProblem)
+			return preflightChainFail(s, corr, st.Name, scenario.UnknownStepTypeProblem(st.Type))
 		}
+	}
+	// ARM EVERY BUS SUBSCRIPTION, after all preflights and the build loop (so a refused chain dials and
+	// creates nothing) and BEFORE chain.Run (so a message the first step provokes is routed to a queue that already exists).
+	// The hub is torn down on every path - passed, failed, errored, abandoned, a panic - by the defer; an arming failure
+	// is `error` and nothing was fired.
+	if len(busSteps) > 0 {
+		hub := chain.NewBusHub(dialBus)
+		defer hub.Close()
+		taps, aref := armBus(hub, busSteps, len(specs))
+		if aref != nil {
+			return busResult(s, corr, aref)
+		}
+		busTaps = taps
 	}
 	// Patch #3: record the chain's end-to-end duration so it feeds
 	// argus_scenario_duration_seconds (the Slowest-scenarios panel) like any scenario.
@@ -450,8 +569,18 @@ func runChainScenarioWithOutputs(c *config.Config, s *scenario.Scenario, corr, v
 	// one layer up. The backstop is sized the same way jmeterProcessBackstop is: TIMEOUT × step count
 	// (each step, worst case, legitimately taking the full per-step budget) — no separate JVM grace
 	// (a chain step is a native Go call, not a subprocess).
-	backstop := s.TimeoutDuration() * time.Duration(max(len(steps), 1))
-	res := chain.Run(corr, steps, backstop)
+	backstop := chainBackstop(s.TimeoutDuration(), stepPollTimeouts(specs))
+	var res report.ScenarioResult
+	if faults != nil {
+		// ⛔ THE END-OF-CHAIN RESTORE, ON EVERY PATH. The defer covers the one a plain call after Run cannot:
+		// a step that panics (chain.callStep re-raises it here). Passed, failed, errored, timed out and
+		// abandoned all return from chain.Run and reach finishFaults below; Finish is idempotent.
+		defer faults.Finish(context.Background())
+		res = chain.Run(corr, steps, backstop)
+		finishFaults(faults, &res, corr)
+	} else {
+		res = chain.Run(corr, steps, backstop)
+	}
 	res.DurationMs = int(time.Since(start).Milliseconds())
 	res.ID = s.ID
 	oc.attachChainOutputs(s, &res, hasHTTPStep)
@@ -486,7 +615,7 @@ func runChainScenarioWithOutputs(c *config.Config, s *scenario.Scenario, corr, v
 // longer exists — it is refused by name when a scenario is written — so there is nothing to fall
 // back to, and a step with no claim is caught by the validator's empty-step guard instead.
 func chainStepExpect(st chainStepSpec, claims []string) (mcp.Expect, error) {
-	want, err := parseExpectPlane(claims)
+	want, err := parseExpectPlaneFor(claims, true)
 	if err != nil {
 		return mcp.Expect{}, fmt.Errorf("EXPECT %w", err)
 	}
@@ -527,7 +656,7 @@ func httpStepExpect(claims []string) (wantStatus int, bodyWant []mcp.BodyAssert,
 // time a scenario is checked); `record` is not, because design §6 requires refusing a secret-looking
 // ${VAR} BY NAME before its value ever exists in a variable this process touches — resolveVars would
 // have already called os.Getenv on it. See buildAMQPRecordTemplate.
-func amqpStepSpec(st chainStepSpec, pristineRecord json.RawMessage, claims []string, declaredQueues, declaredExchanges map[string]bool, corr string, c *config.Config) (chain.AMQPSpec, scenario.AMQPStepWant, string) {
+func amqpStepSpec(st chainStepSpec, pristineRecord json.RawMessage, claims []string, declaredQueues, declaredExchanges map[string]bool, corr string, c *config.Config, chainSteps []chainStepSpec, index int) (chain.AMQPSpec, scenario.AMQPStepWant, string) {
 	var none chain.AMQPSpec
 	if st.Poll != nil {
 		return none, scenario.AMQPStepWant{}, "an amqp step may not carry `poll` — it fires exactly once and is never retried"
@@ -551,7 +680,32 @@ func amqpStepSpec(st chainStepSpec, pristineRecord json.RawMessage, claims []str
 	hasBody := len(st.Body) > 0 && strings.TrimSpace(string(st.Body)) != "null"
 	hasSchema := st.Schema != ""
 	spec := chain.AMQPSpec{Op: st.Op, URLEnv: st.URLEnv, Exchange: st.Exchange, RoutingKey: st.RoutingKey,
-		Queue: st.Queue, ExchangeKind: st.ExchangeKind, UserID: st.UserID, Force: st.Force}
+		Queue: st.Queue, ExchangeKind: st.ExchangeKind, UserID: st.UserID, Force: st.Force, Decode: st.Decode, StepIndex: index}
+	// Second door (scenario.amqpStepErrors is the first): the same sentences.
+	if st.Decode != "" && (st.Op != "consume" || st.Decode != "gzip") {
+		return none, scenario.AMQPStepWant{}, "`decode` is for a consume step and its only value is \"gzip\""
+	}
+	if len(st.Save) > 0 && st.Op != "listen" {
+		return none, scenario.AMQPStepWant{}, "`save` on an amqp step is allowed on the `listen` op only (a listen answers {\"queue\": …})"
+	}
+	listenQueue := scenario.ListenQueueRef(st.Queue, chainSteps)
+	switch st.Op {
+	case "listen":
+		if strings.TrimSpace(st.Queue) != "" {
+			return none, scenario.AMQPStepWant{}, "a `listen` step's queue is named by Argus; remove `queue`"
+		}
+		if strings.TrimSpace(st.Exchange) == "" || strings.TrimSpace(st.RoutingKey) == "" {
+			return none, scenario.AMQPStepWant{}, "a `listen` step needs both `exchange` and `routing_key` (the default exchange cannot be bound)"
+		}
+	case "queue_bind":
+		if strings.TrimSpace(st.Queue) == "" || strings.TrimSpace(st.Exchange) == "" || strings.TrimSpace(st.RoutingKey) == "" {
+			return none, scenario.AMQPStepWant{}, "a `queue_bind` step needs `queue`, `exchange` and `routing_key`"
+		}
+		if !st.Force && !declaredQueues[st.Queue] && !listenQueue {
+			return none, scenario.AMQPStepWant{}, "would bind queue " + strconv.Quote(st.Queue) +
+				", which no `declare_queue` step in this chain declares — set `force: true` to bind it anyway"
+		}
+	}
 	if st.Op == "consume" && st.Schema != "" {
 		schema, serr := c.MessageSchema(st.Schema)
 		if serr != nil {
@@ -639,9 +793,14 @@ func amqpStepSpec(st chainStepSpec, pristineRecord json.RawMessage, claims []str
 	}
 	if st.Op == "consume" && st.Wait != "" {
 		w, werr := time.ParseDuration(st.Wait)
-		if werr != nil || w <= 0 || w > scenario.AMQPConsumeWaitMax {
+		// 120 s only on a queue a `listen` step of THIS chain made; a foreign queue keeps 30 s.
+		maxWait := scenario.AMQPConsumeWaitMax
+		if listenQueue {
+			maxWait = scenario.AMQPListenWaitMax
+		}
+		if werr != nil || w <= 0 || w > maxWait {
 			return none, scenario.AMQPStepWant{}, "`wait` must be a positive Go duration of at most " +
-				scenario.AMQPConsumeWaitMax.String()
+				maxWait.String()
 		}
 		spec.Wait = w
 	}
@@ -652,16 +811,16 @@ func amqpStepSpec(st chainStepSpec, pristineRecord json.RawMessage, claims []str
 	if !st.Force {
 		switch st.Op {
 		case "queue_delete":
-			if !declaredQueues[st.Queue] {
+			if !declaredQueues[st.Queue] && !listenQueue {
 				return none, scenario.AMQPStepWant{}, "would delete queue " + strconv.Quote(st.Queue) +
 					", which no `declare_queue` step in this chain declares — set `force: true` to delete it anyway"
 			}
 		case "queue_unbind":
-			if !declaredQueues[st.Queue] {
+			if !declaredQueues[st.Queue] && !listenQueue {
 				return none, scenario.AMQPStepWant{}, "would unbind queue " + strconv.Quote(st.Queue) +
 					", which no `declare_queue` step in this chain declares — set `force: true` to unbind it anyway"
 			}
-			if !declaredExchanges[st.Exchange] {
+			if !declaredExchanges[st.Exchange] && !scenario.ListenExchanges(chainSteps)[st.Exchange] {
 				return none, scenario.AMQPStepWant{}, "would unbind from exchange " + strconv.Quote(st.Exchange) +
 					", which no `declare_exchange` step in this chain declares — set `force: true` to unbind it anyway"
 			}
@@ -732,4 +891,48 @@ func buildAMQPRecordTemplate(schema *avroschema.Schema, pristineRecord json.RawM
 func preflightChainFail(s *scenario.Scenario, corr, step, why string) report.ScenarioResult {
 	return report.ScenarioResult{ID: s.ID, CorrelationID: corr, Status: "failed",
 		Failure: &report.Failure{Observed: "chain step '" + step + "': " + why + " — preflight"}}
+}
+
+// chainBackstop sizes chain.Run's whole-chain backstop: TIMEOUT x step count (the per-step scaling
+// reasoning is in runChainScenarioWithMoneyWrites), PLUS each polled step's declared poll.timeout.
+//
+// an http step may declare `poll.timeout` up to 10 minutes, yet `## TIMEOUT` is capped
+// at 120s, so TIMEOUT x steps (3 steps = 6 min at most) was shorter than a legal poll and chain.callStep
+// abandoned the step at backstop + stepGrace, reporting a chain TIMEOUT instead of the poll's own verdict
+// (its last observed status). A polled step may legitimately spend its whole poll plus one TIMEOUT-sized
+// request, i.e. max(TIMEOUT, poll+TIMEOUT) = poll+TIMEOUT. polls holds one entry per step (0 = not
+// polled); the ceiling on `## TIMEOUT` is untouched. The poll loop still ends at its own timeout, so
+// the extra room is only ever spent by a poll that is actually running.
+func chainBackstop(timeout time.Duration, polls []time.Duration) time.Duration {
+	// every step type that polls — http, db, logs, mcp — counts; stepPollTimeouts reads them all.
+	total := timeout * time.Duration(max(len(polls), 1))
+	for _, p := range polls {
+		if p > 0 {
+			total += p
+		}
+	}
+	return total
+}
+
+// stepPollTimeouts is one entry per step: its declared poll.timeout, 0 when it does not poll. It reads
+// EVERY step type that takes `poll` (http, db, logs, mcp), not only http — each one's own runner
+// refuses an unparseable timeout before the chain runs, so an entry that does not parse is simply 0.
+func stepPollTimeouts(specs []chainStepSpec) []time.Duration {
+	out := make([]time.Duration, len(specs))
+	for i, st := range specs {
+		if st.Type == "bus" {
+			// a bus step watches for its `wait` (it takes no poll), so the whole-chain backstop makes room for it.
+			if d, why := scenario.BusStepWait(st.Wait); why == "" {
+				out[i] = d
+			}
+			continue
+		}
+		if st.Poll == nil {
+			continue
+		}
+		if d, err := time.ParseDuration(st.Poll.Timeout); err == nil && d > 0 {
+			out[i] = d
+		}
+	}
+	return out
 }

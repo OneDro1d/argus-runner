@@ -160,11 +160,12 @@ func (r *LocalJMeterRunner) ExecCleanup(form scenario.CleanupForm, body string, 
 		cmd := exec.CommandContext(ctx, "sh", "-c", body)
 		cmd.WaitDelay = time.Second
 		killWholeGroup(cmd) // a timed-out cleanup must not leave what it forked running
+		started := time.Now()
 		if err := cmd.Run(); err != nil {
 			if ctx.Err() != nil {
 				return errCleanupTimeout
 			}
-			return errCleanupFailed
+			return bashCleanupErr(err, time.Since(started))
 		}
 		return nil
 	case scenario.CleanupSQL:

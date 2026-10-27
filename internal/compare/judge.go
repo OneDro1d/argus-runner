@@ -26,6 +26,10 @@ const (
 	OutcomeFailed   = "failed"
 	OutcomeErrored  = "errored"
 	OutcomeDegraded = "degraded" // own claims passed; counts as passed
+	// OutcomeNotApplicable: the check was NOT EXECUTED because a precondition it depends on is
+	// absent. Neither held nor failed, so JudgeClaim leaves it out of n (it is a could-not-run, with its own
+	// reason - never an "errored" and never a pass).
+	OutcomeNotApplicable = "not_applicable"
 )
 
 // ClaimJudgement is the verdict of a fixed or property claim over a member's runs (design 3).

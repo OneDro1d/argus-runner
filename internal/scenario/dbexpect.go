@@ -45,6 +45,8 @@ func Warnings(text string) []string {
 	// VR13-BF (V31-004 fix 3): `body has text containing …` names a JSON FIELD called `text`, which
 	// is the one form the product's own guidance taught and the one form those answers cannot satisfy.
 	w = append(w, bodyHasTextWarnings(s)...)
+	// (#709): a ```bash CLEANUP block runs under `sh -c` (dash), not bash.
+	w = append(w, cleanupShellWarnings(s)...)
 	// an AMQP Load profile that asks more of the generator than the pod can give.
 	w = append(w, amqpLoadWarnings(s)...)
 	// a declared Agreement that Repeats cannot support statistically.

@@ -84,23 +84,23 @@ func TestValidate_APlainMCPCheckStillNeedsTheMCPTarget(t *testing.T) {
 	}
 }
 
-// A self-contained chain whose mcp steps each carry their own server_url needs no
+// GitHub #618 — a self-contained chain whose mcp steps each carry their own server_url needs no
 // targets.mcp.base_url; one mcp step without a URL still does.
 func TestValidate_ChainWhoseMCPStepsCarryTheirOwnServerURLNeedsNoMCPTarget(t *testing.T) {
-	md := taggedChainMD("CST-OWNURL-A", "chain, calm",
+	md := taggedChainMD("CST-618A", "chain, calm",
 		`{"type":"mcp","name":"a","server_url":"http://mcp.example/mcp","tool":"t","args":{}},`+
 			`{"type":"http","name":"b","method":"GET","url":"http://sut.example/x"},`+
 			`{"type":"mcp","name":"c","server_url":"http://mcp2.example/mcp","tool":"t","args":{}}`)
-	if errs := validateOne(t, "CST-OWNURL-A", md); mcpTargetDemanded(errs) {
+	if errs := validateOne(t, "CST-618A", md); mcpTargetDemanded(errs) {
 		t.Fatalf("every mcp step names its own server_url, yet validate-config demanded targets.mcp.base_url: %+v", errs)
 	}
 }
 
 func TestValidate_ChainWithOneMCPStepLackingAServerURLStillNeedsTheMCPTarget(t *testing.T) {
-	md := taggedChainMD("CST-OWNURL-B", "chain, calm",
+	md := taggedChainMD("CST-618B", "chain, calm",
 		`{"type":"mcp","name":"a","server_url":"http://mcp.example/mcp","tool":"t","args":{}},`+
 			`{"type":"mcp","name":"c","tool":"t","args":{}}`)
-	if errs := validateOne(t, "CST-OWNURL-B", md); !mcpTargetDemanded(errs) {
+	if errs := validateOne(t, "CST-618B", md); !mcpTargetDemanded(errs) {
 		t.Fatalf("an mcp step with no server_url and no target must still require targets.mcp.base_url: %+v", errs)
 	}
 }

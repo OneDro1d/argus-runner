@@ -35,31 +35,10 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/role"
 )
 
-// RunnerTools are the 6 in-env tools, served by the instance's own executor. Both hats see all six;
-// they differ in what comes BACK (the in-env server redacts for the product hat).
-var RunnerTools = []string{
-	"runner__validate_config",
-	"runner__run",
-	"runner__get_report",
-	"runner__get_sagas",
-	"runner__get_tail_logs",
-	"runner__get_dashboard_url",
-}
-
-// AuthorTools are the cloud tools, served by the control plane. TEST HAT ONLY (VR-R7), and they
-// never reach a SUT — which is why they are not in the runner set (VR-C4).
-var AuthorTools = []string{
-	"author__propose_scenario",
-	"author__validate_scenario",
-	"author__write_scenario",
-	"author__delete_scenario",
-	"author__list_scenarios",
-	"author__read_scenario",
-	"author__request_run",
-	"author__get_run_status",
-	"author__get_executor_status",
-	"author__list_runs",
-}
+// The router keeps NO list of tools. A session gets the runner tools each instance's executor lists, read with the
+// folder's own executor token (AC-D70, runner.go), and — for a test folder — the author tools the control plane lists
+// (AC-D69, session.go), both passed on unchanged. Both hats see the runner tools; they differ in what comes BACK (the
+// in-env server redacts for the product hat), which is why the token a call carries is the folder's own.
 
 // Upstream is one instance's in-env executor, with the token for THIS folder's hat.
 type Upstream struct {
@@ -165,7 +144,7 @@ func (t *Table) AddFolder(f Folder) error {
 		}
 	case role.Test:
 		// a test folder MAY have no cloud credential (a machine onboarded without a control plane);
-		// author tools then simply resolve to nothing, which Route reports honestly.
+		// its sessions then list no author tools, and the session start says why (session.go).
 	default:
 		return fmt.Errorf("router: unknown hat %q", f.Hat)
 	}
@@ -199,20 +178,6 @@ func (t *Table) Resolve(token string) (*Folder, error) {
 	return f, nil
 }
 
-// VisibleTools is what this folder's `tools/list` returns.
-//
-// VR-R7: the product agent's list does NOT contain author__* AT ALL. Before the router both hats hit
-// one endpoint and differed only in what came back, so a redaction bug leaked expected values. After
-// this, the tools are never offered to that caller — the holdout becomes structural rather than
-// behavioural.
-func (f *Folder) VisibleTools() []string {
-	out := append([]string{}, RunnerTools...)
-	if f.Hat.CanAccessScenarios() {
-		out = append(out, AuthorTools...)
-	}
-	return out
-}
-
 // Instances lists the instances onboarded into THIS folder, sorted. An out-of-folder instance is not
 // discoverable here — a refusal that still told the caller what exists would just be a map.
 func (f *Folder) Instances() []string {
@@ -233,65 +198,21 @@ func (f *Folder) CloudCredential() string {
 	return f.record.Token
 }
 
-func known(tool string) bool {
-	for _, t := range RunnerTools {
-		if t == tool {
-			return true
-		}
-	}
-	for _, t := range AuthorTools {
-		if t == tool {
-			return true
-		}
-	}
-	return false
-}
-
-// Route decides where a call goes, in a deliberate order: is the tool one we serve, is the caller
-// allowed it, does the instance_id name exactly one instance, is that instance in THIS folder.
-//
-// Every check happens BEFORE any network call, so an out-of-folder or out-of-scope call never reaches
-// the control plane or a SUT at all.
-func (f *Folder) Route(tool, instanceID string) (Target, error) {
-	if !known(tool) {
-		return Target{}, fmt.Errorf("router: unknown tool %q — the router forwards a fixed set, never an arbitrary name", tool)
-	}
-
-	// scope BEFORE identity: a product folder asking for an author tool is told about the scope, not
-	// about which instances exist.
-	isAuthor := strings.HasPrefix(tool, "author__")
-	if isAuthor && !f.Hat.CanAccessScenarios() {
-		return Target{}, fmt.Errorf("router: %q is not available to this folder — it is registered as a product-agent folder, which carries the runner tools only", tool)
-	}
-
+// checkInstance is the folder rule for one call's instance_id, shared by the runner path (runner.go) and the
+// author path (session.go): exactly ONE instance (VR-R13), onboarded into THIS folder (VR-R5). Every check
+// happens BEFORE any network call, so an out-of-folder call never reaches a SUT at all.
+func (f *Folder) checkInstance(instanceID string) error {
 	id := strings.TrimSpace(instanceID)
 	if id == "" {
-		return Target{}, fmt.Errorf("router: instance_id is required")
+		return fmt.Errorf("router: instance_id is required")
 	}
 	// VR-R13. The plausible agent error is a joined list, and the plausible FAILURE is a half-run
 	// reported as success — so this is loud, and it names the fix.
 	if strings.ContainsAny(id, ", ;\t\n") {
-		return Target{}, fmt.Errorf("router: instance_id takes exactly one instance (got %q); call once per instance", instanceID)
+		return fmt.Errorf("router: instance_id takes exactly one instance (got %q); call once per instance", instanceID)
 	}
-
-	up, ok := f.Upstreams[id]
-	if !ok {
-		return Target{}, fmt.Errorf("router: instance %q is not onboarded into this folder (%s)", id, f.Path)
+	if _, ok := f.Upstreams[id]; !ok {
+		return fmt.Errorf("router: instance %q is not onboarded into this folder (%s)", id, f.Path)
 	}
-
-	if isAuthor {
-		if f.Cloud == nil {
-			return Target{}, fmt.Errorf("router: no control plane is configured for this folder, so the author tools have nowhere to go")
-		}
-		if f.record == nil {
-			return Target{}, fmt.Errorf("router: this folder refers to a control-plane record (%s, user %q) this machine no longer holds — onboard again", f.Cloud.URL, f.Cloud.User)
-		}
-		if strings.TrimSpace(f.record.Token) == "" {
-			return Target{}, fmt.Errorf("router: this machine holds no author token for %s yet — onboarding mints it at step 8b", f.record.URL)
-		}
-		return Target{URL: f.record.URL, Token: f.record.Token, Plane: "author"}, nil
-	}
-	// runner__*: the instance's own executor, with THIS FOLDER'S HAT's token. The token is what makes
-	// the in-env server redact (or not) — see internal/auth.
-	return Target{URL: up.URL, Token: up.Token, Plane: "runner"}, nil
+	return nil
 }

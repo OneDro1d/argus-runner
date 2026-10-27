@@ -29,7 +29,9 @@ const (
 
 func fcReport() *report.Report {
 	return &report.Report{
-		RunID: "run_1", Project: "p", Summary: report.Summary{Total: 1, Failed: 1},
+		// Mode set: with none, the product hat is withheld every scenario and the builder checks below pass
+		// on an empty report (they did until 2026-10-10).
+		RunID: "run_1", Project: "p", Mode: "ci", Summary: report.Summary{Total: 1, Failed: 1},
 		Layers: []report.Layer{{Layer: "Chain", Scenarios: []report.ScenarioResult{{
 			ID: "CHAI-001", Status: "failed",
 			Steps: []report.StepResult{{
@@ -73,6 +75,10 @@ func TestFailedClaims_Builder_GetReport_BothReadPaths(t *testing.T) {
 	e := fcEnv(t, fcReport())
 	for name, runID := range map[string]string{"per-run file": "run_1", "latest report.json": ""} {
 		out := fcGet(t, e, role.Product, runID)
+		// sanity: the builder DOES read this run's scenario and step (a withheld report would pass vacuously)
+		if !strings.Contains(out, "CHAI-001") || !strings.Contains(out, "the claims did not hold") {
+			t.Fatalf("sanity (%s): the builder must still read the scenario and its observed text: %s", name, out)
+		}
 		for _, needle := range []string{fcObserved, fcClaim, `"failed_claims":`, "failed_claims_omitted"} {
 			if strings.Contains(out, needle) {
 				t.Errorf("builder GetReport (%s) carries %q: %s", name, needle, out)
@@ -128,7 +134,7 @@ func TestFailedClaims_EndToEnd_AuthorSeesItBuilderDoesNot(t *testing.T) {
 	if res.Status != "failed" {
 		t.Fatalf("want a failed chain, got %+v", res)
 	}
-	rep := &report.Report{RunID: "run_1", Summary: report.Summary{Total: 1, Failed: 1},
+	rep := &report.Report{RunID: "run_1", Mode: "build", Summary: report.Summary{Total: 1, Failed: 1},
 		Layers: []report.Layer{{Layer: "Chain", Scenarios: []report.ScenarioResult{res}}}}
 	e := fcEnv(t, rep)
 
@@ -140,5 +146,11 @@ func TestFailedClaims_EndToEnd_AuthorSeesItBuilderDoesNot(t *testing.T) {
 	// (the step's TEXT names the field, so the key is matched with its quotes and colon)
 	if strings.Contains(builder, "4242") || strings.Contains(builder, `"failed_claims":`) {
 		t.Fatalf("the builder's report carries the observed value or the field: %s", builder)
+	}
+	// POSITIVE CONTROL. Until 2026-10-10 this report had no Mode, so the product hat was withheld EVERY
+	// scenario and the two "does not contain" checks above passed on an empty report: they would have passed
+	// with redactExpected deleted. The builder must be reading the step itself for its absences to mean anything.
+	if !strings.Contains(builder, `"name":"check"`) && !strings.Contains(builder, `"name": "check"`) {
+		t.Fatalf("the builder's report does not carry the step at all, so the absences above prove nothing: %s", builder)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/artifactmeasure"
 	"github.com/OneDro1d/argus-runner/internal/config"
 	"github.com/OneDro1d/argus-runner/internal/federation"
+	"github.com/OneDro1d/argus-runner/internal/report"
 	"github.com/OneDro1d/argus-runner/internal/toolcore"
 )
 
@@ -23,6 +24,35 @@ func takeMeasurement(ctx context.Context, cfg ExecConfig, a *federation.RunAssig
 			artifactmeasure.Reading{Reason: "this executor has no artifact measurer configured"})
 	}
 	return artifactmeasure.Evaluate(a.ArtifactDigest, a.CommitmentImageDigests, cfg.MeasureArtifact(ctx))
+}
+
+// measuredFaults projects a run record's faults onto the measurement the evidence_bundle_hash commits to
+// . The scenario-internal step name is dropped: it is the hidden set's content and a
+// certificate never carries it. nil in, nil out - a run without faults must hash as it always did.
+func measuredFaults(in []report.Fault) []artifactmeasure.Fault {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]artifactmeasure.Fault, 0, len(in))
+	for _, f := range in {
+		out = append(out, artifactmeasure.Fault{Op: f.Op, Target: f.Target, Params: f.Params, AppliedAt: f.AppliedAt,
+			RestoredAt: f.RestoredAt, RestoreOutcome: f.RestoreOutcome, Toxiproxy: f.Toxiproxy})
+	}
+	return out
+}
+
+// measuredPreconditions projects a run record's precondition results onto the measurement the
+// evidence_bundle_hash commits to. nil in, nil out - a run whose set declares none must hash
+// as it always did.
+func measuredPreconditions(in []report.Precondition) []artifactmeasure.Precondition {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]artifactmeasure.Precondition, 0, len(in))
+	for _, p := range in {
+		out = append(out, artifactmeasure.Precondition(p))
+	}
+	return out
 }
 
 // bindMeasurement sets the push's evidence bundle hash. Without a measurement it is the scenario-only

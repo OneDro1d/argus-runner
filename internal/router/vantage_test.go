@@ -1,10 +1,6 @@
 package router
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -55,44 +51,6 @@ func TestResolveFromVantage_LeavesTheStoredStateAlone(t *testing.T) {
 	_ = ResolveFromVantage(st.Folders[0].Upstreams["suta"].URL, "host.docker.internal")
 	if got := st.Folders[0].Upstreams["suta"].URL; got != "http://localhost:8765/sse" {
 		t.Fatalf("the stored URL was rewritten: %q", got)
-	}
-}
-
-// End to end through the forwarder: with an alias set, the call must land on the host the alias
-// names. A stub server answers on 127.0.0.1 and the alias points back at it, which is exactly the
-// container's situation inverted — proving the rewrite is applied on the wire, not just computed.
-func TestMCPForwarder_AppliesTheVantageOnTheWire(t *testing.T) {
-	var gotHost string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHost = r.Host
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Mcp-Session-Id", "s1")
-		var req struct {
-			ID     any    `json:"id"`
-			Method string `json:"method"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.Method == "initialize" {
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"stub","version":"1"}}}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"ok"}]}}`))
-	}))
-	defer srv.Close()
-
-	// srv.URL is http://127.0.0.1:<port>. Point the alias at the same address in its OTHER spelling,
-	// so a successful call proves the host component was actually replaced.
-	port := srv.URL[strings.LastIndex(srv.URL, ":")+1:]
-	f := MCPForwarder{HostAlias: "localhost"}
-	out, _, err := f.Forward(Target{URL: "http://127.0.0.1:" + port + "/mcp", Token: "t", Plane: "runner"}, "runner__run", json.RawMessage(`{"instance_id":"suta"}`))
-	if err != nil {
-		t.Fatalf("forward: %v", err)
-	}
-	if out == nil {
-		t.Fatal("no payload came back")
-	}
-	if !strings.HasPrefix(gotHost, "localhost:") {
-		t.Fatalf("the request went to %q — the alias was not applied on the wire", gotHost)
 	}
 }
 

@@ -138,6 +138,14 @@ func (c *Config) credentialRefNames() map[string]bool {
 func (c *Config) declaredEnvRefs() []EnvRef {
 	have := c.credentialRefNames()
 	var out []EnvRef
+	// the NAMES a clerk_session block references ride this list too, under their own field
+	// label, so an unset one is refused by name at load and secrets-scan / doctor carry it.
+	for _, r := range c.clerkEnvRefs() {
+		if !have[r.Name] {
+			have[r.Name] = true
+			out = append(out, r)
+		}
+	}
 	for _, n := range c.CheckEnvNames() {
 		if !have[n] {
 			out = append(out, EnvRef{Name: n, Field: "check_env"})

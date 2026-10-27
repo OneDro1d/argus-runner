@@ -45,6 +45,8 @@ func recordOutput(oc *OutputCapture, step string, status int, hdr http.Header, b
 		}
 		return s
 	}
+	// compare scrubs string leaves only; a JSON-saved value is a whole subtree of the body (savedjsonmask.go)
+	body = maskJSONSavedBody(body, known)
 	rec, stored := compare.BuildRecord(compare.Response{Status: status, Headers: hdr, Body: body}, spec, step, 1)
 	return &report.RecordedOutput{Record: rec, Stored: stored}
 }

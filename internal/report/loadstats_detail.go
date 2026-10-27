@@ -16,9 +16,14 @@ type LoadSample struct {
 	Message   string
 }
 
-// LoadError is one reason a request got no answer, and how many did.
+// LoadError is one reason a request got no answer, its word, and how many did. Reason is the load tool's text and is in
+// the full report only (argus get-report; author_get_report for a Full token); Kind (AC-F2.2) is a word from
+// LoadErrorKinds, and the limited report and the results push carry only Kind and Count (LoadErrorsByKind). Reason is
+// omitempty so an entry projected to its word carries no reason key; LoadErrorsFrom never writes an empty Reason
+// (loadErrorReason), so a full report's bytes do not change.
 type LoadError struct {
-	Reason string `json:"reason"`
+	Reason string `json:"reason,omitempty"`
+	Kind   string `json:"kind,omitempty"`
 	Count  int    `json:"count"`
 }
 
@@ -32,7 +37,8 @@ type LoadBucket struct {
 }
 
 const (
-	// MaxLoadErrorReasons bounds the distinct reasons listed; the rest are summed under LoadErrorOther.
+	// MaxLoadErrorReasons bounds the distinct reasons listed; the rest are summed under LoadErrorOther, one entry per
+	// kind.
 	MaxLoadErrorReasons = 8
 	// MaxLoadErrorReasonLen bounds one reason, in runes.
 	MaxLoadErrorReasonLen = 160
@@ -51,7 +57,9 @@ func (s LoadSample) transportFailed() bool {
 	return err != nil
 }
 
-// loadErrorReason builds "<class>: <message>" from the JMeter texts, whitespace collapsed.
+// loadErrorReason builds "<class>: <message>" from the JMeter texts, whitespace collapsed. It is never empty:
+// a text that is empty, or that normalizeReason empties (a bare query, a key=value list), is
+// "transport failure (no detail)" — so LoadError.Reason's omitempty never drops a full report's reason.
 func loadErrorReason(s LoadSample) string {
 	class := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s.Code), nonHTTPCodePrefix))
 	msg := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s.Message), nonHTTPMsgPrefix))
@@ -62,10 +70,11 @@ func loadErrorReason(s LoadSample) string {
 		}
 		r += msg
 	}
+	r = normalizeReason(strings.Join(strings.Fields(r), " "))
 	if r == "" {
 		r = "transport failure (no detail)"
 	}
-	return normalizeReason(strings.Join(strings.Fields(r), " "))
+	return r
 }
 
 var (
@@ -143,12 +152,15 @@ func reduceURLs(r string) string {
 	}
 }
 
-// LoadErrorsFrom groups the transport failures of samples by reason: at most MaxLoadErrorReasons
-// entries, most frequent first (ties by reason), the rest summed under LoadErrorOther. The reason text
-// comes from the target and the network, so scrub (when set) runs on the full text BEFORE it is cut to
-// MaxLoadErrorReasonLen: a cut could otherwise leave a credential's prefix that no scrub recognises.
+// LoadErrorsFrom groups the transport failures of samples by reason and word: at most MaxLoadErrorReasons
+// entries, most frequent first (ties by reason, then word), the rest summed under LoadErrorOther with one
+// entry per word (most frequent first, ties by word), so every word's count is exact. The word (LoadErrorKind)
+// is chosen per sample from the raw row, before any scrub or cut. The reason text comes from the target and
+// the network, so scrub (when set) runs on the full text BEFORE it is cut to MaxLoadErrorReasonLen: a cut
+// could otherwise leave a credential's prefix that no scrub recognises.
 func LoadErrorsFrom(samples []LoadSample, scrub func(string) string) []LoadError {
-	counts := map[string]int{}
+	type group struct{ reason, kind string }
+	counts := map[group]int{}
 	for _, s := range samples {
 		if !s.transportFailed() {
 			continue
@@ -160,27 +172,30 @@ func LoadErrorsFrom(samples []LoadSample, scrub func(string) string) []LoadError
 		if rs := []rune(r); len(rs) > MaxLoadErrorReasonLen {
 			r = string(rs[:MaxLoadErrorReasonLen])
 		}
-		counts[r]++
+		counts[group{r, LoadErrorKind(s)}]++
 	}
 	if len(counts) == 0 {
 		return nil
 	}
 	out := make([]LoadError, 0, len(counts))
-	for r, n := range counts {
-		out = append(out, LoadError{Reason: r, Count: n})
+	for g, n := range counts {
+		out = append(out, LoadError{Reason: g.reason, Kind: g.kind, Count: n})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Count != out[j].Count {
 			return out[i].Count > out[j].Count
 		}
-		return out[i].Reason < out[j].Reason
+		if out[i].Reason != out[j].Reason {
+			return out[i].Reason < out[j].Reason
+		}
+		return out[i].Kind < out[j].Kind
 	})
 	if len(out) > MaxLoadErrorReasons {
-		rest := 0
-		for _, e := range out[MaxLoadErrorReasons:] {
-			rest += e.Count
+		rest := LoadErrorsByKind(out[MaxLoadErrorReasons:])
+		for i := range rest {
+			rest[i].Reason = LoadErrorOther
 		}
-		out = append(out[:MaxLoadErrorReasons], LoadError{Reason: LoadErrorOther, Count: rest})
+		out = append(out[:MaxLoadErrorReasons:MaxLoadErrorReasons], rest...)
 	}
 	return out
 }

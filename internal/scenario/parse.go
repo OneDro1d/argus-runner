@@ -27,7 +27,7 @@ var CanonicalLayers = []string{
 }
 
 // ⛔ CanonicalPriorities is GONE (VR12-M2 / V30-003). `**Priority**` was parsed, carried into
-// AsParsedMap, surfaced in exactly one place (author__list_scenarios) and read by NOTHING that
+// AsParsedMap, surfaced in exactly one place (author_list_scenarios) and read by NOTHING that
 // decides anything — no UI, no JMX template, no dashboard, no runner logic, no filter, no ordering.
 // specs/06:71 already expresses priority as a TAG. The key is refused as unknown, by name, with a
 // message saying it was removed rather than mistyped — 119 shipped scenarios carried it.
@@ -121,6 +121,13 @@ type Scenario struct {
 	// tells the two apart, so a run in compare mode can refuse instead of running with a rule ignored.
 	Compare         *compare.Rules `json:"compare,omitempty"`
 	compareProblems []compare.Problem
+
+	// Preconditions / DependsOn are the `**Preconditions**` and `**Depends on**` metadata lines.
+	// Both are part of the file's bytes, so both are sealed by the set hash and the commitment. nil = none.
+	Preconditions         []Precondition `json:"preconditions,omitempty"`
+	DependsOn             []string       `json:"depends_on,omitempty"`
+	PreconditionsDeclared bool           `json:"-"`
+	DependsOnDeclared     bool           `json:"-"`
 
 	// section heading -> 1-based line number where the "## Heading" appears.
 	sectionLine map[string]int
@@ -381,7 +388,7 @@ func Parse(text string) *Scenario {
 		}
 	}
 	// VR12-M2 (V30-003): `**Priority**` is REMOVED. It was parsed, carried into AsParsedMap and
-	// surfaced in exactly one place (author__list_scenarios) — and read by NOTHING that decides
+	// surfaced in exactly one place (author_list_scenarios) — and read by NOTHING that decides
 	// anything: no UI, no JMX template, no dashboard, no runner logic, no filter, no ordering. It
 	// was always redundant; specs/06:71 already expresses priority as a TAG.
 	if m := tagsRe.FindStringSubmatch(meta); m != nil {
@@ -394,6 +401,7 @@ func Parse(text string) *Scenario {
 	if m := targetRe.FindStringSubmatch(meta); m != nil {
 		s.Target = m[1]
 	}
+	s.Preconditions, s.DependsOn, s.PreconditionsDeclared, s.DependsOnDeclared = parsePreconditions(meta)
 
 	trig := secs["TRIGGER"].body
 	if m := methodRe.FindStringSubmatch(trig); m != nil {
@@ -523,6 +531,12 @@ func (s *Scenario) AsParsedMap() map[string]any {
 	}
 	if s.Compare != nil {
 		m["compare"] = s.Compare
+	}
+	if len(s.Preconditions) > 0 {
+		m["preconditions"] = s.Preconditions
+	}
+	if len(s.DependsOn) > 0 {
+		m["depends_on"] = s.DependsOn
 	}
 	return m
 }

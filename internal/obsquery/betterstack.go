@@ -272,8 +272,10 @@ func (b *BetterStack) doQuery(q bsQuery) ([]bsRow, bool) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, false
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
+	// the answer is read up to maxLokiAnswerBytes; a larger one is refused whole (this reader is
+	// best-effort failure context, and "unavailable" is its honest word for an answer it will not hold).
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLokiAnswerBytes+1))
+	if err != nil || len(body) > maxLokiAnswerBytes {
 		return nil, false
 	}
 	var rows []bsRow

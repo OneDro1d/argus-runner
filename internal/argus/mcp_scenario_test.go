@@ -455,7 +455,7 @@ func TestFailureExpectedKeepsBothSubSections(t *testing.T) {
 	t.Run("ui", func(t *testing.T) {
 		orig := uiRun
 		t.Cleanup(func() { uiRun = orig })
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			return 1, true, ""
 		}
 		tick := "\x60"

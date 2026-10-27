@@ -1,110 +1,65 @@
 package router
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/OneDro1d/argus-runner/internal/mcpserver"
+	"github.com/OneDro1d/argus-runner/internal/role"
 	"github.com/OneDro1d/argus-runner/internal/toolcore"
 )
 
 // INT-037 — the router must NOT mint a run id of its own.
 //
-// Measured live 2026-08-10, before this fix: a run driven through the router returned run_id
-// 20260810T052833985, while the executor ran, reported and ledgered 20260810T052834090. Polling the
-// caller's id gave `pending_or_unknown` forever; polling the executor's gave the real report. The run
-// was fine — its IDENTITY was not, and `runner__run` -> `runner__get_report` is the loop CLAUDE.md
-// documents as primary.
+// Measured live 2026-08-10, before this fix: a run driven through the router returned run_id 20260810T052833985, while
+// the executor ran, reported and ledgered 20260810T052834090. Polling the caller's id gave `pending_or_unknown` forever;
+// polling the executor's gave the real report. The run was fine — its IDENTITY was not, and the run tool → get_report is
+// the loop CLAUDE.md documents as primary.
 //
-// Cause: mcpserver's async branch keyed on the tool NAME, and the router registers a tool with the
-// same name whose handler merely forwards. Both servers ran the branch and each minted an id.
+// Cause: mcpserver's async branch keyed on the tool NAME, and the router registered a tool with the same name whose
+// handler merely forwarded. Both servers ran the branch and each minted an id. Async is a field now (types.go), and the
+// router never sets it: the executor runs the run in the background and answers at once. The end-to-end proof — the id
+// the router hands back IS the one the executor minted, and get_report with it returns that run — is
+// TestRunnerHoldout_ARunThroughTheRouterIsTheExecutorsOwnEndToEnd.
 
 func TestRouterTools_RunIsNotAsync(t *testing.T) {
-	tbl := &Table{}
-	for _, tool := range Tools(tbl, nil) {
-		if tool.Async {
-			t.Fatalf("the router registered %q as Async — it would mint a run id the executor then "+
-				"discards, and hand the caller a receipt for a run filed under a different number (INT-037)",
-				tool.Name)
+	h := newHarness(t, Options{})
+	s := newSessions(h.tbl, Options{ListTimeout: time.Second})
+	for _, prin := range []mcpserver.Principal{{Hat: role.Test, Subject: testTok}, {Hat: role.Product, Subject: prodTok}} {
+		tools := s.sessionTools("x", prin).Tools.Tools()
+		found := false
+		for _, tool := range tools {
+			found = found || tool.Name == "runner_run"
+			if tool.Async {
+				t.Fatalf("a session set holds %q as Async — the router would mint its own run id and hand the caller a "+
+					"receipt for a run filed under a different number (INT-037)", tool.Name)
+			}
+		}
+		if !found {
+			t.Fatalf("%s: the session set holds no runner_run — the guard would check nothing", prin.Hat)
 		}
 	}
 }
 
-// ...while the IN-ENV executor still IS async, because a scenario run must not make an MCP client
-// wait minutes for a reply. Both halves matter: if this ever became false the fix would have traded
-// one bug for a worse one.
+// ...while the IN-ENV executor still IS async, because a scenario run must not make an MCP client wait minutes for a
+// reply. Both halves matter: if this ever became false the fix would have traded one bug for a worse one.
 func TestDefaultTools_RunStaysAsyncInEnv(t *testing.T) {
 	var found bool
 	for _, tool := range mcpserver.DefaultTools(toolcore.Env{}) {
-		if tool.Name == "runner__run" {
+		if tool.Name == "runner_run" {
 			found = true
 			if !tool.Async {
-				t.Fatal("the in-env runner__run is no longer Async — an MCP client would block for " +
+				t.Fatal("the in-env runner_run is no longer Async — an MCP client would block for " +
 					"the whole run instead of getting {status:running, run_id}")
 			}
 		}
 	}
 	if !found {
-		t.Fatal("DefaultTools no longer registers runner__run")
+		t.Fatal("DefaultTools no longer registers runner_run")
 	}
 }
 
-// --- the other half of fix B: a refusal is not unreachability ---
-
-type refusingFwd struct{ err error }
-
-func (f refusingFwd) Forward(Target, string, json.RawMessage) (any, bool, error) {
-	return nil, false, f.err
-}
-
-// A busy executor answers -32002. Now that the router forwards runner__run synchronously, that
-// answer travels back through the proxy — and reporting it as "could not reach" would send someone
-// to check the network for a perfectly healthy instance that simply said "not yet".
-func TestProxy_ARefusalIsReportedAsReached(t *testing.T) {
-	tbl := testTable(t)
-	prin, err := Authenticator(tbl).Authenticate(testTok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := proxy(tbl, refusingFwd{&UpstreamRefusal{Code: -32002, Message: "run already in progress on this instance"}},
-		"runner__run", json.RawMessage(`{"instance_id":"suta"}`), prin)
-
-	m, ok := out.Payload.(map[string]any)
-	if !ok {
-		t.Fatalf("payload is not a map: %#v", out.Payload)
-	}
-	if m["reached"] != true {
-		t.Fatalf("reached = %v, want true — the upstream ANSWERED, it was not unreachable", m["reached"])
-	}
-	if !strings.Contains(m["error"].(string), "run already in progress") {
-		t.Fatalf("the upstream's own message was lost: %v", m["error"])
-	}
-	if m["code"] != -32002 {
-		t.Fatalf("code = %v, want -32002 preserved — a caller that sees it knows to retry later, "+
-			"which a flattened error cannot tell it", m["code"])
-	}
-}
-
-// ...and a genuinely unreachable upstream still says so. The two must not collapse into one message.
-func TestProxy_UnreachableStillSaysUnreachable(t *testing.T) {
-	tbl := testTable(t)
-	prin, err := Authenticator(tbl).Authenticate(testTok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := proxy(tbl, refusingFwd{errNotReachable{}},
-		"runner__run", json.RawMessage(`{"instance_id":"suta"}`), prin)
-
-	m := out.Payload.(map[string]any)
-	if m["reached"] != false {
-		t.Fatalf("reached = %v, want false for a genuinely unreachable upstream", m["reached"])
-	}
-	if !strings.Contains(m["error"].(string), "could not reach") {
-		t.Fatalf("an unreachable upstream must say so: %v", m["error"])
-	}
-}
-
-type errNotReachable struct{}
-
-func (errNotReachable) Error() string { return "endpoint not reachable" }
+// A refusal is not unreachability: a busy executor's -32002 comes back as the executor's own JSON-RPC error
+// (TestRunnerCall_AnExecutorsJSONRPCErrorIsPassedBackAsItsOwn), and only an executor that could not be reached is
+// reported as "… got no usable answer … it is not reachable …", reached:false
+// (TestRunnerCauses_AnExecutorThatGoesDownMidSessionFailsAsToday).

@@ -40,11 +40,14 @@ var commandFlags = map[string][]string{
 	"cloud-clock-check":      {"control-plane"},
 	"cloud-create-workspace": {"control-plane", "name", "token", "role"},
 	"cloud-deregister":       {"control-plane", "instance-id"},
-	"cloud-enroll":           {"control-plane", "instance-id", "revoke", "token", "token-dir"},
+	"cloud-enroll":           {"control-plane", "instance-id", "revoke", "token", "token-dir", "workspace"},
 	"cloud-executor-status":  {"control-plane", "instance-id", "token", "role"},
 	"cloud-list-workspaces":  {"control-plane", "summary", "sut", "token", "role"},
 	"cloud-login":            {"control-plane", "scope", "token-out"},
 	"cloud-logout":           {"control-plane"},
+	// collect-logs: the pod-log collector render-k8s --sut-logs-via api deploys. Its
+	// identity comes from the environment the renderer sets (ARGUS_INSTANCE_ID, ARGUS_SUT_NAMESPACE, ...).
+	"collect-logs":           {"config", "loki", "loki-tenant", "obs"},
 	"cloud-mint-token":       {"control-plane", "name", "router-state", "token", "token-out", "role"},
 	"cloud-seed-scenarios":   {"control-plane", "instance-id", "scenarios", "token", "role"},
 	"cloud-switch-workspace": {"control-plane", "token", "token-out", "workspace", "role"},
@@ -69,9 +72,9 @@ var commandFlags = map[string][]string{
 	"render-k8s": {
 		"config", "scenarios", "results", "compose-file", "grafana", "loki", "loki-tenant",
 		"pushgateway", "jmeter", "templates", "instance-id", "collect-sut-logs", "control-plane",
-		"emit-sut-access-role", "external-alias", "image", "kube-context", "obs", "obs-shared-url",
+		"emit-sut-access-role", "executor-cpu", "executor-memory", "external-alias", "image", "kube-context", "obs", "obs-shared-url",
 		"obs-storage-class", "out", "podmonitor", "replicas", "results-access-mode", "secrets-env-file",
-		"storage-class", "sut-namespace", "tier",
+		"storage-class", "sut-logs-via", "sut-namespace", "tier",
 	},
 	"render-obs":        {"config", "compose-file", "instance-id", "token", "role"},
 	"render-obs-shared": {"tier", "out", "obs-storage-class"},

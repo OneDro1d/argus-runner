@@ -36,6 +36,7 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/k8srender"
 	"github.com/OneDro1d/argus-runner/internal/mcp"
 	"github.com/OneDro1d/argus-runner/internal/mcpserver"
+	"github.com/OneDro1d/argus-runner/internal/memlimit"
 	"github.com/OneDro1d/argus-runner/internal/obsconfig"
 	"github.com/OneDro1d/argus-runner/internal/onboard"
 	"github.com/OneDro1d/argus-runner/internal/packagecheck"
@@ -119,6 +120,12 @@ type commonFlags struct {
 	// default (managed-csi on aks, else none: the cluster's default StorageClass). Always ReadWriteOnce, so unlike storageClass it never
 	// implies an access mode.
 	obsStorageClass string
+	// executorMemory: the executor container's memory LIMIT as a Kubernetes quantity (3Gi). Empty
+	// keeps the default (1536Mi); a value that is not a quantity, or is below the 384Mi request, is refused.
+	executorMemory string
+	// executorCPU: the executor container's CPU LIMIT as a Kubernetes CPU quantity (2, 1.5, 1500m).
+	// Empty keeps the default (1); a value that is not a quantity, or is below the 150m request, is refused.
+	executorCPU string
 	// emitSUTAccessRole (P3 #23): render-k8s ALSO writes the OPTIONAL Role/RoleBinding the SUT owner
 	// applies in THEIR OWN namespace to grant the executor read access for load-run environment
 	// capture. Opt-in and separate from execYAML/obsYAML — see k8srender.SUTAccessRoleManifest.
@@ -133,11 +140,14 @@ type commonFlags struct {
 	// collectSUTLogs (--collect-sut-logs), default false: whether render-k8s's promtail reads the
 	// SUT namespace's own pod logs at all. See k8srender.Instance.CollectSUTLogs.
 	collectSUTLogs bool
-	workspaceID    string // B2: cloud-switch-workspace target
-	summary        bool   // B2: cloud-list-workspaces --summary (flat, shell-parseable lines)
-	root           string // AC-9: package-check tree root
-	jsonOut        bool   // AC-9: package-check --json
-	cloudOnly      bool   // R9 (CP-M3-121): accepted no-op — cloud-teardown is inherently cloud-only
+	// sutLogsVia (--sut-logs-via), default node: HOW --collect-sut-logs reads the logs — the promtail
+	// DaemonSet (node) or a Deployment reading the Kubernetes API (api). See k8srender.Instance.SUTLogsVia.
+	sutLogsVia  string
+	workspaceID string // B2: cloud-switch-workspace target
+	summary     bool   // B2: cloud-list-workspaces --summary (flat, shell-parseable lines)
+	root        string // AC-9: package-check tree root
+	jsonOut     bool   // AC-9: package-check --json
+	cloudOnly   bool   // R9 (CP-M3-121): accepted no-op — cloud-teardown is inherently cloud-only
 	// VR-F6: PLAN B for a direct run, and only that. When the control plane cannot be reached after
 	// VR-F2b's full retry policy, the run REFUSES by default and puts two choices to the user — wait,
 	// or run the local set knowing it was never verified. This flag is the second choice, made
@@ -216,7 +226,7 @@ func (c *commonFlags) bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.routerState, "router-state", "", "cloud-mint-token: this machine's router state dir — the ONLY holder of the account's author token (VR3-08)")
 	fs.StringVar(&c.name, "name", "", "cloud-mint-token: a label for the minted author token")
 	fs.StringVar(&c.sut, "sut", "", "cloud-list-workspaces: also warn if this SUT name already exists in another of your workspaces (UC120)")
-	fs.StringVar(&c.workspaceID, "workspace", "", "cloud-switch-workspace: the workspace id to bind the session to (must be yours)")
+	fs.StringVar(&c.workspaceID, "workspace", "", "cloud-switch-workspace: the workspace id to bind the session to (must be yours); cloud-enroll: the workspace to enroll into (required with a user-global --token, which has none of its own; must be yours)")
 	fs.BoolVar(&c.summary, "summary", false, "cloud-list-workspaces: print flat shell-parseable lines (ACTIVE/WS/IN) instead of JSON")
 	fs.StringVar(&c.sutNamespace, "sut-namespace", "", "render-k8s: the namespace where the SUT's Services live")
 	// T7.2: without it the instance registers NO kube context, and `argus update` then treats it as a
@@ -236,6 +246,8 @@ func (c *commonFlags) bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.storageClass, "storage-class", "", "render-k8s: the results volume's StorageClass (else the tier default — see docs/DEPLOY-ARGUS.md §2.1); given with no --results-access-mode, the access mode defaults to ReadWriteMany")
 	fs.StringVar(&c.resultsAccessMode, "results-access-mode", "", "render-k8s: the results volume's access mode — ReadWriteMany | ReadWriteOnce (else the tier default, or ReadWriteMany when --storage-class is given with no explicit mode)")
 	fs.StringVar(&c.obsStorageClass, "obs-storage-class", "", "render-k8s / render-obs-shared: the StorageClass of the observability volumes — Loki's data and the Pushgateway's file, both ReadWriteOnce (else managed-csi on --tier aks, the cluster's default StorageClass on every other tier; NOT the results volume's RWX class). A bound claim's class cannot be changed in place")
+	fs.StringVar(&c.executorCPU, "executor-cpu", "", "render-k8s: the executor container's CPU LIMIT as a Kubernetes CPU quantity, for example 2, 1.5 or 1500m (default 1; the request stays 150m, and a value below it is refused). The instance CPU quota is sized from it. Raise it when a 1-CPU JMeter client saturates")
+	fs.StringVar(&c.executorMemory, "executor-memory", "", "render-k8s: the executor container's memory LIMIT as a Kubernetes quantity, for example 3Gi (default 1536Mi; the request stays 384Mi, and a value below it is refused). Raise it for heavy load runs")
 	// P3 #23: opt-in — a SEPARATE manifest (sut-access-role.yaml) for the SUT owner to review and
 	// apply in THEIR OWN namespace, never auto-applied by render-k8s itself.
 	fs.BoolVar(&c.emitSUTAccessRole, "emit-sut-access-role", false, "render-k8s: also write the OPTIONAL Role/RoleBinding the SUT owner applies in their OWN namespace to grant load-run environment-capture read access (P3 #23) — requires --sut-namespace")
@@ -255,6 +267,7 @@ func (c *commonFlags) bind(fs *flag.FlagSet) {
 	// gets it only by asking. onboard.sh passes this explicitly for every tier it drives, so
 	// existing onboarding behaviour (and its rendered manifests) is unchanged by this default flip.
 	fs.BoolVar(&c.collectSUTLogs, "collect-sut-logs", false, "render-k8s: collect the SUT namespace's own pod logs via the bundled promtail (default OFF — a SUT's logs may carry user/agent content the tester never opted into sharing; prints which namespace will be read when set)")
+	fs.StringVar(&c.sutLogsVia, "sut-logs-via", k8srender.SUTLogsViaNode, "render-k8s / upgrade: how --collect-sut-logs reads the SUT namespace's pod logs — node (default: the promtail DaemonSet; mounts the node's /var/log/pods and two more host paths, which Pod Security `baseline` refuses) | api (a one-replica Deployment reading the Kubernetes API: no hostPath, no DaemonSet, nothing cluster-scoped; the SUT namespace's owner must apply the Role that --emit-sut-access-role then also renders). api without --collect-sut-logs is refused")
 	// T3.3: a single named default (k8srender.SharedLokiInClusterURL) — the in-cluster address of the
 	// Loki `argus render-obs-shared` renders. Both the executor and promtail run in-cluster, so it
 	// serves k3d and aks alike.
@@ -368,7 +381,7 @@ func grafanaResolution(c *config.Config, tier string) (string, map[string]any) {
 // sets to the compose default http://localhost:3000 on EVERY tier. The managed executor therefore
 // answered two different things about itself:
 //
-//	runner__get_dashboard_url -> https://grafana.example.com/d/argus-overview-social-aks-v1?…
+//	runner_get_dashboard_url -> https://grafana.example.com/d/argus-overview-social-aks-v1?…
 //	the deep_link it STORED   -> http://localhost:3000/d/argus-overview-social-aks-v1?…
 //
 // The tool told the truth and the durable record lied — and the record is the one an operator opens
@@ -433,7 +446,7 @@ func missingConfigMsg(cmd string) string {
 func configRequired(cmd string, cf *commonFlags) bool {
 	switch cmd {
 	case "run", "run-direct", "validate-config", "capabilities", "preflight-auth", "select-image",
-		"secrets-scan", "render-obs", "render-k8s", "onboard-guard":
+		"secrets-scan", "render-obs", "render-k8s", "onboard-guard", "collect-logs":
 		return true
 	case "serve":
 		return serveMode(cf) != "control"
@@ -571,6 +584,12 @@ func dispatch(args []string) int {
 	// --kubeconfig are its own, and every render-k8s flag is bound onto its flagset. cmd/argus/upgrade_cmd.go.
 	if cmd == "upgrade" {
 		return cmdUpgrade(rest)
+	}
+	// `collect-logs` is the pod-log collector render-k8s --sut-logs-via api deploys. It
+	// is PRE-AUTH like serve --mode runner: it presents no Argus token (its authority is its own
+	// ServiceAccount's grant in the SUT namespace) and must start with only the flags the Deployment gives it.
+	if cmd == "collect-logs" {
+		return cmdCollectLogs(cf)
 	}
 	// T3.3: the environment's ONE shared Loki — a pure local transform like render-k8s, pre-auth for
 	// the same reason (onboarding renders it before any instance exists).
@@ -800,7 +819,7 @@ func dispatch(args []string) int {
 	// exactly the gate package-check/propose-from-repo already sit above, for the same reason.
 	//
 	// This grants NOTHING a runner-scope caller could not already get: the identical call is exposed
-	// on the MCP surface as `runner__validate_config` (internal/mcpserver/tools.go), reachable by
+	// on the MCP surface as `runner_validate_config` (internal/mcpserver/tools.go), reachable by
 	// runner scope alone — checked by reading ValidateConfig's own payload (toolcore.go): it echoes
 	// structure (targets configured, scenario/capability layers, reachability, warnings, the config
 	// path itself) and never a resolved secret value, so moving the CLI path above the gate does not
@@ -1636,7 +1655,7 @@ func cmdCloudEnroll(cf *commonFlags) int {
 	for _, id := range ids {
 		var enr *onboard.EnrollmentResult
 		doErr := sess.Do(ctx, func(token string) error {
-			e, merr := client.MintEnrollment(ctx, token)
+			e, merr := client.MintEnrollment(ctx, token, cf.workspaceID)
 			enr = e
 			return merr
 		})
@@ -1707,8 +1726,8 @@ func cmdCloudVerify(cf *commonFlags) int {
 	}
 	// VR-C5: the CLOUD publishes BARE names (author_request_run) so a gateway that joins its own
 	// namespace with "__" produces one separator, not three. The single-underscore prefix matches the
-	// bare names AND the old author__* form, so this check keeps working against a control plane that
-	// has not been re-deployed yet — cloud-verify must not fail on version skew it is meant to detect.
+	// bare names AND the old double-underscore form, so this check keeps working against a control plane
+	// that has not been re-deployed yet — cloud-verify must not fail on version skew it is meant to detect.
 	hasAuthor := false
 	for _, t := range tools {
 		if strings.HasPrefix(t, "author_") {
@@ -1746,9 +1765,9 @@ func oneLine(s string) string {
 }
 
 // cmdCloudSeedScenarios (D1, M3 fix plan R9/R11) uploads the baked/BYO scenarios into the cloud catalog
-// so the web Scenarios page + author__list_scenarios are populated from the first onboarding — onboard.sh
+// so the web Scenarios page + author_list_scenarios are populated from the first onboarding — onboard.sh
 // runs this after cloud-mint-token with the author token (minted during onboarding). Reads *.md from
-// --scenarios, writes each via the cloud author__write_scenario tool under --instance-id.
+// --scenarios, writes each via the cloud author_write_scenario tool under --instance-id.
 //
 // VR10-S4 (V28-006): a per-scenario refusal never aborts the seed — the valid files are written, because
 // a colleague's first onboard should not fail on somebody else's typo — but it is NEVER silent either.
@@ -2304,7 +2323,7 @@ func defaultSwitchTokenPath(workspace string) (string, error) {
 // race of the old split cannot exist.
 func cpWireReporter(e *toolcore.Env) {
 	// D3 (R10): ALL RUNS REPORT UP. When this serve process is CP-wired (ARGUS_CP_URL + the executor's
-	// federation env, injected by the byo-m3 overlay onto the SAME instance), a direct MCP runner__run
+	// federation env, injected by the byo-m3 overlay onto the SAME instance), a direct MCP runner_run
 	// pushes its evidence-free tallies to the cloud ledger under its OWN run_id (no run_request_id). The
 	// push is signed with the executor's machine identity, which both containers share on the results
 	// volume (/results/identity.key) — LoadKey is load-only so we never mint a divergent identity; when the
@@ -2362,7 +2381,7 @@ func cpWireReporter(e *toolcore.Env) {
 			return out, nil
 		}
 		// VR-F6: same identity, same client, the hash-only question. This is the one the in-env
-		// runner__run path asks on EVERY run, so it must stay cheap.
+		// runner_run path asks on EVERY run, so it must stay cheap.
 		e.SetHasher = func(ctx context.Context, layer, tag, scenarioID string) (string, error) {
 			priv, kerr := runner.LoadKey(keyPath)
 			if kerr != nil {
@@ -2518,7 +2537,7 @@ func versionRefusalFor(running string, floors federation.VersionFloors) string {
 func cpWireFence(srv *mcpserver.Server, e toolcore.Env) {
 	// Refuse a run that would execute NOTHING, before a run_id is minted. This is NOT part of the
 	// CP fence below and is deliberately wired unconditionally: "there is nothing to run" is true
-	// on a standalone rig too, and runner__run is async, so without this the agent gets a run_id
+	// on a standalone rig too, and runner_run is async, so without this the agent gets a run_id
 	// and has to infer the problem from a later total:0 report.
 	srv.RunPreflight = func(layer, tag, scenarioID string) error {
 		// VR-V4 (V17-010): an executor below the ABSOLUTE floor is refused work AT CALL TIME, before
@@ -2535,7 +2554,7 @@ func cpWireFence(srv *mcpserver.Server, e toolcore.Env) {
 		return toolcore.PreflightRun(e, layer, tag, scenarioID)
 	}
 
-	// The W1 direct-path fence (§D-3.1.2/UC188, CP-M3-115): when CP-wired, runner__run acquires the
+	// The W1 direct-path fence (§D-3.1.2/UC188, CP-M3-115): when CP-wired, runner_run acquires the
 	// CP instance_run_lock BEFORE the run (RunBeginner) and a graceful infra failure releases it via
 	// a minimal terminal 'failed' push (RunAborter). Policy: a real 409 → REFUSE (surface *busy*);
 	// a transport failure / missing identity → proceed OFFLINE (the documented CP-partition residual;
@@ -2630,6 +2649,33 @@ func cpWireFence(srv *mcpserver.Server, e toolcore.Env) {
 // function binds them together and binds a socket.
 const routerUsage = "usage: argus router serve|wire|unwire|register|unrecord|status|folders|author-token|last-instance"
 
+// routerServeWiring reads the router's knobs from the environment and builds the server options from them, in one
+// place: both planes — the control plane's author tools and each executor's runner tools — get the same host alias, or
+// a containerised router reads its upstreams from its own loopback. warn receives each warning — a mistyped knob, and
+// the server's own. The router reports its real version (AC-D70, design #678 A7, B2).
+func routerServeWiring(warn func(string)) router.Options {
+	listTimeout, ltWarn := router.ListTimeoutFromEnv()
+	if ltWarn != "" {
+		warn(ltWarn)
+	}
+	callTimeout, ctWarn := router.AuthorCallTimeoutFromEnv()
+	if ctWarn != "" {
+		warn(ctWarn)
+	}
+	runnerCallTimeout, rtWarn := router.RunnerCallTimeoutFromEnv()
+	if rtWarn != "" {
+		warn(rtWarn)
+	}
+	return router.Options{
+		HostAlias:         router.HostAliasFromEnv(),
+		ListTimeout:       listTimeout,
+		CallTimeout:       callTimeout,
+		RunnerCallTimeout: runnerCallTimeout,
+		Logf:              func(format string, a ...any) { warn(fmt.Sprintf(format, a...)) },
+		Version:           buildinfo.Resolve(os.Getenv("ARGUS_VERSION")),
+	}
+}
+
 func cmdRouter(args []string) int {
 	if len(args) == 0 {
 		return emitErr(exitUsage, routerUsage)
@@ -2704,8 +2750,11 @@ func cmdRouter(args []string) int {
 	// the ROUTER's own container, not the executor — every forwarded call would loop back into the
 	// router. The alias is DECLARED (the compose unit sets it), never detected: a router that guessed
 	// whether it was containerised would be wrong exactly once, quietly, on someone else's machine.
-	alias := router.HostAliasFromEnv()
-	srv, err := mcpserver.NewServerWithAuth(router.Authenticator(tbl), router.Tools(tbl, router.MCPForwarder{HostAlias: alias})...)
+	// AC-D69/AC-D70: no static tool list — every agent session gets its own set when it starts: the runner tools each
+	// of its instances' executors lists and, for a test folder, the author tools its control plane lists, all passed on
+	// unchanged.
+	opts := routerServeWiring(func(w string) { emit(map[string]any{"warn": w}) })
+	srv, err := router.NewServer(tbl, opts)
 	if err != nil {
 		return emitErr(exitErr, "router: %v", err)
 	}
@@ -2789,6 +2838,20 @@ func cmdRouter(args []string) int {
 	return exitOK
 }
 
+// newExecutorMCPServer builds the in-env executor's MCP server — the ONE constructor both executor entry points use
+// (bare `serve`, the image's default command, and `serve --mode runner`, the compose and k8s workload): the runner tools,
+// the control-plane fence, and the executor's real version in serverInfo (AC-D70, design #678 B2) — the same value it
+// already sends to the control plane as RunnerVersion, read where it lives, never a second copy.
+func newExecutorMCPServer(authCfg auth.Config, e toolcore.Env) (*mcpserver.Server, error) {
+	srv, err := mcpserver.NewServer(authCfg, mcpserver.DefaultTools(e)...)
+	if err != nil {
+		return nil, err
+	}
+	srv.Version = buildinfo.Resolve(os.Getenv("ARGUS_VERSION"))
+	cpWireFence(srv, e)
+	return srv, nil
+}
+
 func cmdServe(e toolcore.Env, authCfg auth.Config, cf *commonFlags) int {
 	// FX-1: the dashboard deep link is for a HUMAN browser, so resolve the host-facing
 	// Grafana base from config (default http://localhost:3000) — never the in-container
@@ -2798,11 +2861,10 @@ func cmdServe(e toolcore.Env, authCfg auth.Config, cf *commonFlags) int {
 	// condition stops the operator.
 	resolveTierGrafana(&e)
 	cpWireReporter(&e)
-	srv, err := mcpserver.NewServer(authCfg, mcpserver.DefaultTools(e)...)
+	srv, err := newExecutorMCPServer(authCfg, e)
 	if err != nil {
 		return emitErr(exitErr, "server: %v", err)
 	}
-	cpWireFence(srv, e)
 	emit(map[string]any{
 		"serving": true, "addr": cf.addr, "transport": "http+sse", "protocolVersion": mcpserver.ProtocolVersion,
 		"endpoints": []string{"GET /sse", "POST /message?sessionId=", "GET /metrics"}, "tools": 6,
@@ -2832,6 +2894,9 @@ func cmdServeMode(mode string, cf *commonFlags) int {
 	case "control":
 		return emitErr(exitUsage, "serve --mode control is not part of this build: the OneDroid Argus control plane is a hosted service, and this repository contains the runner only")
 	case "runner":
+		// give the Go runtime a soft memory limit taken from the container's cgroup (unless
+		// GOMEMLIMIT is set), so a run nearing the limit collects harder instead of being killed by the kernel.
+		emit(map[string]any{"executor": memlimit.Apply(memlimit.Options{}).Reason})
 		// ARGUS_CP_URL engages the federation executor (register-on-start + the poll loop); absent
 		// → the I.0 health-only skeleton. The SUT run path reuses the CLI's config/results/jmeter flags.
 		// VR-E8 / TS-F6: resolve the browser-facing Grafana base ONCE, BEFORE anything consumes it.
@@ -2861,7 +2926,7 @@ func cmdServeMode(mode string, cf *commonFlags) int {
 				Exec: runner.ExecConfig{
 					// R5-3: InstanceID is the TELEMETRY/registration id; ToolInstance is the identity the
 					// merged MCP surface reads results under (cf.instance, "local") — a federated run must
-					// write its report THERE or runner__get_report cannot see a cloud run's evidence.
+					// write its report THERE or runner_get_report cannot see a cloud run's evidence.
 					InstanceID: inst, ToolInstance: cf.instance,
 					// AC-17: the SAME scenarios directory the merged process's own local router runs
 					// against (env(cf) below) — a relayed builder run/validate_config executes through
@@ -2881,7 +2946,7 @@ func cmdServeMode(mode string, cf *commonFlags) int {
 			}
 		}
 		// R4 (§D-3.1.1/ADR-11, CP-M3-125): the MERGED per-instance workload — when the in-env MCP
-		// token pair is configured, this ONE process also serves the 6-tool runner__* surface
+		// token pair is configured, this ONE process also serves the runner_* tool surface
 		// (/sse, /message, /mcp, /metrics on the same listener), with the same CP wiring the M2.5
 		// serve process gets (report-up + the W1 fence + heartbeats). One process owns the
 		// identity: Bootstrap creates the key BEFORE the surface serves — the old two-container
@@ -2891,11 +2956,10 @@ func cmdServeMode(mode string, cf *commonFlags) int {
 			e := env(cf)
 			e.Grafana = grafanaBase // the SAME value the ExecConfig above carries — one source, not two
 			cpWireReporter(&e)
-			msrv, merr := mcpserver.NewServer(mcpAuth, mcpserver.DefaultTools(e)...)
+			msrv, merr := newExecutorMCPServer(mcpAuth, e)
 			if merr != nil {
 				return emitErr(exitErr, "runner mcp: %v", merr)
 			}
-			cpWireFence(msrv, e)
 			rcfg.MCP = mcpserver.NewHTTPHandler(msrv)
 		}
 		srv, err := runner.Bootstrap(ctx, rcfg)
@@ -2992,6 +3056,15 @@ func renderK8sInput(e toolcore.Env, cf *commonFlags, kubeconfig string) (*render
 	case "auto", "on", "off":
 	default:
 		return nil, emitErr(exitUsage, "--podmonitor %q — must be auto, on, or off", cf.podmonitor)
+	}
+	// --sut-logs-via is refused by name, before any file is read, for any value but
+	// node|api, and `api` is only a way of collecting: without --collect-sut-logs there is nothing to read.
+	sutLogsVia := strings.ToLower(strings.TrimSpace(cf.sutLogsVia))
+	if !k8srender.ValidSUTLogsVia(sutLogsVia) {
+		return nil, emitErr(exitUsage, "--sut-logs-via %q — must be node or api", cf.sutLogsVia)
+	}
+	if sutLogsVia == k8srender.SUTLogsViaAPI && !cf.collectSUTLogs {
+		return nil, emitErr(exitUsage, "--sut-logs-via api says HOW the SUT namespace's logs are collected, so it needs --collect-sut-logs (without it no log is collected at all)")
 	}
 	// --storage-class with no explicit mode defaults to ReadWriteMany: naming a class is asking for
 	// SHARED storage, and a class that cannot do RWX leaves the PVC visibly Pending — a loud failure
@@ -3206,6 +3279,10 @@ func renderK8sInput(e toolcore.Env, cf *commonFlags, kubeconfig string) (*render
 		AccessMode:   accessMode,
 		// the observability volumes' class; empty -> obsStorageClassFor(tier).
 		ObsStorageClass: strings.TrimSpace(cf.obsStorageClass),
+		// the executor container's memory limit; empty -> 1536Mi (k8srender refuses a bad value).
+		ExecutorMemory: strings.TrimSpace(cf.executorMemory),
+		// the executor container's CPU limit; empty -> 1 (k8srender refuses a bad value).
+		ExecutorCPU: strings.TrimSpace(cf.executorCPU),
 		// U9: source ${WEBHOOK_URL} from the SUT's external.webhook_base_url (FQDN-rewritten) so the
 		// config is the truth, not a hardcoded compose default.
 		WebhookURL: k8srender.WebhookURLFor(c, cf.sutNamespace),
@@ -3217,6 +3294,8 @@ func renderK8sInput(e toolcore.Env, cf *commonFlags, kubeconfig string) (*render
 		ObsMode:           obsMode,
 		ObsLokiURL:        c.LokiURLConfigured(),
 		ObsPushgatewayURL: c.PushgatewayURL(),
+		// adopt + a shared Loki. Rendered nowhere; validate() refuses it outside adopt.
+		ObsSharedLogCluster: c.SharedLokiCluster(),
 		// T3.1 (E3 export mode): the hosted-Loki push side + the credential var NAME (never the
 		// value — see obsCredVarName above) + whether this SUT targets BetterStack instead. All
 		// three are ignored by k8srender outside export mode.
@@ -3227,6 +3306,7 @@ func renderK8sInput(e toolcore.Env, cf *commonFlags, kubeconfig string) (*render
 		ObsSharedURL: strings.TrimSpace(cf.obsSharedURL),
 		// SUT-namespace log collection is opt-in (default false) — see cmd.collectSUTLogs's flag help.
 		CollectSUTLogs: cf.collectSUTLogs,
+		SUTLogsVia:     sutLogsVia,
 	}
 	return &renderK8sBuild{in: in, c: c, storageClass: storageClass, podMonitorNote: podMonitorNote}, exitOK
 }
@@ -3264,7 +3344,7 @@ func cmdRenderK8s(e toolcore.Env, cf *commonFlags) int {
 	// Said out loud AT RENDER TIME, not left to be discovered later in a rendered YAML: which
 	// namespace's pod logs this render will collect, whenever it collects any at all.
 	if in.CollectSUTLogs {
-		fmt.Fprintf(os.Stderr, "collect-sut-logs: ON — promtail will read every pod log under namespace %q (SUT_NAMESPACE)\n", in.SUTNamespace)
+		fmt.Fprint(os.Stderr, collectSUTLogsNotice(in, cf.emitSUTAccessRole))
 	}
 	if podMonitorNote != "" {
 		fmt.Fprintln(os.Stderr, podMonitorNote)

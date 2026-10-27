@@ -1,6 +1,8 @@
 package scenario
 
 import (
+	"errors"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,6 +28,46 @@ import (
 // status, and tier 2 must read the declaration with the EXACT reader the runtime uses — a validator
 // with its own copy of this regex would accept forms the runner ignores, or refuse forms it honours.
 var statusDeclRe = regexp.MustCompile(`(?i)^\s*status(2)?\s*[=:]\s*([1-5][0-9][0-9])\b`)
+
+// statusTwoCodesRe finds a declared status (`status=`/`status2=`) whose code is followed — after optional
+// spaces — by `/`, `,`, `|` or the word `or` and then ANOTHER 3-digit code.
+//
+// (Talos acceptance v2, Bartek): statusDeclRe ends in `\b`, which matches before `/`, `,`,
+// `|` and a space, so `status=200/201` was read as the declaration `status=200` and the 201 vanished — no
+// error, the run judged 200 alone. This is the shape, and ONLY this shape: `status=201 and the body has an
+// id` or `status=200, the body has an id` carry no second code and keep working. The second code must be a
+// whole 3-digit token (`\b` after it), so `status=200/2012` is not read as a second code.
+var statusTwoCodesRe = regexp.MustCompile(`(?i)^\s*(status(?:2)?\s*[=:]\s*[1-5][0-9][0-9])\s*(?:[/,|]|\bor\b)\s*([1-5][0-9][0-9])\b`)
+
+// StatusClaimProblem is the ONE judgement of a single declared-status bullet, shared by every door:
+// "" when the bullet is not a status declaration or declares exactly one code, else the sentence that
+// refuses it. FAIL LOUD, NOT CLEVER: either-of matching is NOT implemented — a status
+// claim takes exactly one code, and `status2=` is the status of a SECOND REQUEST (the idempotency replay),
+// not an alternative for the first.
+func StatusClaimProblem(bullet string) string {
+	m := statusTwoCodesRe.FindStringSubmatch(strings.TrimSpace(bullet))
+	if m == nil {
+		return ""
+	}
+	claim := strings.Join(strings.Fields(m[0]), "") // the matched text, spaces closed: status=200/201
+	return fmt.Sprintf("EXPECT bullet %q: %s lists two codes; a status claim takes exactly one code "+
+		"(status2= is the second REQUEST's status, not an alternative)", strings.TrimSpace(bullet), claim)
+}
+
+// CheckDeclaredStatuses refuses the first declared-status bullet that lists two codes, nil when none does.
+// It is what DeclaredStatuses' callers that CAN refuse call, BESIDE the reader (which keeps its signature
+// for the classifiers that only count declarations): scenario.Validate (the author path — validate AND
+// write), HTTPStepClaims (a chain http step, validator and executor alike), argus.DeriveProps and the run
+// loop's preflight (the JMeter path). One function here, so the two doors cannot read the grammar apart
+// .
+func CheckDeclaredStatuses(runnable []string) error {
+	for _, b := range runnable {
+		if why := StatusClaimProblem(b); why != "" {
+			return errors.New(why)
+		}
+	}
+	return nil
+}
 
 // DeclaredStatuses reads the declared status forms from the RUNNABLE bullets only.
 // second is 0 when no `status2=` was declared — and a second request is sent ONLY when it was.

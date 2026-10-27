@@ -96,6 +96,10 @@ const upgradeUsage = `usage: argus upgrade --instance <id> --config <argus-confi
   read by this command to load the config; they are never written or printed.
   Left alone on purpose: the executor image (the control plane's Update owns image changes; the output
   says when this render's image differs) and the executor's replica count (the executor scales itself).
+  An instance rendered with ` + "`argus render-k8s`" + ` has no recorded kit, so the control plane offers no
+  update block for it. Move its image by hand: ` + "`kubectl -n argus-inst-<instance-id> set image deployment/executor executor=<recommended image digest>`" + `
+  (keep the running variant, slim or full). If the kit's render changed between the two versions, also run
+  this command with a CLI at the NEW version.
   Refuses, changing nothing (exit 3): the namespace or its executor Deployment is not found, the cluster
   holds a different instance id than --instance, the render fails, or the render would CHANGE a live
   identity value (ARGUS_CP_URL, ARGUS_WORKSPACE_ID, ARGUS_INSTANCE_ID, ARGUS_TIER, ARGUS_CLUSTER,
@@ -220,6 +224,17 @@ func cmdUpgrade(args []string) int {
 		fmt.Fprintln(os.Stderr, rb.podMonitorNote)
 	}
 	in := rb.in
+	// moving to --sut-logs-via api leaves the promtail of `node` where it is (upgrade
+	// never removes). Said by name, with the three deletes, when it is there.
+	if in.CollectSUTLogs && strings.EqualFold(in.SUTLogsVia, k8srender.SUTLogsViaAPI) {
+		fmt.Fprint(os.Stderr, collectSUTLogsNotice(in, false))
+		// no collector is rendered in adopt / none / BetterStack: nothing would be shipped twice
+		if in.SUTLogsCollectorRendered() {
+			if _, promtailLive, perr := upgradeGet(sf, "daemonset.apps", "promtail", ns); perr == nil && promtailLive {
+				fmt.Fprint(os.Stderr, promtailLeftoverNotice(ns))
+			}
+		}
+	}
 	renderImage := strings.TrimSpace(in.Image)
 	in.Image = liveImage // the image is the control plane's: render with the one that runs
 	// No secret input is needed, and none is kept: the Secrets are skipped.
@@ -487,6 +502,8 @@ func cmdUpgrade(args []string) int {
 	} else {
 		fmt.Printf("executor image: left alone (%s) — the control plane's Update owns image changes.\n", liveImage)
 	}
+	fmt.Printf("  An instance rendered with render-k8s has no recorded kit, so the control plane offers it no update block. Move the image with: kubectl -n %s set image deployment/executor executor=<recommended image digest>  (keep the running variant, slim or full)\n", ns)
+	fmt.Printf("  If the kit's render changed between the two versions, also run argus upgrade with a CLI at the NEW version.\n")
 	fmt.Printf("executor replicas: left alone — the executor scales its own Deployment.\n")
 	fmt.Printf("summary: %d differ, %d to create, %d unchanged, %d Secret%s skipped (%d missing), %d kind%s not installed, %d immutable, %d not written for a missing dependency.\n",
 		differ, toCreate, unchanged, secrets, plural(secrets), missingSecrets, nokind, plural(nokind), immutable, needy)

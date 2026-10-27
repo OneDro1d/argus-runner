@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,15 +72,77 @@ func parseUISpec(payload string) (uiSpec, error) {
 
 // uiRun is the injectable OS-process runner (swapped in unit tests). It runs the
 // vendored Playwright command for spec in vendorDir with APP_URL + the correlation id
-// in env and returns the exit code, whether a results artifact was produced, and
-// captured stderr. A FAILED test (DOM assert / backend 4xx/5xx) writes per-test
-// artifacts under test-results/ (trace/screenshot/video); a harness error (no browser,
-// missing dep, no tests) exits non-zero WITHOUT artifacts — that is the discriminator
-// ui.Classify uses to separate a SUT failure from an execution failure (UC-62/84).
-var uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (exitCode int, hasResults bool, stderr string) {
+// in env and returns the exit code, whether the SUT was EXERCISED (uiExercised), and
+// captured stderr. A harness error (no browser, missing dep, no tests) exits non-zero
+// WITHOUT a test having run — that is the discriminator ui.Classify uses to separate a
+// SUT failure from an execution failure (UC-62/84).
+//
+// ⛔ BOTH callers go through here (the standalone ui scenario and the chain `ui` step), so the
+// clearing of THIS run's evidence lives here. Order: test-results/ and argus-out/results.json are
+// removed FIRST, then the process starts, and only then is either read. runUIScenario clears the
+// whole of argus-out/ (assertions.json included) BEFORE it calls this; the chain step clears
+// nothing else, so without the results.json line a chain `ui` step would judge the last run's report.
+//
+// declaredMs is the scenario's own `## TIMEOUT` in milliseconds, 0 = none declared
+// (the chain `ui` step passes 0: the chain's own TIMEOUT and backstop already bound it). It only
+// LENGTHENS the vendored limits, see uiTimeoutEnv.
+var uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (exitCode int, hasResults bool, stderr string) {
 	resultsDir := filepath.Join(vendorDir, "test-results")
 	_ = os.RemoveAll(resultsDir) // Playwright APPENDS per-test dirs; start each run fresh
+	// the JSON report is read AFTER the process, so one left by an earlier run would
+	// read as THIS run's "a test ran". Removed here, in the same place and for the same reason.
+	_ = os.Remove(uiResultsPath(vendorDir))
 	parts := ui.Command(specs...)
+	// the declared asserts reach the spec as JSON, and the spec writes its per-bullet outcomes to
+	// ARGUS_UI_OUT. ⛔ Both are OUTSIDE test-results/: that directory is a VR-L3 discriminator
+	// (hasTestArtifacts), so putting our own files there would make a harness failure look like a
+	// SUT one.
+	assertsJSON, _ := json.Marshal(asserts)
+	env := append(os.Environ(),
+		"APP_URL="+appURL,
+		"ARGUS_CORRELATION_ID="+corr,
+		"ARGUS_UI_ASSERTS="+string(assertsJSON),
+		"ARGUS_UI_OUT="+outPath,
+	)
+	env = append(env, uiTimeoutEnv(declaredMs)...)
+	exitCode, stderr = uiProcess(vendorDir, parts, env)
+	return exitCode, uiExercised(vendorDir), stderr
+}
+
+// The vendored config's own limits (testkit/ui/playwright.config.ts: `timeout: 60_000`,
+// `navigationTimeout: 30_000`). They are the FLOOR a declared `## TIMEOUT` can only raise.
+const (
+	uiTestTimeoutFloorMs = 60_000
+	uiNavTimeoutFloorMs  = 30_000
+	// The two names the config reads (and ui_timeout_test.go pins in its text).
+	uiTestTimeoutEnv = "ARGUS_UI_TEST_TIMEOUT_MS"
+	uiNavTimeoutEnv  = "ARGUS_UI_NAV_TIMEOUT_MS"
+)
+
+// uiTimeoutEnv is what a declared `## TIMEOUT` becomes for Playwright: the per-test
+// timeout is max(60 s, declared) and the navigation timeout max(30 s, declared). It LENGTHENS and never
+// shortens: a browser flow is many round trips, and a declared 10 s (the template's value, the parse
+// default) must not turn a 60 s test into a 10 s one. Nothing declared gives the vendored values
+// exactly. Action and expect timeouts are not touched. ⛔ No process-level kill is added: a hung
+// browser process is still bounded only by Playwright.
+func uiTimeoutEnv(declaredMs int) []string {
+	test, nav := uiTestTimeoutFloorMs, uiNavTimeoutFloorMs
+	if declaredMs > test {
+		test = declaredMs
+	}
+	if declaredMs > nav {
+		nav = declaredMs
+	}
+	return []string{
+		uiTestTimeoutEnv + "=" + strconv.Itoa(test),
+		uiNavTimeoutEnv + "=" + strconv.Itoa(nav),
+	}
+}
+
+// uiProcess starts the command and waits for it. It is a seam of its own, BELOW uiRun, so a test can
+// stand in for the browser (write the files Playwright would have written, return an exit code) and
+// still run uiRun's real clearing and uiExercised's real reading.
+var uiProcess = func(vendorDir string, parts, env []string) (exitCode int, stderr string) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd", append([]string{"/c"}, parts...)...) // npm is npm.cmd on Windows
@@ -87,17 +150,7 @@ var uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts 
 		cmd = exec.Command(parts[0], parts[1:]...)
 	}
 	cmd.Dir = vendorDir
-	// the declared asserts reach the spec as JSON, and the spec writes its per-bullet outcomes to
-	// ARGUS_UI_OUT. ⛔ Both are OUTSIDE test-results/: that directory is the VR-L3 discriminator
-	// (hasTestArtifacts), so putting our own files there would make a harness failure look like a
-	// SUT one.
-	assertsJSON, _ := json.Marshal(asserts)
-	cmd.Env = append(os.Environ(),
-		"APP_URL="+appURL,
-		"ARGUS_CORRELATION_ID="+corr,
-		"ARGUS_UI_ASSERTS="+string(assertsJSON),
-		"ARGUS_UI_OUT="+outPath,
-	)
+	cmd.Env = env
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
 	_ = cmd.Run() // exit code read from ProcessState below; stdout discarded (artifacts are the evidence)
@@ -106,13 +159,55 @@ var uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts 
 	} else {
 		exitCode = -1
 	}
-	return exitCode, hasTestArtifacts(resultsDir), errBuf.String()
+	return exitCode, errBuf.String()
+}
+
+// declaredUITimeoutMs is the scenario's `## TIMEOUT` in ms, 0 when it declares none (a Scenario built
+// without one would otherwise read as the parser's 10 s default; uiTimeoutEnv ignores anything below
+// its floors either way, so the two readings give the same limits).
+func declaredUITimeoutMs(s *scenario.Scenario) int {
+	if strings.TrimSpace(s.Timeout) == "" {
+		return 0
+	}
+	return int(s.TimeoutDuration() / time.Millisecond)
+}
+
+// uiResultsPath is where the vendored config's json reporter writes (argus-out/results.json).
+func uiResultsPath(vendorDir string) string {
+	return filepath.Join(vendorDir, uiOutDirName, "results.json")
+}
+
+// uiExercised reports whether a test actually RAN in this run: Playwright's own account first, the
+// per-test directory only when there is no readable account.
+//
+// "a per-test directory exists" was the whole rule, and it holds only while tracing
+// is on (every test leaves a trace). A spec that sets `trace: 'off'` and passes leaves nothing, and
+// the run read as an execution failure on a healthy system. The JSON reporter the vendored config
+// already writes states what ran: stats.expected + unexpected + flaky >= 1. Zero tests, or all
+// skipped, is still "not exercised" (VR-L3: absent results != pass).
+//
+// A missing, unreadable or stats-less file (a foreign config with no JSON reporter) falls back to
+// hasTestArtifacts, exactly as before. The file is this run's only because uiRun removed it first.
+func uiExercised(vendorDir string) bool {
+	if b, err := os.ReadFile(uiResultsPath(vendorDir)); err == nil {
+		var rep struct {
+			Stats *struct {
+				Expected   int `json:"expected"`
+				Unexpected int `json:"unexpected"`
+				Flaky      int `json:"flaky"`
+			} `json:"stats"`
+		}
+		if json.Unmarshal(b, &rep) == nil && rep.Stats != nil {
+			return rep.Stats.Expected+rep.Stats.Unexpected+rep.Stats.Flaky >= 1
+		}
+	}
+	return hasTestArtifacts(filepath.Join(vendorDir, "test-results"))
 }
 
 // hasTestArtifacts reports whether Playwright produced a real per-test artifact (the
-// discriminator between a SUT failure and a harness/execution failure, UC-62). A test
-// that actually RAN writes a per-test SUBDIR under test-results/ (trace/screenshot/video
-// on failure; trace on pass). A harness failure ("no tests found" / config / launch
+// fallback discriminator when there is no JSON report, UC-62). A test that actually RAN
+// writes a per-test SUBDIR under test-results/ (trace/screenshot/video on failure; trace
+// on pass, when tracing is on). A harness failure ("no tests found" / config / launch
 // error) writes ONLY the `.last-run.json` metadata marker — which does NOT count.
 func hasTestArtifacts(dir string) bool {
 	entries, err := os.ReadDir(dir)
@@ -181,7 +276,7 @@ func runUIScenario(s *scenario.Scenario, corr, vendorDir string) report.Scenario
 	_ = os.RemoveAll(filepath.Join(vendorDir, uiOutDirName))
 
 	startMs := time.Now().UnixMilli() // the spec run's real fire-time
-	exitCode, hasResults, stderr := uiRun(vendorDir, []string{spec.Spec}, appURL, corr, asserts, outPath)
+	exitCode, hasResults, stderr := uiRun(vendorDir, []string{spec.Spec}, appURL, corr, asserts, outPath, declaredUITimeoutMs(s))
 	status, observed := ui.Classify(exitCode, hasResults, stderr)
 
 	// ⛔ THE DECLARED ASSERTIONS DECIDE, ONCE THE HARNESS IS KNOWN TO HAVE RUN. Classify still owns
@@ -247,7 +342,7 @@ func runUIScenario(s *scenario.Scenario, corr, vendorDir string) report.Scenario
 		// ⛔ REDACTED AT THE SINK. Every branch above can quote a URL Playwright or the spec saw AFTER
 		// ${VAR} expansion — the #139 cause, Classify's first stderr line (no artifact), a failed
 		// "backend errors: GET <url> → 5xx" bullet — and Failure.Observed leaves the executor (report
-		// files, runner__get_report, the Memstore build record). The expanded values go back to their
+		// files, runner_get_report, the Memstore build record). The expanded values go back to their
 		// ${NAME} first (a secret in a path or outside any URL), then redactURLs is the backstop.
 		observed = redactURLs(scrubVarValues(observed, s.Trigger.Payload))
 		res.Failure = &report.Failure{Observed: observed, Expected: &exp}

@@ -51,6 +51,9 @@ func mapReport(rep *report.Report, runID, runRequestID, scope, setHash, deepLink
 			// AC-11: carried up so the Runs page can say how many scenarios passed UNDER DISTRESS —
 			// never folded into Passed or Failed, same reasoning as RateLimited.
 			Degraded: rep.Summary.Degraded,
+			// carried up as its own bucket - NEVER folded into Errored (the instrument is
+			// not broken: it measured that the mechanism is absent) and never into Passed.
+			NotApplicable: rep.Summary.NotApplicable,
 		},
 		Status: "completed",
 	}
@@ -103,6 +106,15 @@ func mapReport(rep *report.Report, runID, runRequestID, scope, setHash, deepLink
 	switch push.Status {
 	case "completed":
 		push.Outcome = "passed"
+		// a run in which EVERY scenario was not applicable verified nothing. It is not "passed"
+		// (no check passed), not "failed" (nothing was shown wrong) and not "errored" (nothing broke): its verdict
+		// is its own word, `not_applicable`, so a third party reading the anchored verdict cannot take a run that
+		// excused everything for a green one. Status stays "completed": the run did finish, and every lifecycle
+		// consumer (terminal sets, the CHECK on run_ledger.status) keeps working unchanged. A MIX of passed and
+		// not_applicable is "passed" - the checks that ran passed - with the count carried beside it.
+		if rep.Summary.Total > 0 && rep.Summary.NotApplicable == rep.Summary.Total {
+			push.Outcome = report.StatusNotApplicable
+		}
 	case "failed":
 		push.Outcome = "failed"
 	case "degraded":
@@ -110,6 +122,14 @@ func mapReport(rep *report.Report, runID, runRequestID, scope, setHash, deepLink
 	}
 	for _, layer := range rep.Layers {
 		for _, sc := range layer.Scenarios {
+			summary := genericSummary(sc.Status)
+			if sc.NotApplicable != nil {
+				// (R7): "not applicable: <precondition> absent (positive control: ...; negative
+				// control: ...)". Observations of the INSTRUMENT (the executor's own namespace), words only - no
+				// address, no namespace, nothing the system under test said - so this crosses the wire; the run
+				// view reads it from the ledger and must be able to show both controls.
+				summary = sc.NotApplicable.Line()
+			}
 			push.Scenarios = append(push.Scenarios, federation.ScenarioResult{
 				ID:      sc.ID,
 				Outcome: outcome(sc.Status),
@@ -117,7 +137,7 @@ func mapReport(rep *report.Report, runID, runRequestID, scope, setHash, deepLink
 				// run row depend on the live catalog to stay readable.
 				Layer:      layer.Layer,
 				DurationMs: int64(sc.DurationMs),
-				Summary:    genericSummary(sc.Status), // NO Expected/Observed — evidence stays in-env
+				Summary:    summary, // NO Expected/Observed — evidence stays in-env
 				// AC-6/VR-4: sha256 of this scenario's own in-env evidence record — see
 				// evidenceHash's doc for exactly what is hashed and why.
 				EvidenceHash: evidenceHash(sc),
@@ -185,6 +205,10 @@ func outcome(status string) string {
 		return "failed"
 	case report.StatusDegraded:
 		return report.StatusDegraded
+	case report.StatusNotApplicable:
+		// its own outcome, never errored. The default arm below would have folded it into
+		// "errored" - the exact mistake issue #671 is about.
+		return report.StatusNotApplicable
 	default: // error, skipped, or anything unexpected → errored (never silently "passed")
 		return "errored"
 	}
@@ -201,6 +225,8 @@ func genericSummary(status string) string {
 		return "not executed"
 	case report.StatusDegraded:
 		return "assertions passed; the SUT showed distress during the run (see in-env report)"
+	case report.StatusNotApplicable:
+		return "not executed: a precondition it depends on is absent (see in-env report)"
 	default:
 		return "execution error (see in-env report)"
 	}

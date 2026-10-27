@@ -68,7 +68,14 @@ type Client struct {
 	// ⛔ NEVER LOGGED, NEVER IN report.json. A header value is the likeliest place in a scenario to
 	// hold a credential — log header NAMES only.
 	ExtraHeaders map[string]string
+	// NoRedirects makes the client NOT follow an HTTP redirect: a 3xx answer is the answer, and
+	// reads as the transport failure it is. Set on a run of a money-handling instance, whose owner's list names
+	// the tool and the target, not wherever the target's server sends the request next. false = today's behaviour.
+	NoRedirects bool
 }
+
+// noRedirect stops the client at the first 3xx and hands that response back.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
 // applyExtra sets the author's headers LAST, so they win over the protocol's defaults.
 func (c *Client) applyExtra(h http.Header) {
@@ -86,7 +93,19 @@ type CallInput struct {
 
 func (c *Client) http() *http.Client {
 	if c.HTTP != nil {
+		if c.NoRedirects {
+			cp := *c.HTTP
+			cp.CheckRedirect = noRedirect
+			return &cp
+		}
 		return c.HTTP
+	}
+	if c.NoRedirects {
+		t := c.Timeout
+		if t <= 0 {
+			t = 30 * time.Second
+		}
+		return &http.Client{Timeout: t, CheckRedirect: noRedirect}
 	}
 	// GAP-3 (2026-07-22): the deadline is the SUT's declared targets.mcp.timeout_seconds when the
 	// caller threads it, else 30s. It used to be an unconditional hardcoded 30s, which scored a
@@ -108,8 +127,37 @@ func (c *Client) Call(in CallInput) CallResult {
 	case Streamable:
 		return c.callStreamable(in)
 	default:
-		return CallResult{TransportErr: "unknown/undeclared transport " + string(c.Transport)}
+		return noAnswer(ListBadAnswer, "unknown/undeclared transport "+string(c.Transport))
 	}
+}
+
+// noAnswer is a call that brought back no JSON-RPC answer, described by text (AC-D70.2): TransportErr as before, and the
+// same text as FailureDetail with the kind the local router tells an agent instead of the text.
+func noAnswer(kind ListFailureKind, text string) CallResult {
+	return CallResult{TransportErr: text, Failure: kind, FailureDetail: text}
+}
+
+// statusAnswer is a non-2xx answer described by httpStatusErr's text.
+func statusAnswer(text string, code int) CallResult {
+	r := noAnswer(ListHTTPStatus, text)
+	r.HTTPStatus = code
+	return r
+}
+
+// sendKind classifies an error from SENDING a request: the client's own deadline, or no answer at all.
+func sendKind(err error) ListFailureKind {
+	if isTimeoutErr(err) {
+		return ListTimedOut
+	}
+	return ListUnreachable
+}
+
+// readKind classifies an error from READING an answer: the client's own deadline, or an answer that cannot be read.
+func readKind(err error) ListFailureKind {
+	if isTimeoutErr(err) {
+		return ListTimedOut
+	}
+	return ListBadAnswer
 }
 
 // --- streamable HTTP (single POST /mcp; session via the Mcp-Session-Id header) ---
@@ -117,7 +165,8 @@ func (c *Client) Call(in CallInput) CallResult {
 func (c *Client) callStreamable(in CallInput) CallResult {
 	resp, err := c.postMCP(c.ServerURL, "", rpc(1, "initialize", initParams()))
 	if err != nil {
-		return CallResult{Unreachable: true, TimedOut: isTimeoutErr(err)} // first contact failed => unreachable (gate-infra)
+		// first contact failed => unreachable (gate-infra); Go's text (it names the URL) is kept for a log only
+		return CallResult{Unreachable: true, TimedOut: isTimeoutErr(err), Failure: sendKind(err), FailureDetail: "initialize: " + err.Error()}
 	}
 	sid := resp.Header.Get("Mcp-Session-Id")
 	// VR2-12 (V15-006): a non-2xx is reported AS a non-2xx, before anything tries to parse it.
@@ -133,11 +182,11 @@ func (c *Client) callStreamable(in CallInput) CallResult {
 	// below), so this is the streamable path being brought up to a shape the file already contains.
 	if st := httpStatusErr(resp, "initialize"); st != "" {
 		resp.Body.Close()
-		return CallResult{TransportErr: st}
+		return statusAnswer(st, resp.StatusCode)
 	}
 	if _, rerr := readJSONRPC(resp); rerr != nil {
 		resp.Body.Close()
-		return CallResult{TransportErr: "initialize: " + rerr.Error()}
+		return noAnswer(readKind(rerr), "initialize: "+rerr.Error())
 	}
 	resp.Body.Close()
 
@@ -147,15 +196,17 @@ func (c *Client) callStreamable(in CallInput) CallResult {
 
 	callResp, err := c.postMCP(c.ServerURL, sid, rpc(2, "tools/call", callParams(in)))
 	if err != nil {
-		return CallResult{TransportErr: "tools/call: " + err.Error(), TimedOut: isTimeoutErr(err)}
+		r := noAnswer(sendKind(err), "tools/call: "+err.Error()) // Go's text names the URL: TransportErr and the log only
+		r.TimedOut = isTimeoutErr(err)
+		return r
 	}
 	defer callResp.Body.Close()
 	if st := httpStatusErr(callResp, "tools/call"); st != "" {
-		return CallResult{TransportErr: st}
+		return statusAnswer(st, callResp.StatusCode)
 	}
 	raw, rerr := readJSONRPC(callResp)
 	if rerr != nil {
-		return CallResult{TransportErr: "tools/call read: " + rerr.Error()}
+		return noAnswer(readKind(rerr), "tools/call read: "+rerr.Error())
 	}
 	return parseCallResult(raw)
 }
@@ -209,20 +260,24 @@ func (c *Client) callLegacySSE(in CallInput) CallResult {
 	c.applyExtra(sseReq.Header) // VR12-T3
 	resp, err := c.http().Do(sseReq)
 	if err != nil {
-		return CallResult{Unreachable: true, TimedOut: isTimeoutErr(err)}
+		return CallResult{Unreachable: true, TimedOut: isTimeoutErr(err), Failure: sendKind(err), FailureDetail: "GET /sse: " + err.Error()}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return CallResult{TransportErr: fmt.Sprintf("GET /sse status %d (declared legacy-sse?)", resp.StatusCode)}
+		return statusAnswer(fmt.Sprintf("GET /sse status %d (declared legacy-sse?)", resp.StatusCode), resp.StatusCode)
 	}
 	br := bufio.NewReader(resp.Body)
 	ev, data, err := readSSE(br)
 	if err != nil || ev != "endpoint" || data == "" {
-		return CallResult{TransportErr: "no endpoint event on GET /sse (server is not legacy-HTTP+SSE)"}
+		kind := ListBadAnswer
+		if err != nil {
+			kind = readKind(err)
+		}
+		return noAnswer(kind, "no endpoint event on GET /sse (server is not legacy-HTTP+SSE)")
 	}
 	msgURL, perr := resolveEndpoint(sseReq.URL, data)
 	if perr != nil {
-		return CallResult{TransportErr: "bad endpoint event url: " + perr.Error()}
+		return noAnswer(ListBadAnswer, "bad endpoint event url: "+perr.Error())
 	}
 
 	post := func(body []byte) error {
@@ -241,19 +296,23 @@ func (c *Client) callLegacySSE(in CallInput) CallResult {
 	}
 
 	if err := post(rpc(1, "initialize", initParams())); err != nil {
-		return CallResult{TransportErr: "initialize POST: " + err.Error(), TimedOut: isTimeoutErr(err)}
+		r := noAnswer(sendKind(err), "initialize POST: "+err.Error())
+		r.TimedOut = isTimeoutErr(err)
+		return r
 	}
 	if _, err := readSSEResponse(br); err != nil { // the initialize response (version-tolerant; consumed)
-		return CallResult{TransportErr: "initialize response: " + err.Error()}
+		return noAnswer(readKind(err), "initialize response: "+err.Error())
 	}
 	_ = post(rpcNotif("notifications/initialized")) // notification: no SSE reply
 
 	if err := post(rpc(2, "tools/call", callParams(in))); err != nil {
-		return CallResult{TransportErr: "tools/call POST: " + err.Error(), TimedOut: isTimeoutErr(err)}
+		r := noAnswer(sendKind(err), "tools/call POST: "+err.Error())
+		r.TimedOut = isTimeoutErr(err)
+		return r
 	}
 	d, err := readSSEResponse(br)
 	if err != nil {
-		return CallResult{TransportErr: "tools/call response: " + err.Error()}
+		return noAnswer(readKind(err), "tools/call response: "+err.Error())
 	}
 	return parseCallResult([]byte(d))
 }
@@ -329,6 +388,7 @@ func parseCallResult(raw []byte) CallResult {
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		cr.TransportErr = "unparseable JSON-RPC response"
+		cr.Failure, cr.FailureDetail = ListBadAnswer, cr.TransportErr
 		return cr
 	}
 	cr.JSONRPCError = resp.Error

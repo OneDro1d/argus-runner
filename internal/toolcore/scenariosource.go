@@ -140,7 +140,7 @@ func unreachableChoices(instance, dir string, n int, cause error) string {
 			"    1. WAIT and run again once the control plane is back. This is the default, and it is\n"+
 			"       the right choice unless you know the local files are current.\n"+
 			"    2. Run the LOCAL set anyway, accepting that it is unverified - pass\n"+
-			"       use_local_scenarios=true (runner__run) or --use-local-scenarios (the CLI).\n"+
+			"       use_local_scenarios=true (runner_run) or --use-local-scenarios (the CLI).\n"+
 			"       The run and its report will record that the catalog was unreachable and that this\n"+
 			"       was an explicit choice.",
 		instance, retry.Budget, retry.Attempts, cause, n, dir)

@@ -1,11 +1,17 @@
 package chain
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	envelope "github.com/OneDro1d/argus-runner/internal/msgenvelope"
@@ -41,7 +47,11 @@ import (
 // substitute a fake, so the runner is exercised without a RabbitMQ.
 type Broker interface {
 	PublishConfirmed(exchange, routingKey string, body []byte, props amqpengine.Props) amqpengine.Outcome
-	Consume(queue string, timeout time.Duration) (amqpengine.Outcome, []byte)
+	// ConsumeDelivery takes one message and returns its body AND the properties a reader decodes it by.
+	ConsumeDelivery(queue string, timeout time.Duration) (amqpengine.Outcome, amqpengine.Delivery)
+	// Listen declares the chain's private, self-expiring queue and binds it, on one channel.
+	Listen(queue, exchange, routingKey string, ttlMillis int) amqpengine.Outcome
+	BindQueue(queue, exchange, routingKey string) amqpengine.Outcome
 	DeclareQueue(name string) amqpengine.Outcome
 	DeclareExchange(name, kind string) amqpengine.Outcome
 	// DeleteQueue / UnbindQueue / DeleteExchange (P3 #24c) — the cleanup ops for what a check
@@ -104,6 +114,106 @@ type AMQPSpec struct {
 	// applies BEFORE building this spec, so by the time Run sees Force==true the refusal has
 	// already been decided; this field exists only so tests can build a spec directly.
 	Force bool
+	// Decode "gzip" gunzips a consumed body before it is judged (a content-encoding: gzip delivery is gunzipped
+	// without it). StepIndex is the step's place in the chain: a listen's queue is named from it.
+	Decode    string
+	StepIndex int
+}
+
+// ListenRegistry remembers every queue the listen steps of ONE chain run made, so the chain can delete them when
+// it ends, whatever the verdict. The broker's own x-expires is the guarantee; this is the tidy path.
+type ListenRegistry struct {
+	mu sync.Mutex
+	q  []listened
+}
+
+type listened struct{ urlEnv, name string }
+
+// NewListenRegistry returns an empty registry.
+func NewListenRegistry() *ListenRegistry { return &ListenRegistry{} }
+
+func (r *ListenRegistry) add(urlEnv, name string) {
+	if r == nil {
+		return // no registry: the queue's x-expires is then the only reaper
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.q = append(r.q, listened{urlEnv, name})
+}
+
+// Cleanup deletes every queue a listen made, over a fresh connection per broker. A failure never changes a verdict:
+// it is logged, and the queue's x-expires reaps it. It returns the queues it asked the broker to delete, and is safe
+// to call twice (the second call finds nothing left).
+func (r *ListenRegistry) Cleanup(dial BrokerDialer) []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	todo := r.q
+	r.q = nil
+	r.mu.Unlock()
+	var deleted []string
+	byEnv := map[string][]string{}
+	var envs []string
+	for _, l := range todo {
+		if _, seen := byEnv[l.urlEnv]; !seen {
+			envs = append(envs, l.urlEnv)
+		}
+		byEnv[l.urlEnv] = append(byEnv[l.urlEnv], l.name)
+	}
+	for _, env := range envs {
+		br, err := dial(env)
+		if err != nil {
+			log.Printf("amqp listen cleanup: cannot connect (url from $%s): %s - the queues expire on their own after %dms",
+				env, scrubBroker(err.Error(), env), scenario.ListenQueueTTLMillis)
+			continue
+		}
+		for _, name := range byEnv[env] {
+			out := br.DeleteQueue(name)
+			deleted = append(deleted, name)
+			if !out.OK {
+				log.Printf("amqp listen cleanup: deleting queue %q did not succeed (%d: %s) - it expires on its own", name, out.Code, scrubBroker(out.Text, env))
+			}
+		}
+		_ = br.Close()
+	}
+	return deleted
+}
+
+// AMQPOption adjusts an amqp step.
+type AMQPOption func(*amqpOpts)
+
+type amqpOpts struct {
+	registry *ListenRegistry
+	save     map[string]scenario.SaveSpec
+}
+
+// WithListenRegistry hands a listen step the chain's registry, so the queue it makes is deleted when the chain ends.
+func WithListenRegistry(r *ListenRegistry) AMQPOption { return func(o *amqpOpts) { o.registry = r } }
+
+// WithSave gives a step the `save` map it publishes into the capture store (listen only).
+func WithSave(save map[string]scenario.SaveSpec) AMQPOption {
+	return func(o *amqpOpts) { o.save = save }
+}
+
+// errDecodedTooLarge marks a gunzipped body past scenario.AMQPDecodedMaxBytes.
+var errDecodedTooLarge = errors.New("the delivered message decompresses to more than the allowed size")
+
+// gunzipCapped gunzips b, reading at most scenario.AMQPDecodedMaxBytes of output.
+func gunzipCapped(b []byte) ([]byte, error) {
+	zr, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+	out, err := io.ReadAll(io.LimitReader(zr, scenario.AMQPDecodedMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > scenario.AMQPDecodedMaxBytes {
+		return nil, errDecodedTooLarge
+	}
+	return out, nil
 }
 
 // strings returns pointers to every string field a ${saved.<var>} may appear in — one list, so
@@ -149,7 +259,11 @@ func (s AMQPSpec) bound(vars map[string]string) (AMQPSpec, error) {
 
 // AMQPStep builds the amqp step. want is the step's claim (scenario.AMQPStepClaims); dial opens the
 // connection (DialAMQP in production). One connection per step, closed before the step returns.
-func AMQPStep(name string, spec AMQPSpec, want scenario.AMQPStepWant, dial BrokerDialer) Step {
+func AMQPStep(name string, spec AMQPSpec, want scenario.AMQPStepWant, dial BrokerDialer, options ...AMQPOption) Step {
+	var opts amqpOpts
+	for _, o := range options {
+		o(&opts)
+	}
 	return Step{
 		Name: name,
 		// Always is deliberately left false: an amqp step is never re-fired as a cleanup.
@@ -180,13 +294,46 @@ func AMQPStep(name string, spec AMQPSpec, want scenario.AMQPStepWant, dial Broke
 			}
 			defer func() { _ = br.Close() }()
 
-			out, body, what, perr := perform(br, sp, cid, vars)
+			if sp.Op == "listen" {
+				sp.Queue = scenario.ListenQueueName(cid, sp.StepIndex)
+				// Remembered BEFORE the call: a declare whose answer was lost may still have made the queue.
+				opts.registry.add(sp.URLEnv, sp.Queue)
+			}
+			out, body, what, enc, perr := perform(br, sp, cid, vars)
 			if perr != nil {
 				// The step could not even be put on the wire (an envelope that will not encode):
 				// nothing was sent, so nothing was checked.
 				return report.StepResult{Status: "failed", Observed: scrubBroker(perr.Error(), sp.URLEnv)}
 			}
-			return judgeBroker(out, body, want, boundBody, vars, what, sp.URLEnv, sp.ConsumeSchema)
+			// a gzip body is gunzipped BEFORE the schema decode and the body claims read it.
+			// `queue is empty` judges only that a message arrived, so a body that does not gunzip never hides it.
+			if sp.Op == "consume" && out.OK && !want.Empty && (sp.Decode == "gzip" || strings.EqualFold(strings.TrimSpace(enc), "gzip")) {
+				plain, gerr := gunzipCapped(body)
+				switch {
+				case errors.Is(gerr, errDecodedTooLarge):
+					return report.StepResult{Status: report.StatusError, Observed: fmt.Sprintf(
+						OwnErrorPrefix+" %d bytes; it was refused (a compressed body is read up to that size)", scenario.AMQPDecodedMaxBytes),
+						AssertionsEnforced: []string{want.Broker.String()}, AssertionsEnforcedCount: 1}
+				case gerr != nil:
+					return report.StepResult{Status: "failed", Observed: "delivered message is not valid gzip: " + scrubBroker(gerr.Error(), sp.URLEnv),
+						AssertionsEnforced: []string{want.Broker.String()}, AssertionsEnforcedCount: 1}
+				}
+				body = plain
+			}
+			st := judgeBroker(out, body, want, boundBody, vars, what, sp.URLEnv, sp.ConsumeSchema)
+			if sp.Op == "listen" && st.Status == "passed" && len(opts.save) > 0 {
+				doc, _ := json.Marshal(map[string]string{"queue": sp.Queue})
+				captured := make(map[string]string, len(opts.save))
+				for varName, ss := range opts.save {
+					val, fail := saveFromHTTP(doc, varName, ss)
+					if fail != "" {
+						return report.StepResult{Status: "failed", Observed: fail}
+					}
+					recordCapture(captured, varName, ss, val)
+				}
+				st.Captured = captured
+			}
+			return st
 		},
 	}
 }
@@ -198,41 +345,48 @@ func AMQPStep(name string, spec AMQPSpec, want scenario.AMQPStepWant, dial Broke
 // schema+record publish, which needs ${saved.<var>} at the SAME run-time resolution moment
 // ${uuid}/${now}/${now_ms} are (design §4) — every other publish form never needed it here, because
 // bound() (above) already resolved their plain string fields before perform was ever called.
-func perform(br Broker, sp AMQPSpec, cid string, vars map[string]string) (amqpengine.Outcome, []byte, string, error) {
+func perform(br Broker, sp AMQPSpec, cid string, vars map[string]string) (amqpengine.Outcome, []byte, string, string, error) {
 	switch sp.Op {
 	case "publish":
 		body, props, err := publishPayload(sp, cid, vars)
 		if err != nil {
-			return amqpengine.Outcome{}, nil, "", err
+			return amqpengine.Outcome{}, nil, "", "", err
 		}
 		what := fmt.Sprintf("publish to exchange %q with routing key %q", sp.Exchange, sp.RoutingKey)
-		return br.PublishConfirmed(sp.Exchange, sp.RoutingKey, body, props), nil, what, nil
+		return br.PublishConfirmed(sp.Exchange, sp.RoutingKey, body, props), nil, what, "", nil
 	case "consume":
 		wait := sp.Wait
 		if wait <= 0 {
 			wait = scenario.AMQPConsumeWaitDefault
 		}
-		out, body := br.Consume(sp.Queue, wait)
-		return out, body, fmt.Sprintf("consume from queue %q", sp.Queue), nil
+		out, d := br.ConsumeDelivery(sp.Queue, wait)
+		return out, d.Body, fmt.Sprintf("consume from queue %q", sp.Queue), d.ContentEncoding, nil
+	// The queue is Argus's (named in AMQPStep.Run from the correlation id and the step's place).
+	case "listen":
+		return br.Listen(sp.Queue, sp.Exchange, sp.RoutingKey, scenario.ListenQueueTTLMillis), nil,
+			fmt.Sprintf("listen on exchange %q with routing key %q (private queue %q)", sp.Exchange, sp.RoutingKey, sp.Queue), "", nil
+	case "queue_bind":
+		return br.BindQueue(sp.Queue, sp.Exchange, sp.RoutingKey), nil,
+			fmt.Sprintf("bind queue %q to exchange %q (routing key %q)", sp.Queue, sp.Exchange, sp.RoutingKey), "", nil
 	case "declare_queue":
-		return br.DeclareQueue(sp.Queue), nil, fmt.Sprintf("declare queue %q", sp.Queue), nil
+		return br.DeclareQueue(sp.Queue), nil, fmt.Sprintf("declare queue %q", sp.Queue), "", nil
 	case "declare_exchange":
 		kind := sp.ExchangeKind
 		if kind == "" {
 			kind = scenario.AMQPExchangeKindDefault
 		}
-		return br.DeclareExchange(sp.Exchange, kind), nil, fmt.Sprintf("declare %s exchange %q", kind, sp.Exchange), nil
+		return br.DeclareExchange(sp.Exchange, kind), nil, fmt.Sprintf("declare %s exchange %q", kind, sp.Exchange), "", nil
 	// P3 #24c — the cleanup ops. The declared-name guard already ran (argus.amqpStepSpec /
 	// scenario.amqpStepErrors) before this spec was ever built; perform never re-decides it.
 	case "queue_delete":
-		return br.DeleteQueue(sp.Queue), nil, fmt.Sprintf("delete queue %q", sp.Queue), nil
+		return br.DeleteQueue(sp.Queue), nil, fmt.Sprintf("delete queue %q", sp.Queue), "", nil
 	case "queue_unbind":
 		return br.UnbindQueue(sp.Queue, sp.Exchange, sp.RoutingKey), nil,
-			fmt.Sprintf("unbind queue %q from exchange %q (routing key %q)", sp.Queue, sp.Exchange, sp.RoutingKey), nil
+			fmt.Sprintf("unbind queue %q from exchange %q (routing key %q)", sp.Queue, sp.Exchange, sp.RoutingKey), "", nil
 	case "exchange_delete":
-		return br.DeleteExchange(sp.Exchange), nil, fmt.Sprintf("delete exchange %q", sp.Exchange), nil
+		return br.DeleteExchange(sp.Exchange), nil, fmt.Sprintf("delete exchange %q", sp.Exchange), "", nil
 	}
-	return amqpengine.Outcome{}, nil, "", fmt.Errorf("unknown amqp op %q", sp.Op)
+	return amqpengine.Outcome{}, nil, "", "", fmt.Errorf("unknown amqp op %q", sp.Op)
 }
 
 // publishPayload builds the body and properties of a publish: a msgbus v2 envelope (fixed
@@ -412,11 +566,23 @@ func judgeBroker(out amqpengine.Outcome, body []byte, want scenario.AMQPStepWant
 		observed = "broker did not accept the " + what + " (no AMQP reply code): " + scrubBroker(out.Text, urlEnv)
 	}
 
-	// P3 #24d — `queue is empty`: the ONLY claim form an empty consume can PASS. A timeout with no
-	// AMQP reply code (out.Code == 0, !out.OK) IS emptiness; a genuine broker refusal (403 on the
-	// queue itself) is a DIFFERENT failure and keeps the "broker refused" observed text above.
+	// P3 #24d — `queue is empty`: the ONLY claim form an empty consume can PASS. ONLY a genuine
+	// timeout (out.TimedOut: the wait ran out on an open consumer, nothing delivered) IS emptiness; a
+	// genuine broker refusal (403 on the queue itself) is a DIFFERENT failure and keeps the "broker
+	// refused" observed text above.
+	//
+	// Code == 0 is NOT "timed out": a closed consumer channel, the engine watchdog
+	// tearing the connection down and a code-less channel/connection error all have Code 0 too, and
+	// the check used to pass on every one of them (a lost broker read as an EMPTY queue). Those
+	// outcomes could not tell the queue was empty, so the step is an `error`, never a pass and never
+	// a plain `failed`.
 	if want.Empty {
-		pass := !out.OK && out.Code == 0
+		if !out.OK && out.Code == 0 && !out.TimedOut {
+			return report.StepResult{Status: report.StatusError,
+				Observed: OwnErrorPrefixEmptyUnjudged + " the consume ended without a verdict from the queue (" +
+					scrubBroker(out.Text, urlEnv) + "), which is not the same as an empty queue"}
+		}
+		pass := !out.OK && out.Code == 0 && out.TimedOut
 		if out.OK {
 			preview := scrubBroker(string(body), urlEnv)
 			if len(preview) > bodyPreviewMax {

@@ -43,6 +43,10 @@ func JudgeClaim(outcomes []string, pct float64) ClaimJudgement {
 			j.Held++
 		case OutcomeFailed:
 			failed++
+		case OutcomeNotApplicable:
+			// not executed: neither a held claim nor a failed one, so excluded from n like an errored run,
+			// but named: a mechanism being absent is not a property failing.
+			j.CouldNotRun++
 		default:
 			j.CouldNotRun++
 		}

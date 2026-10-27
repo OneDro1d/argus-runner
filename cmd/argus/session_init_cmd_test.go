@@ -134,7 +134,7 @@ func TestBuilderInit_WithoutATokenWritesTheFilesAndDoesNotWireMCP(t *testing.T) 
 }
 
 func TestBuilderInit_RunnerOnlyToolsPassAndWireMCP(t *testing.T) {
-	dir, cp := builderSetup(t, builderTok, []string{"runner__run", "runner__get_report", "runner__validate_config"}, false)
+	dir, cp := builderSetup(t, builderTok, []string{"runner_run", "runner_get_report", "runner_validate_config"}, false)
 	if rc, _ := runInit(t, "builder", "init", "msgbus", "--dir", dir, "--control-plane", cp.srv.URL); rc != exitOK {
 		t.Fatal("first run failed")
 	}
@@ -143,7 +143,7 @@ func TestBuilderInit_RunnerOnlyToolsPassAndWireMCP(t *testing.T) {
 	if rc != exitOK {
 		t.Fatalf("rc=%d\n%s", rc, out)
 	}
-	if !strings.Contains(out, "3 tools, all runner__") {
+	if !strings.Contains(out, "3 tools, all runner_") {
 		t.Errorf("no evidence line:\n%s", out)
 	}
 	mcp, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
@@ -221,7 +221,7 @@ func TestBuilderInit_NoToolsAtAllFails(t *testing.T) {
 func TestInitCommands_HelpNamesThemselvesAndTheirFlags(t *testing.T) {
 	for cmd, wants := range map[string][]string{
 		"tester":  {"tester init <app>", "ARGUS_TESTER_TOKEN_<APP>", "--dir", "--mcp-json", "never reads", "0600"},
-		"builder": {"builder init <app>", "ARGUS_BUILDER_TOKEN_<APP>", "runner__", "sign-in", "--dir"},
+		"builder": {"builder init <app>", "ARGUS_BUILDER_TOKEN_<APP>", "runner_", "sign-in", "--dir"},
 	} {
 		rc, out := runHelp(t, cmd, "--help")
 		if rc != exitOK {

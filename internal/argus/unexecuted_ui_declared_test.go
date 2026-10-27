@@ -23,7 +23,7 @@ func TestAC_D27_DeclaredUIChecksAreNotReportedUnexecutedOnceEvaluated(t *testing
 
 	t.Run("every declared check has an outcome: nothing is unexecuted", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			var e []uiOutcomeEntry
 			for _, a := range asserts {
 				e = append(e, uiOutcomeEntry{Bullet: a.Bullet, OK: true, Observed: "ok"})
@@ -43,7 +43,7 @@ func TestAC_D27_DeclaredUIChecksAreNotReportedUnexecutedOnceEvaluated(t *testing
 
 	t.Run("a declared check the spec wrote no outcome for is still listed", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			writeOutcomes(t, vendorDir, []uiOutcomeEntry{{Bullet: "dom has .cl-rootBox", OK: true}, {Bullet: "no console errors", OK: true}})
 			return 0, true, ""
 		}
@@ -60,7 +60,7 @@ func TestAC_D27_DeclaredUIChecksAreNotReportedUnexecutedOnceEvaluated(t *testing
 
 	t.Run("a failed check was evaluated, so it is not unexecuted either", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			var e []uiOutcomeEntry
 			for _, a := range asserts {
 				e = append(e, uiOutcomeEntry{Bullet: a.Bullet, OK: a.Kind != scenario.UIKindDOM, Observed: "0 element(s) match"})
@@ -80,7 +80,7 @@ func TestAC_D27_DeclaredUIChecksAreNotReportedUnexecutedOnceEvaluated(t *testing
 
 	t.Run("the harness never ran: every declared check is listed", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			return 1, false, "browserType.launch: Executable doesn't exist"
 		}
 		s := uiScenarioMD(t, bullets)
@@ -95,7 +95,7 @@ func TestAC_D27_DeclaredUIChecksAreNotReportedUnexecutedOnceEvaluated(t *testing
 
 	t.Run("a bullet that is not a Web UI check is still listed", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			var e []uiOutcomeEntry
 			for _, a := range asserts {
 				e = append(e, uiOutcomeEntry{Bullet: a.Bullet, OK: true})

@@ -263,6 +263,10 @@ func Describe(s report.LoadStep) string {
 		out += fmt.Sprintf(", %d request(s) failed, most often %s (%d)", failed, classes[0], s.Errors[classes[0]])
 	}
 	if len(s.ErrorReasons) > 0 {
+		// ⛔ AC-F2.2: this quotes the load tool's message (Reason), which can quote what the app sent; the sentence goes
+		// into failure.observed (Verdict). It is safe ONLY because failure.observed is in limitedNotSent
+		// (internal/runner/limitedreport.go) and the results push carries no Observed (internal/runner/mapper.go). Never
+		// add failure.observed to the keep list.
 		out += fmt.Sprintf("; transport: %s (%d)", s.ErrorReasons[0].Reason, s.ErrorReasons[0].Count)
 	}
 	return out

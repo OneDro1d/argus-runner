@@ -1,6 +1,7 @@
 package router
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -66,30 +67,26 @@ func testTable(t *testing.T) *Table {
 
 // ── VR-R7 / TS-R1: THE HOLDOUT TEST — the single most important test in the build ───────────────
 
+// AC-D69: the author tools come per session from the control plane, so the holdout is checked on what a
+// session REALLY lists — and a product folder's session reads no control-plane list at all.
 func TestVisibleTools_ProductFolderNeverSeesAuthorTools(t *testing.T) {
-	tbl := testTable(t)
-	f, err := tbl.Resolve(prodTok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tools := f.VisibleTools()
-	if len(tools) == 0 {
+	h := newHarness(t, Options{})
+	h.initialize("p", prodTok)
+	_, names := h.listed("p", prodTok)
+	if len(names) == 0 {
 		t.Fatal("a product folder must still see the runner tools")
 	}
-	for _, name := range tools {
-		if strings.HasPrefix(name, "author__") {
+	for _, name := range names {
+		if strings.HasPrefix(name, "author_") {
 			t.Errorf("author tool %q is VISIBLE to the product hat — the holdout is broken", name)
 		}
 	}
-	// and the test folder DOES see them, or the router is useless
-	tf, _ := tbl.Resolve(testTok)
-	var sawAuthor bool
-	for _, name := range tf.VisibleTools() {
-		if strings.HasPrefix(name, "author__") {
-			sawAuthor = true
-		}
+	if n := h.cp.count("tools/list"); n != 0 {
+		t.Errorf("a product folder's session read the control plane's list (%d times)", n)
 	}
-	if !sawAuthor {
+	// and the test folder DOES see them, or the router is useless
+	h.initialize("t", testTok)
+	if _, names := h.listed("t", testTok); len(authorNames(names)) == 0 {
 		t.Error("the test hat must see the author tools")
 	}
 }
@@ -97,14 +94,16 @@ func TestVisibleTools_ProductFolderNeverSeesAuthorTools(t *testing.T) {
 // Absence from tools/list is not enough on its own: a client that already knows the name must also be
 // refused when it CALLS it. Listing is a courtesy; the refusal is the boundary.
 func TestRoute_ProductFolderCallingAnAuthorToolIsRefused(t *testing.T) {
-	tbl := testTable(t)
-	f, _ := tbl.Resolve(prodTok)
-	_, err := f.Route("author__read_scenario", "suta")
-	if err == nil {
-		t.Fatal("a product folder called an author tool and was NOT refused")
+	h := newHarness(t, Options{})
+	h.initialize("p", prodTok)
+	for _, name := range []string{"author_read_scenario", "author__read_scenario"} {
+		raw := h.call("p", prodTok, 1, name, map[string]any{"instance_id": "suta"})
+		if !strings.Contains(string(raw), `"code":-32001`) || !strings.Contains(string(raw), "product scope") {
+			t.Errorf("a product folder called %s and was NOT refused by scope: %s", name, raw)
+		}
 	}
-	if !strings.Contains(err.Error(), "not available") && !strings.Contains(err.Error(), "runner") {
-		t.Errorf("the refusal should explain the scope; got %v", err)
+	if n := len(h.cp.calls); n != 0 {
+		t.Errorf("the refused calls reached the control plane (%d requests)", n)
 	}
 }
 
@@ -143,10 +142,12 @@ func TestFolder_ProductHasNoCloudCredential(t *testing.T) {
 
 // ── VR-R5 / TS-R2: per-folder scoping ───────────────────────────────────────────────────────────
 
+// The folder rule itself (checkInstance), which both the runner path and the author path apply before any network call.
+// Through the router, every case is driven against real executors in runner_call_test.go.
 func TestRoute_CannotReachAnInstanceFromAnotherFolder(t *testing.T) {
 	tbl := testTable(t)
 	f, _ := tbl.Resolve(testTok) // holds suta + sutb, NOT sutz
-	_, err := f.Route("runner__run", "sutz")
+	err := f.checkInstance("sutz")
 	if err == nil {
 		t.Fatal("folder A reached an instance onboarded into folder B")
 	}
@@ -179,13 +180,13 @@ func TestRoute_JoinedInstanceIDsAreRefusedLoudly(t *testing.T) {
 	tbl := testTable(t)
 	f, _ := tbl.Resolve(testTok)
 	for _, bad := range []string{"suta,sutb", "suta sutb", "suta;sutb", "suta, sutb"} {
-		_, err := f.Route("runner__run", bad)
+		err := f.checkInstance(bad)
 		if err == nil {
-			t.Errorf("Route(%q) was accepted — a half-run would be reported as success", bad)
+			t.Errorf("checkInstance(%q) was accepted — a half-run would be reported as success", bad)
 			continue
 		}
 		if !strings.Contains(err.Error(), "exactly one") {
-			t.Errorf("Route(%q): the refusal must say one instance per call; got %v", bad, err)
+			t.Errorf("checkInstance(%q): the refusal must say one instance per call; got %v", bad, err)
 		}
 	}
 }
@@ -193,7 +194,7 @@ func TestRoute_JoinedInstanceIDsAreRefusedLoudly(t *testing.T) {
 func TestRoute_EmptyInstanceIDIsRefused(t *testing.T) {
 	tbl := testTable(t)
 	f, _ := tbl.Resolve(testTok)
-	if _, err := f.Route("runner__run", ""); err == nil {
+	if err := f.checkInstance(" "); err == nil {
 		t.Fatal("an empty instance_id was accepted")
 	}
 }
@@ -201,20 +202,13 @@ func TestRoute_EmptyInstanceIDIsRefused(t *testing.T) {
 // ── the routing itself ──────────────────────────────────────────────────────────────────────────
 
 // VR-R4, positively stated: the SAME instance resolves to DIFFERENT upstream tokens depending on the
-// hat of the folder the call came from. That difference IS the holdout.
+// hat of the folder the call came from. That difference IS the holdout. (On the wire: TestProxy_ForwardsThePerHatToken.)
 func TestRoute_SameInstanceDifferentHatDifferentToken(t *testing.T) {
 	tbl := testTable(t)
 	pf, _ := tbl.Resolve(prodTok)
 	tf, _ := tbl.Resolve(testTok)
 
-	pt, err := pf.Route("runner__get_report", "suta")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tt, err := tf.Route("runner__get_report", "suta")
-	if err != nil {
-		t.Fatal(err)
-	}
+	pt, tt := pf.Upstreams["suta"], tf.Upstreams["suta"]
 	if pt.URL != tt.URL {
 		t.Errorf("the two hats should reach the SAME endpoint; got %q vs %q", pt.URL, tt.URL)
 	}
@@ -227,11 +221,12 @@ func TestRoute_SameInstanceDifferentHatDifferentToken(t *testing.T) {
 }
 
 // An author tool from a test folder goes to the CLOUD, with the user-global token — not to the
-// instance's endpoint. runner__* stays local because it must reach the SUT (VR-C4).
+// instance's endpoint. runner__* stays local because it must reach the SUT (VR-C4). A product folder
+// has no author target at all.
 func TestRoute_AuthorToolGoesToTheCloudPlane(t *testing.T) {
 	tbl := testTable(t)
 	f, _ := tbl.Resolve(testTok)
-	tgt, err := f.Route("author__list_scenarios", "suta")
+	tgt, err := f.AuthorTarget()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,10 +236,14 @@ func TestRoute_AuthorToolGoesToTheCloudPlane(t *testing.T) {
 	if tgt.Token != "odts_user_global" {
 		t.Errorf("author tool carried %q, want the user-global author token", tgt.Token)
 	}
-	// …and the scope check still ran first: an out-of-folder instance is refused BEFORE the cloud
-	// is contacted, so the CP never sees a call the folder had no business making.
-	if _, err := f.Route("author__list_scenarios", "sutz"); err == nil {
-		t.Error("an author call for an out-of-folder instance reached the cloud")
+	pf, _ := tbl.Resolve(prodTok)
+	if _, err := pf.AuthorTarget(); err == nil {
+		t.Error("a product folder has an author target")
+	}
+	// …and the folder rule still runs first: an out-of-folder instance is refused BEFORE the cloud is
+	// contacted, so the CP never sees a call the folder had no business making.
+	if o := checkAuthorArgs(f, json.RawMessage(`{"instance_id":"sutz"}`)); o == nil {
+		t.Error("an author call for an out-of-folder instance would have reached the cloud")
 	}
 }
 
@@ -271,12 +270,22 @@ func TestAddFolder_DuplicateTokenIsRefused(t *testing.T) {
 	}
 }
 
-// An unknown tool is refused before any routing decision — the router forwards a fixed, known set,
-// never "whatever the caller asked for".
+// A runner name no executor of the folder offers is not forwarded anywhere: the answer is "unknown tool" — the executor's
+// own answer for a name it does not have (D-11) — and the router never calls "whatever the caller asked for".
 func TestRoute_UnknownToolIsRefused(t *testing.T) {
-	tbl := testTable(t)
-	f, _ := tbl.Resolve(testTok)
-	if _, err := f.Route("runner__delete_everything", "suta"); err == nil {
-		t.Fatal("an unknown tool name was routed")
+	h := newHarness(t, Options{})
+	h.initialize("s", testTok)
+	for _, name := range []string{"runner_delete_everything", "runner__delete_everything"} {
+		raw := h.call("s", testTok, 1, name, map[string]any{"instance_id": "suta"})
+		if want := `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"unknown tool ` + name + `"}}`; string(raw) != want {
+			t.Fatalf("\n got: %s\nwant: %s", raw, want)
+		}
+		direct := h.ex["suta"].direct(t, "author-suta", 1, "tools/call", map[string]any{"name": name, "arguments": map[string]any{"instance_id": "local"}})
+		if string(raw) != string(direct) {
+			t.Fatalf("the router's answer is not the executor's own:\nrouter:   %s\nexecutor: %s", raw, direct)
+		}
+	}
+	if n := h.execToolCalls(); n != 0 {
+		t.Fatalf("an unknown name was forwarded (%d calls)", n)
 	}
 }

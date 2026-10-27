@@ -72,6 +72,10 @@ type upArgs struct {
 	ResultsAccessMode string // --results-access-mode
 	// the observability volumes' StorageClass, forwarded to onboard.sh --obs-storage-class.
 	ObsStorageClass string // --obs-storage-class
+	// the executor container's memory limit, forwarded to onboard.sh --executor-memory.
+	ExecutorMemory string // --executor-memory
+	// the executor container's CPU limit, forwarded to onboard.sh --executor-cpu.
+	ExecutorCPU string // --executor-cpu
 }
 
 // upFlagSet registers every `up` flag, each bound to its field of a. Its own function so a test can drive
@@ -95,6 +99,8 @@ func upFlagSet(a *upArgs) *flag.FlagSet {
 	fs.StringVar(&a.StorageClass, "storage-class", "", "the results volume's StorageClass, forwarded verbatim to onboard.sh --storage-class (else the tier default)")
 	fs.StringVar(&a.ResultsAccessMode, "results-access-mode", "", "the results volume's access mode, forwarded verbatim to onboard.sh --results-access-mode — ReadWriteMany | ReadWriteOnce")
 	fs.StringVar(&a.ObsStorageClass, "obs-storage-class", "", "the observability volumes' StorageClass (Loki's data, the Pushgateway's file; ReadWriteOnce), forwarded verbatim to onboard.sh --obs-storage-class (else managed-csi on aks, the cluster default StorageClass elsewhere)")
+	fs.StringVar(&a.ExecutorMemory, "executor-memory", "", "the executor container's memory LIMIT as a Kubernetes quantity, for example 3Gi, forwarded verbatim to onboard.sh --executor-memory (default 1536Mi; a value below the 384Mi request is refused)")
+	fs.StringVar(&a.ExecutorCPU, "executor-cpu", "", "the executor container's CPU LIMIT as a Kubernetes CPU quantity, for example 2, 1.5 or 1500m, forwarded verbatim to onboard.sh --executor-cpu (default 1; a value below the 150m request is refused; the instance CPU quota follows it)")
 	fs.BoolVar(&a.JSON, "json", false, "emit one JSON object per line (upjson.go) instead of onboard.sh's own transcript")
 	fs.BoolVar(&a.Yes, "yes", false, "accept every non-secret default instead of asking (see yesCanAnswer)")
 	return fs
@@ -197,6 +203,12 @@ func upOnboardArgs(a upArgs, productDir, scenariosDir, runnerID string) []string
 	}
 	if a.ObsStorageClass != "" {
 		args = append(args, "--obs-storage-class", a.ObsStorageClass)
+	}
+	if a.ExecutorMemory != "" {
+		args = append(args, "--executor-memory", a.ExecutorMemory)
+	}
+	if a.ExecutorCPU != "" {
+		args = append(args, "--executor-cpu", a.ExecutorCPU)
 	}
 	return args
 }

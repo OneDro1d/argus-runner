@@ -159,7 +159,7 @@ func TestCheckCredential(t *testing.T) {
 		{"bare token expiring in two minutes", env(soon), StatusWarn, "expires in 2m", "unset ARGUS_CP_AUTHOR_TOKEN"},
 		{"session token expiring in two minutes renews", session(soon, true, now.Add(-time.Hour)), StatusOK, "", ""},
 		// A runner-scope token resolves to role.Product, the builder's hat (control/cloudauth.go), not the executor's.
-		{"runner scope in the operator's hands", env(at(10*time.Minute, "runner")), StatusWarn, "a builder presents it to runner__run", "cloud-login"},
+		{"runner scope in the operator's hands", env(at(10*time.Minute, "runner")), StatusWarn, "a builder presents it to runner_run", "cloud-login"},
 		{"unrecognised value", env(Classify("wksp_123")), StatusWarn, "neither", "cloud-login"},
 		{"unreadable JWT is unknown, never ok", env(Classify(enc([]byte(`{"alg":"RS256"}`)) + ".!!!.sig")), StatusUnknown, "could not be read", ""},
 	}
@@ -185,7 +185,7 @@ func TestCheckCredential(t *testing.T) {
 	}
 }
 
-// REPLAY L0929:R4 (tester verify/2026-09-29-doctor-pr326-live/R4-wrong-token.out). A synthetic odts_ value in
+// REPLAY of a recorded incident (a tester's run). A synthetic odts_ value in
 // ARGUS_CP_AUTHOR_TOKEN: argus-dev answered HTTP 401 "invalid credential", and this check still said ok, because
 // the refusal only reached executor-version, whose fix was "re-run argus doctor". The control plane's own
 // answer outranks what the value looks like.
@@ -494,8 +494,8 @@ func TestCheckScenarios(t *testing.T) {
 		{"chosen dir absent", ScenariosInput{Dir: "s"}, StatusFail, "does not exist"},
 		{"no scenario files", ScenariosInput{Dir: "s", Exists: true}, StatusFail, "no scenario files"},
 		// The mistake `run` cannot refuse at flag parsing.
-		{"demo scenarios against another product", ScenariosInput{Dir: def, IsDefault: true, Exists: true, Files: 9, ProjectName: "memstore"}, StatusWarn, `project "memstore"`},
-		{"demo scenarios against the demo", ScenariosInput{Dir: def, IsDefault: true, Exists: true, Files: 9, ProjectName: "order-service"}, StatusOK, ""},
+		{"pilot scenarios against another product", ScenariosInput{Dir: def, IsDefault: true, Exists: true, Files: 9, ProjectName: "memstore"}, StatusWarn, `project "memstore"`},
+		{"pilot scenarios against the pilot", ScenariosInput{Dir: def, IsDefault: true, Exists: true, Files: 9, ProjectName: "order-service"}, StatusOK, ""},
 		{"own scenarios, no config to compare", ScenariosInput{Dir: "s", Exists: true, Files: 12}, StatusOK, "not compared"},
 		{"own scenarios", ScenariosInput{Dir: "s", Exists: true, Files: 12, ProjectName: "hub"}, StatusOK, ""},
 	}
@@ -609,5 +609,37 @@ func TestClipKeepsCharactersWhole(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "…") || len(got) > 160+len("…") {
 		t.Errorf("clip = %q; want at most 160 bytes, then …", got)
+	}
+}
+
+// A tester's run: argus-config named one target, and the catalogue's
+// chain steps called two more engines by full URL. Nothing probed them: a missing pilot-old would have shown
+// only as 199 red scenarios at run time.
+func TestCheckConfig_UnprobedHosts(t *testing.T) {
+	in := ConfigInput{Path: "argus-config.yaml", ProjectName: "pilot", Validated: true, ScenariosChecked: 364, ScenariosDir: "scenarios",
+		Unprobed: []UnprobedHost{
+			{Addr: "pilot-go.pilot.svc.cluster.local:8080", Scenarios: 17, First: "DM-DIFF-001"},
+			{Addr: "pilot-old.pilot.svc.cluster.local:8080", Scenarios: 199, First: "DM-VOLD-REQ-BROADR-001"},
+		}}
+	c := CheckConfig(in)
+	if c.Status != StatusWarn {
+		t.Fatalf("status = %q, want warn: %+v", c.Status, c)
+	}
+	for _, s := range []string{"216 scenarios", "pilot-old.pilot.svc.cluster.local:8080 (199 scenarios, e.g. DM-VOLD-REQ-BROADR-001)",
+		"pilot-go.pilot.svc.cluster.local:8080 (17", "sut-reachable", "full URL"} {
+		if !strings.Contains(c.Detail, s) {
+			t.Errorf("Detail lacks %q:\n%s", s, c.Detail)
+		}
+	}
+	if !strings.Contains(c.Fix, "targets.http_targets.<name>.base_url") {
+		t.Errorf("Fix does not say how to have the executor probe them:\n%s", c.Fix)
+	}
+	// More than five hosts: the first five by scenario count, then how many more.
+	in.Unprobed = nil
+	for i := 0; i < 7; i++ {
+		in.Unprobed = append(in.Unprobed, UnprobedHost{Addr: fmt.Sprintf("h%d:80", i), Scenarios: 1, First: "S"})
+	}
+	if c := CheckConfig(in); !strings.Contains(c.Detail, "and 2 more") {
+		t.Errorf("seven hosts are not cut to five:\n%s", c.Detail)
 	}
 }

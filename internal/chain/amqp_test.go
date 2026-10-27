@@ -38,6 +38,11 @@ type fakeBroker struct {
 	unbinds       [][3]string
 	deletedExchgs []string
 	closed        int
+	//
+	consumeEncoding string
+	waits           []time.Duration
+	listens         []listenCall
+	binds           [][3]string
 }
 
 func (f *fakeBroker) PublishConfirmed(exchange, routingKey string, body []byte, props amqpengine.Props) amqpengine.Outcome {
@@ -47,11 +52,31 @@ func (f *fakeBroker) PublishConfirmed(exchange, routingKey string, body []byte, 
 	return f.outcome
 }
 
-func (f *fakeBroker) Consume(queue string, _ time.Duration) (amqpengine.Outcome, []byte) {
+func (f *fakeBroker) ConsumeDelivery(queue string, wait time.Duration) (amqpengine.Outcome, amqpengine.Delivery) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.consumes = append(f.consumes, queue)
-	return f.outcome, f.consumeBody
+	f.waits = append(f.waits, wait)
+	return f.outcome, amqpengine.Delivery{Body: f.consumeBody, ContentEncoding: f.consumeEncoding}
+}
+
+func (f *fakeBroker) Listen(queue, exchange, routingKey string, ttl int) amqpengine.Outcome {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listens = append(f.listens, listenCall{queue, exchange, routingKey, ttl})
+	return f.outcome
+}
+
+func (f *fakeBroker) BindQueue(queue, exchange, routingKey string) amqpengine.Outcome {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.binds = append(f.binds, [3]string{queue, exchange, routingKey})
+	return f.outcome
+}
+
+type listenCall struct {
+	queue, exchange, routingKey string
+	ttl                         int
 }
 
 func (f *fakeBroker) DeclareQueue(name string) amqpengine.Outcome {
@@ -377,7 +402,7 @@ func TestAMQPStep_QueueIsEmptyClaim(t *testing.T) {
 	want := scenario.AMQPStepWant{Empty: true}
 
 	t.Run("passes on a timeout with no message", func(t *testing.T) {
-		f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, Code: 0, Text: "timed out waiting for a message"}}
+		f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, Code: 0, TimedOut: true, Text: "timed out waiting for a message"}}
 		sr := runOneWant(t, spec, want, f)
 		if sr.Status != "passed" {
 			t.Fatalf("an empty queue must PASS `queue is empty`: %+v", sr)
@@ -404,6 +429,66 @@ func TestAMQPStep_QueueIsEmptyClaim(t *testing.T) {
 		}
 		if !strings.Contains(sr.Observed, "403") || strings.Contains(sr.Observed, "no message arrived") {
 			t.Fatalf("observed must show the REFUSAL, not the empty-queue wording: %q", sr.Observed)
+		}
+	})
+}
+
+// A consume that ended with Code 0 for any reason OTHER than its own wait running out
+// (closed consumer channel, watchdog teardown, a code-less error) is not an empty queue: the step is an
+// `error` carrying its own sentence, and the chain stops there keeping that sentence.
+func TestAMQPStep_QueueIsEmptyNeverPassesWithoutARealTimeout(t *testing.T) {
+	spec := AMQPSpec{Op: "consume", URLEnv: "X", Queue: "q", Wait: time.Second}
+	want := scenario.AMQPStepWant{Empty: true}
+	cases := []struct{ name, text string }{
+		{"consumer channel closed before a message arrived", "consumer channel closed before a message arrived"},
+		{"engine watchdog teardown", "the broker did not answer within 31s; the connection was torn down"},
+		{"code-less connection error", "Exception (504) Reason: \"channel/connection is not open\""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, Code: 0, Text: tc.text}}
+			sr := runOneWant(t, spec, want, f)
+			if sr.Status != report.StatusError {
+				t.Fatalf("Code 0 without a real timeout must be an error, not %q: %+v", sr.Status, sr)
+			}
+			if !strings.HasPrefix(sr.Observed, OwnErrorPrefixEmptyUnjudged) || !strings.Contains(sr.Observed, tc.text) {
+				t.Fatalf("the step must keep its OWN sentence naming what happened: %q", sr.Observed)
+			}
+			if strings.Contains(sr.Observed, "no message arrived") {
+				t.Fatalf("must not use the empty-queue wording: %q", sr.Observed)
+			}
+		})
+	}
+	t.Run("the error does not leak the broker URL", func(t *testing.T) {
+		t.Setenv("X", "amqp://argus:hunter2@broker.example:5672/")
+		f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, Text: "dial amqp://argus:hunter2@broker.example:5672/ failed"}}
+		sr := runOneWant(t, spec, want, f)
+		if sr.Status != report.StatusError || strings.Contains(sr.Observed, "hunter2") {
+			t.Fatalf("status/secret: %+v", sr)
+		}
+	})
+	t.Run("a genuine timeout still passes", func(t *testing.T) {
+		f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, TimedOut: true, Text: "timed out waiting for a message"}}
+		if sr := runOneWant(t, spec, want, f); sr.Status != "passed" {
+			t.Fatalf("a real timeout is an empty queue: %+v", sr)
+		}
+	})
+	t.Run("a message arriving still fails, showing it", func(t *testing.T) {
+		f := &fakeBroker{outcome: amqpengine.Outcome{OK: true}, consumeBody: []byte("surprise-delivery")}
+		sr := runOneWant(t, spec, want, f)
+		if sr.Status != "failed" || !strings.Contains(sr.Observed, "surprise-delivery") {
+			t.Fatalf("a delivered message fails `queue is empty`: %+v", sr)
+		}
+	})
+	t.Run("the chain keeps the step's own sentence and ends in error", func(t *testing.T) {
+		f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, Text: "consumer channel closed before a message arrived"}}
+		dial, _ := dialerFor(f)
+		res := Run("tr-amqp-1", []Step{AMQPStep("take", spec, want, dial)})
+		if res.Status != report.StatusError || len(res.Steps) != 1 {
+			t.Fatalf("chain result: %+v", res)
+		}
+		if res.Steps[0].Status != report.StatusError || !strings.HasPrefix(res.Steps[0].Observed, OwnErrorPrefixEmptyUnjudged) {
+			t.Fatalf("step: %+v", res.Steps[0])
 		}
 	})
 }

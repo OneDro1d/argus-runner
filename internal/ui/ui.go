@@ -28,21 +28,28 @@ func Command(specPaths ...string) []string {
 
 // Classify maps the OS-Process-Sampler outcome to a verdict (VR-L3 / UC-62). VR-L3 is
 // explicit: a process that "exits non-zero OR exits 0 but produces no trace/results
-// artifact" is a DISTINCT EXECUTION failure — "absent results != pass". So the artifact
-// check comes FIRST, regardless of the exit code:
-//   - NO results artifact (any exit code) -> execution/harness failure (browser launch,
+// artifact" is a DISTINCT EXECUTION failure — "absent results != pass". So the "did a test
+// run" check comes FIRST, regardless of the exit code. hasResults means exactly that: Playwright's
+// own report says at least one test ran, else (no readable report) a per-test artifact exists —
+// see argus.uiExercised. It does NOT mean "a trace exists": with tracing off a passing run has none
+// .
+//   - NO test ran (any exit code) -> execution/harness failure (browser launch,
 //     OOM, missing dep, OR exit 0 with no test run / all skipped) — report.StatusError,
 //     never a silent green and never collapsed into a SUT failure
-//   - exit 0 WITH a results artifact       -> passed (a test actually ran + left a trace)
-//   - exit != 0 WITH a results artifact    -> SUT failure (a DOM assertion or backend 4xx/5xx fired)
+//   - exit 0 WITH a test run       -> passed (a test actually ran)
+//   - exit != 0 WITH a test run    -> SUT failure (a DOM assertion or backend 4xx/5xx fired)
 func Classify(exitCode int, hasResults bool, stderr string) (status, observed string) {
 	switch {
 	case !hasResults:
-		return report.StatusError, "UI EXECUTION failure (no Playwright results artifact — the SUT was not exercised: harness/browser-launch, or exited 0 with no test run / all skipped): " + firstLine(stderr)
+		// The sentence used to say "no Playwright results artifact"; the meaning changed (it is now
+		// "no test ran"), so the words did too.
+		return report.StatusError, "UI EXECUTION failure (no Playwright test ran — the SUT was not exercised: harness/browser-launch, or exited 0 with no test run / all skipped): " + firstLine(stderr)
 	case exitCode == 0:
 		return "passed", "UI spec passed (rendered-DOM asserts + no backend 4xx/5xx during the flow)"
 	default:
-		return "failed", "UI spec failed (a DOM assertion or a backend 4xx/5xx during the flow) — see diagnostics.log / trace.zip"
+		// trace.zip exists only when the spec left tracing on (the vendored config does); do not
+		// promise a file that may not be there.
+		return "failed", "UI spec failed (a DOM assertion or a backend 4xx/5xx during the flow) — see diagnostics.log (and trace.zip, if tracing was on)"
 	}
 }
 

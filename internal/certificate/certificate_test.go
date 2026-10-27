@@ -16,6 +16,8 @@ var certGoldenKeys = []string{
 	"artifact_measurement.reason", "artifact_measurement.source", "artifact_measurement.running",
 	"artifact_measurement.unresolved", "artifact_measurement.commitment_images_found",
 	"artifact_measurement.commitment_images_not_found", "artifact_measurement.scenario_evidence_root",
+	"faults", "faults[].op", "faults[].target", "faults[].params", "faults[].params.replicas", "faults[].applied_at",
+	"faults[].restored_at", "faults[].restore_outcome", "faults[].toxiproxy",
 	"format",
 	"run_id",
 	"finished_at",
@@ -87,6 +89,7 @@ func TestCertificate_PinnedFields(t *testing.T) {
 		Anchoring:            &Anchoring{Status: AnchoringInProgress, ChainsAwaitingVerdict: []string{"base-sepolia"}, OTSAwaitingBitcoin: []string{"bitcoin-ots"}, Note: "n"},
 		RevealedAt:           "2026-09-24T00:02:00Z",
 		RevealDocumentSHA256: "deadbeef",
+		Faults:               []Fault{{Op: "stop", Target: "trades", Params: map[string]int{"replicas": 0}, AppliedAt: "a", RestoredAt: "b", RestoreOutcome: "restored", Toxiproxy: true}},
 		ArtifactMeasurement: &ArtifactMeasurement{
 			Bound: true, State: "matched", Reason: "r", Source: "k8s", Running: []string{"sha256:aa"}, Unresolved: 1,
 			CommitmentFound: []string{"sha256:aa"}, CommitmentNotFound: []string{"sha256:cc"}, ScenarioEvidenceRoot: "root",

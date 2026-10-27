@@ -62,5 +62,10 @@ func (c *Config) CredentialValues() []string {
 	for _, n := range c.CheckEnvNames() {
 		add(os.Getenv(n))
 	}
+	// the Clerk secret key (read from the environment by NAME) is a credential exactly like
+	// a bearer_token. The user id is not, and a minted session token is added by the run, which owns it.
+	for _, v := range c.clerkSecretValues() {
+		add(v)
+	}
 	return out
 }

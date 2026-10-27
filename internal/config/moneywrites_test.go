@@ -43,12 +43,22 @@ func TestMoneyWrites_EmptyAllowRefused(t *testing.T) {
 	}
 }
 
-func TestMoneyWrites_GETMethodRefused(t *testing.T) {
+// EDITED ASSERTION: this test used to assert that `method: GET` is refused ("money_writes
+// exempts WRITES; a GET needs no exemption"). A GET of a money-word path DOES need one, and the list is the
+// owner's, so a GET entry is accepted — but only as spends: false (a GET has no body to cap).
+func TestMoneyWrites_GETMethodIsAcceptedOnlyAsSpendsFalse(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
 		"money_writes:\n  allow:\n    - method: GET\n      path: /api/v1/trading/quote\n      spends: false\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
+	if _, err := Load(p); err != nil {
+		t.Fatalf("a GET entry with spends: false was refused: %v", err)
+	}
+	p = writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
+		"money_writes:\n  allow:\n    - method: GET\n      path: /api/v1/trading/quote\n      spends: true\n"+
+		"      amount_field: a\n      max_amount: 1\n      max_per_run: 1\n"+
+		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	if _, err := Load(p); err == nil {
-		t.Fatal("method: GET was accepted in money_writes.allow")
+		t.Fatal("a GET entry with spends: true was accepted")
 	}
 }
 
