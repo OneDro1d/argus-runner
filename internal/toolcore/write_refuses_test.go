@@ -135,6 +135,10 @@ func invalidCorpus() []corpusCase {
 				"## CLEANUP", "N/A — a unit-test fixture; it creates nothing.", "",
 			}, "\n"),
 		},
+		// (T8) - the bus step: every author path refuses what the validator refuses.
+		{name: "bus-step-bare-hash-binding", body: busCorpus(`{"type":"bus","name":"b","exchange":"x","routing_key":"#"}`, "- step b: body has count >= 1")},
+		{name: "bus-step-first-in-chain", body: busFirstCorpus()},
+		{name: "bus-step-absence-without-anchor", body: busCorpus(`{"type":"bus","name":"b","exchange":"x","routing_key":"a.b"}`, "- step b: body has count == 0")},
 		{
 			// V31-002 W2 — a scenario that asserts nothing. It proves nothing, so it may not be saved.
 			name: "no-runnable-check",
@@ -178,6 +182,44 @@ func invalidCorpus() []corpusCase {
 				strings.Replace(v, "- **Tags**: http", "- **Tags**: mcp", 1),
 				"- body has order_id containing 01", "- error_code must be 42", 1),
 		},
+	}
+}
+
+// busCorpus is a chain whose first step is an http trigger and whose second is the given bus step.
+func busCorpus(busStep, busClaim string) string {
+	return strings.Join([]string{
+		"# Scenario: c", "",
+		"## Metadata", "- **ID**: CHN-BUS", "- **Layer**: Permissions", "- **Tags**: chain", "",
+		"## TRIGGER", "POST `chain`", "",
+		"```json",
+		`{"steps":[{"type":"http","name":"go","method":"POST","url":"http://sut.invalid/o"},` + busStep + `]}`,
+		"```", "",
+		"## EXPECT", "### Runnable", "- step go: status=202", busClaim, "",
+		"## TIMEOUT", "60s", "",
+		"## CLEANUP", "N/A — a unit-test fixture; it creates nothing.", "",
+	}, "\n")
+}
+
+func busFirstCorpus() string {
+	return strings.Join([]string{
+		"# Scenario: c", "",
+		"## Metadata", "- **ID**: CHN-BUS1", "- **Layer**: Permissions", "- **Tags**: chain", "",
+		"## TRIGGER", "POST `chain`", "",
+		"```json",
+		`{"steps":[{"type":"bus","name":"b","exchange":"x","routing_key":"a.b"}]}`,
+		"```", "",
+		"## EXPECT", "### Runnable", "- step b: body has count >= 1", "",
+		"## TIMEOUT", "60s", "",
+		"## CLEANUP", "N/A — a unit-test fixture; it creates nothing.", "",
+	}, "\n")
+}
+
+// TestBusCorpusPositiveControl: the bus corpus above is the valid chain with ONE thing broken each.
+func TestBusCorpusPositiveControl(t *testing.T) {
+	ok := busCorpus(`{"type":"bus","name":"b","exchange":"x","routing_key":"a.b"}`, "- step b: body has count >= 1")
+	if _, hasErrs, err := ValidateScenario(ok); err != nil || hasErrs {
+		res, _, _ := ValidateScenario(ok)
+		t.Fatalf("the bus control chain must be VALID: %v / %+v", err, res)
 	}
 }
 

@@ -131,6 +131,11 @@ type Loki struct {
 	// sent as X-Scope-OrgID on every request (see setTenant). A shared Loki runs auth_enabled: true
 	// and refuses a request without one. "" (bundled, adopt, export) sends NO X-Scope-OrgID at all.
 	Tenant string
+	// Shared, when set, says this Loki is an environment's SHARED Loki fed by a promtail that
+	// labels only cluster/namespace/pod/container/node/app: every correlation and source query then selects
+	// {cluster, namespace} and derives level / correlation_id / event_type at query time (sharedloki.go).
+	// nil (every instance with its own Loki) = the queries are exactly what they always were.
+	Shared *SharedLogSource
 }
 
 // TenantHeader is the Loki multi-tenancy header. It SCOPES a request; it does not authenticate
@@ -381,7 +386,10 @@ func (l *Loki) queryLines(correlationID, window string, anchor time.Time) ([]lok
 	// correlation id) and returns its own query-engine logs instead of the SUT's.
 	// the id is rendered as an ESCAPED LogQL string literal (it is validated
 	// upstream; this is the second lock — a quote or backslash can never end the literal).
-	q := `{service=~".+",service!~"` + ObsInfraExclusion + `"} |= ` + logqlString(correlationID)
+	q, qerr := l.CorrelationQuery(correlationID, "", "") // own Loki: CorrelationLogQL, unchanged; shared: cluster+namespace
+	if qerr != nil {
+		return nil, false
+	}
 	entries, err := l.queryRange(q, start, end, 2000)
 	if err != nil {
 		return nil, false
@@ -395,6 +403,23 @@ func (l *Loki) queryLines(correlationID, window string, anchor time.Time) ([]lok
 // the URL, or a decode error — never the response body (the server's free text) and never the URL
 // (its query string holds the selector and ids, and a base URL may carry userinfo).
 func (l *Loki) queryRange(q string, start, end time.Time, limit int) ([]lokiEntry, error) {
+	return l.queryRangeChecked(q, start, end, limit, false)
+}
+
+// maxLokiAnswerBytes is the most of one Loki answer the executor reads. The query's `limit` caps
+// the number of lines, not their size, and the answer used to be read whole and then decoded into a second copy.
+// 16 MiB is far past any ordinary answer (a 5,000-line logs read of 300-byte lines is about 2 MiB) and, decoded,
+// stays near 50 MB.
+const maxLokiAnswerBytes = 16 << 20
+
+// ErrLokiAnswerTooLarge is what a query returns when Loki's answer is over maxLokiAnswerBytes. It is an error,
+// never a short answer: a logs check judged on a prefix could pass on lines it never saw.
+var ErrLokiAnswerTooLarge = errors.New("Loki's answer is larger than 16 MiB, more than the executor reads; it was NOT used. Narrow the query (a tighter selector or filter, a shorter window)")
+
+// queryRangeChecked is queryRange; requireSuccess true also refuses a 200 answer that does not say
+// `"status":"success"` (a COUNT is judged on the answer, so `{}` or `null` must never read as
+// "zero lines"). Every other caller keeps queryRange's reading of an answer unchanged.
+func (l *Loki) queryRangeChecked(q string, start, end time.Time, limit int, requireSuccess bool) ([]lokiEntry, error) {
 	api := strings.TrimRight(l.BaseURL, "/") + "/loki/api/v1/query_range?" + url.Values{
 		"query":     {q},
 		"start":     {strconv.FormatInt(start.UnixNano(), 10)},
@@ -423,9 +448,17 @@ func (l *Loki) queryRange(q string, start, end time.Time, limit int) ([]lokiEntr
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("Loki answered HTTP %d", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, rerr := io.ReadAll(io.LimitReader(resp.Body, maxLokiAnswerBytes+1))
+	if len(body) > maxLokiAnswerBytes {
+		// never judge a prefix. The answer is refused whole, with the reason.
+		return nil, ErrLokiAnswerTooLarge
+	}
+	if rerr != nil {
+		return nil, fmt.Errorf("read the Loki answer: %w", withoutURL(rerr))
+	}
 	var out struct {
-		Data struct {
+		Status string `json:"status"`
+		Data   struct {
 			Result []struct {
 				Values [][2]string `json:"values"`
 			} `json:"result"`
@@ -433,6 +466,9 @@ func (l *Loki) queryRange(q string, start, end time.Time, limit int) ([]lokiEntr
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("decode the Loki answer: %w", err)
+	}
+	if requireSuccess && out.Status != "success" {
+		return nil, errors.New("the Loki answer does not say status \"success\"")
 	}
 	var entries []lokiEntry
 	for _, r := range out.Data.Result {

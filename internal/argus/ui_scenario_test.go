@@ -35,7 +35,7 @@ func TestRunUIScenario_Verdicts(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+			uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 				if len(specs) != 1 || specs[0] != "tests/live/x.spec.ts" {
 					t.Fatalf("spec not threaded: %q", specs)
 				}
@@ -76,19 +76,19 @@ func TestRunUIScenario_RequestCounts(t *testing.T) {
 	s := &scenario.Scenario{ID: "UI-RC", Tags: []string{"ui"}}
 	s.Trigger.Payload = `{"spec":"tests/live/x.spec.ts","app_url":"http://localhost:5190"}`
 
-	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 		return 0, true, ""
 	} // passed
 	if r := runUIScenario(s, "tr-1", "testkit/ui"); r.ReqSuccess != 1 || r.ReqFailed != 0 || r.ReqError != 0 || len(r.Requests) != 1 {
 		t.Errorf("passed spec → success=1 (+1 sample), got success=%d failed=%d error=%d samples=%d", r.ReqSuccess, r.ReqFailed, r.ReqError, len(r.Requests))
 	}
-	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 		return 1, true, ""
 	} // SUT-failed (artifact) → a negative response
 	if r := runUIScenario(s, "tr-2", "testkit/ui"); r.ReqFailed != 1 || r.ReqSuccess != 0 || r.ReqError != 0 {
 		t.Errorf("SUT-failed spec → ReqFailed=1 (negative response, NOT error), got success=%d failed=%d error=%d", r.ReqSuccess, r.ReqFailed, r.ReqError)
 	}
-	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 		return 1, false, "boom"
 	} // exec-error (no artifact) → no response
 	if r := runUIScenario(s, "tr-3", "testkit/ui"); r.ReqError != 1 || r.ReqSuccess != 0 || r.ReqFailed != 0 {
@@ -132,7 +132,7 @@ func runUICaptured(t *testing.T, s *scenario.Scenario, corr string) (res report.
 	t.Helper()
 	orig := uiRun
 	t.Cleanup(func() { uiRun = orig })
-	uiRun = func(vendorDir string, sp []string, u, c string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+	uiRun = func(vendorDir string, sp []string, u, c string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 		specs, appURL, called = sp, u, true
 		return 0, true, ""
 	}

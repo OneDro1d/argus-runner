@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -90,6 +91,10 @@ func CheckSUTReachable(in ExecutorInput) Check {
 			fixes = append(fixes, f)
 		}
 	}
+	if n := in.UnprobedHosts; n > 0 && c.Status == StatusOK {
+		details = append(details, fmt.Sprintf("That reading does not cover the %d %s your scenarios call by a full URL that no argus-config target names: "+
+			"the probe never dials them (see argus-config).", n, plural(n, "host", "hosts")))
+	}
 	if skipped == len(execs) {
 		c.Status = StatusSkip // every reading is explained by a config with no targets: nothing to judge
 	}
@@ -135,7 +140,7 @@ func judgeSUT(e ExecutorStatus, now time.Time, noTargets bool) (Status, string, 
 				". The dial is made from the executor's network, not from this host, and the control plane records only the overall answer, not which target.",
 			id + ": in argus-config, name each target the way the executor sees it — on the compose tier the SUT's service name on the network in deploy.network " +
 				"(http://<service>:<port>, jdbc:postgresql://<db-service>:5432/<db>), never localhost, which is the executor itself — and check the SUT is up. " +
-				"To see which target fails, run argus validate-config --config <argus-config.yaml> where the executor runs (or the runner__validate_config tool)."
+				"To see which target fails, run argus validate-config --config <argus-config.yaml> where the executor runs (or the runner_validate_config tool)."
 	case sutNotChecked:
 		if at == "" {
 			// Not judged by version: the probe predates this repository (its first commit, c2477ab, already

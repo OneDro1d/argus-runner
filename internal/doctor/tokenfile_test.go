@@ -11,8 +11,8 @@ func tokenFile(path string, f TokenFacts, forSide string, now time.Time) TokenFi
 	return TokenFileInput{Path: path, Values: 1, Facts: f, For: forSide, ControlPlaneURL: "https://argus-dev.onedroid.ai", Now: now}
 }
 
-// REPLAY: one case per recorded incident this check claims (verify/2026-09-25-friction-investigation,
-// incidents-B-tester.tsv; tagging in verify/2026-09-28-doctor-incident-tagging, extend:control-plane-credential).
+// REPLAY: one case per recorded incident this check claims (a tester's run,
+// the incident list; tagging in a tester's run, extend:control-plane-credential).
 // B:16 is claimed by the credential check, not this one: see TestCheckCredential_ReplayB16.
 func TestCheckTokenFile_Replay(t *testing.T) {
 	now := time.Date(2026, 9, 25, 13, 22, 40, 0, time.UTC)
@@ -22,8 +22,8 @@ func TestCheckTokenFile_Replay(t *testing.T) {
 		row, source string
 		in          TokenFileInput
 	}{
-		{"B:66", `handoffs/2026-09-25-hub-runner-window-mixup.md:19-20 "a Tokens-page revoke (13:22:19Z) + new author PAT (13:22:33Z) went out in the wrap instead of runner-token.txt"`, mixUp},
-		{"B:71", `handoffs/2026-09-25-hub-runner-window-mixup.md:8 "Hub runner window lost to a token mix-up" (the consequence of B:66)`, mixUp},
+		{"B:66", `a tester's notes "a Tokens-page revoke (13:22:19Z) + new author PAT (13:22:33Z) went out in the wrap instead of runner-token.txt"`, mixUp},
+		{"B:71", `a tester's notes "Hub runner window lost to a token mix-up" (the consequence of B:66)`, mixUp},
 		{"B:78", `NOTES.md:13-14 (09-25) "a Tokens-page revoke + new author PAT went out instead of runner-token.txt" (recurrence of B:66)`, mixUp},
 	}
 	for _, tc := range cases {
@@ -64,7 +64,7 @@ func TestCheckTokenFile_Replay(t *testing.T) {
 		if c.Status != StatusOK {
 			t.Fatalf("status = %q, want ok; detail: %s", c.Status, c.Detail)
 		}
-		for _, s := range []string{"runner__run accepts it", "12m", "nothing renews"} {
+		for _, s := range []string{"runner_run accepts it", "12m", "nothing renews"} {
 			if !strings.Contains(c.Detail, s) {
 				t.Errorf("detail does not say %q: %s", s, c.Detail)
 			}
@@ -96,11 +96,11 @@ func TestCheckTokenFile(t *testing.T) {
 		{"runner token, two minutes left", tokenFile(path, jwtIn("runner", 2*time.Minute), "", now),
 			StatusWarn, []string{"expires in 2m", "Vault wrap"}, []string{"--scope runner"}},
 		{"author-scope access token meant for the runner side", tokenFile(path, jwtIn("author", 10*time.Minute), "runner", now),
-			StatusFail, []string{"AUTHOR-scope", "runner__run refuses it"}, []string{"--scope runner", "--token-out /home/x/runner-token.txt"}},
+			StatusFail, []string{"AUTHOR-scope", "runner_run refuses it"}, []string{"--scope runner", "--token-out /home/x/runner-token.txt"}},
 		{"runner token meant for the author side", tokenFile(path, jwtIn("runner", 10*time.Minute), "author", now),
-			StatusFail, []string{"RUNNER-scope", "author__* tools refuse it"}, []string{"Tokens page", "--token-for author", "/home/x/author-token.txt"}},
+			StatusFail, []string{"RUNNER-scope", "author_* tools refuse it"}, []string{"Tokens page", "--token-for author", "/home/x/author-token.txt"}},
 		{"author-scope access token for the author side lasts 15 minutes", tokenFile(path, jwtIn("author", 10*time.Minute), "author", now),
-			StatusOK, []string{"author__* tools accept it", "10m", "Tokens page"}, nil},
+			StatusOK, []string{"author_* tools accept it", "10m", "Tokens page"}, nil},
 		{"PAT for the author side", tokenFile(path, pat, "author", now),
 			StatusOK, []string{"author PAT", "builder token", "Tokens page"}, nil},
 		{"PAT, side not said", tokenFile(path, pat, "", now),

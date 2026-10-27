@@ -147,7 +147,7 @@ func triggerErrors(s *Scenario, text string, metaLine int) []Error {
 	// says "do NOT tighten headerRe to guess which lines were meant as headers; guessing is what
 	// this register keeps re-finding". Both hold, because they act at different points: the PARSER
 	// regex stays exactly as permissive as it is (so nothing changes at run time), and the VALIDATOR
-	// refuses the implausible NAME at author time — while VR12-T3 has author__validate_scenario
+	// refuses the implausible NAME at author time — while VR12-T3 has author_validate_scenario
 	// return the header list, so the author SEES the stray line. Guessing is what the parser must
 	// not do; refusing by a stated rule, with the list shown back, is not guessing.
 	//
@@ -216,15 +216,14 @@ func verifyErrors(s *Scenario, text string, metaLine int) []Error {
 		// VF4-VF12: what the query may SAY. The columns come from the scenario's own runnable
 		// EXPECT bullets, so VF6 can catch an assertion on a column the query never returns.
 		dbx := ParseDBExpect(s.RunnableExpect())
-		var cols []string
-		for name := range dbx.Columns {
-			cols = append(cols, name)
-		}
 		// `standing-state` (VF5b): opts OUT of VF5's run-scoping requirement for a query that
 		// measures a STANDING invariant of the SUT rather than a row this run created. Reused tag
 		// parsing (s.Tags, from `## Metadata` `- **Tags**:`), same as every other tag literal.
 		standing := contains(s.Tags, standingStateTag)
-		for _, msg := range VerifySQLErrors(q, cols, standing) {
+		// The columns/standing-state derivation for the rule itself lives in
+		// VerifySQLViolations, which the run door (argus.runOneScenario) calls too, so the two doors
+		// cannot read one query differently.
+		for _, msg := range VerifySQLViolations(s) {
 			errs = append(errs, Error{Line: lineContaining(text, "```sql", line), Message: msg})
 		}
 		if standing {
@@ -377,6 +376,10 @@ func timeoutCeiling(s *Scenario) (int, string) {
 	switch {
 	case contains(s.Tags, ChainTag):
 		return 120000, "120s (a chain runs N steps in sequence)"
+	case contains(s.Tags, UITag):
+		// a browser flow is many round trips (load, sign in, navigate, assert), so it
+		// may ask for up to 300s. The value only LENGTHENS the vendored 60s test / 30s navigation limits.
+		return 300000, "300s (a browser flow is many round trips)"
 	case contains(s.Layers, "Rate Limiting"):
 		return 60000, "60s (the Rate Limiting ceiling — a limiter test ramps; specs/06 NFR-5)"
 	case len(s.Layers) > 1:

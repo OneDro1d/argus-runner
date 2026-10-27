@@ -61,10 +61,19 @@ func TestMapReport_CarriesTheLoadRampOnTheWire(t *testing.T) {
 	if len(got) != 1 || got[0].ScenarioID != "AMQL-001" || got[0].Target != "lab-broker" || got[0].Driver != "amqp" {
 		t.Fatalf("entry = %+v, want one {AMQL-001, lab-broker, amqp}", got)
 	}
-	want, _ := json.Marshal(ramp2Steps())
+	// AC-F2.2: the wire carries each step exactly as report.LoadStepWithoutTexts projects it — every number as in the
+	// report, a pause as its word and times, never the broker's words.
+	var wantSteps []report.LoadStep
+	for _, st := range ramp2Steps() {
+		wantSteps = append(wantSteps, report.LoadStepWithoutTexts(st))
+	}
+	want, _ := json.Marshal(wantSteps)
 	have, _ := json.Marshal(got[0].Steps)
 	if string(want) != string(have) {
-		t.Fatalf("steps changed on the way to the wire:\nwant %s\nhave %s", want, have)
+		t.Fatalf("steps on the wire are not the projected steps:\nwant %s\nhave %s", want, have)
+	}
+	if strings.Contains(string(push.LoadRamp), `"reason":`) || !strings.Contains(string(push.LoadRamp), `"blocked":[{"since_ms":1000,"until_ms":4000,"kind":"memory"}]`) {
+		t.Fatalf("the pause must ride as its word and times only: %s", push.LoadRamp)
 	}
 }
 

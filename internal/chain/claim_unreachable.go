@@ -72,20 +72,28 @@ func classifyTransportError(err error, connected bool) (pass bool, why string) {
 // UnreachableHTTPStep builds the step for `- step <name>: unreachable`. It sends ONE request and never
 // polls. The request is built, and the money_writes spend check applied, exactly as HTTPStep does.
 func UnreachableHTTPStep(name, method, urlTmpl string, headers map[string]string, bodyTmpl string,
-	moneyAllow scenario.MoneyWriteAllowlist, moneyLedger *scenario.MoneySpendLedger) Step {
+	moneyAllow scenario.MoneyWriteAllowlist, moneyLedger *scenario.MoneySpendLedger, opts ...HTTPOption) Step {
+	var o httpOpts
+	for _, opt := range opts {
+		opt(&o)
+	}
 	return Step{
 		Name:                name,
 		RequiresEarlierPass: true,
 		Needs: func(vars map[string]string) error {
-			_, _, err := buildHTTPRequest(method, urlTmpl, headers, bodyTmpl, vars)
+			_, _, err := buildHTTPRequest(method, urlTmpl, headers, bodyTmpl, vars, o.textBody)
 			return err
 		},
 		Run: func(cid string, vars map[string]string) report.StepResult {
-			req, resolvedBody, berr := buildHTTPRequest(method, urlTmpl, headers, bodyTmpl, vars)
+			req, resolvedBody, berr := buildHTTPRequest(method, urlTmpl, headers, bodyTmpl, vars, o.textBody)
 			if berr != nil {
 				return report.StepResult{Status: "failed", Observed: berr.Error()}
 			}
-			if entry := moneyAllow.Match(req.Method, req.URL.Path); entry != nil && entry.Spends {
+			// the resolved request is judged first, exactly as HTTPStep does (nothing is sent).
+			if msg := moneyResolvedRefusal(o.moneyHandling, name, method, urlTmpl, moneyAllow, req); msg != "" {
+				return report.StepResult{Status: report.StatusError, Observed: msg}
+			}
+			if entry := moneyAllow.MatchResolved(req.Method, req.URL); entry != nil && entry.Spends {
 				if msg := scenario.EvaluateSpendAmount(entry, resolvedBody); msg != "" {
 					return report.StepResult{Status: report.StatusError, Observed: MoneyWriteRefusal + msg}
 				}
@@ -131,7 +139,9 @@ func UnreachableHTTPStep(name, method, urlTmpl string, headers map[string]string
 			}
 			_ = resp.Body.Close()
 			obs := fmt.Sprintf("http status %d", resp.StatusCode)
-			return report.StepResult{Status: "failed",
+			// AC-F2.1: the response that arrived decided the claim, so the step records its status like an http step
+			// records the response it judged (observedHTTPStatus: only a three-digit code).
+			return report.StepResult{Status: "failed", ObservedStatus: observedHTTPStatus(resp.StatusCode),
 				Observed:           obs + " arrived — the network let the request through",
 				FailedClaims:       []report.FailedClaim{{Claim: scenario.UnreachableClaim, Observed: obs}},
 				AssertionsEnforced: enforced, AssertionsEnforcedCount: 1}

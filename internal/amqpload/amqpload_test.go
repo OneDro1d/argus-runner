@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OneDro1d/argus-runner/internal/memlimit"
 	"github.com/OneDro1d/argus-runner/internal/report"
 	"github.com/OneDro1d/argus-runner/internal/scenario"
 )
@@ -140,7 +141,7 @@ func TestAggregate_BlockedPeriodsFromSinceAndWasBlocked(t *testing.T) {
 	if st.Status != report.LoadStepBlocked {
 		t.Fatalf("status = %q", st.Status)
 	}
-	if len(st.Blocked) != 1 || st.Blocked[0] != (report.BlockedPeriod{SinceMs: 1013000, UntilMs: t0 + 14500, Reason: "memory alarm"}) {
+	if len(st.Blocked) != 1 || st.Blocked[0] != (report.BlockedPeriod{SinceMs: 1013000, UntilMs: t0 + 14500, Reason: "memory alarm", Kind: "memory"}) {
 		t.Fatalf("blocked = %+v", st.Blocked)
 	}
 	if st.BlockedSeconds != 1.5 {
@@ -156,11 +157,32 @@ func TestAggregate_StillBlockedAtTheEndHasNoUntil(t *testing.T) {
 		fail("X-amqp-publish", "503", "blocked by broker: disk alarm (since=1005000)", t0+11000),
 		fail("X-amqp-publish", "503", "blocked by broker: disk alarm (since=1005000)", t0+16000)}
 	st := AggregateStep(rows, in())
-	if len(st.Blocked) != 1 || st.Blocked[0].UntilMs != 0 || st.Blocked[0].Reason != "disk alarm" {
+	if len(st.Blocked) != 1 || st.Blocked[0].UntilMs != 0 || st.Blocked[0].Reason != "disk alarm" || st.Blocked[0].Kind != "disk" {
 		t.Fatalf("blocked = %+v", st.Blocked)
 	}
 	if st.BlockedSeconds != 11 { // 1016000 - 1005000
 		t.Errorf("blocked_seconds = %v", st.BlockedSeconds)
+	}
+}
+
+// AC-F2.2: the period's word is set where the period is built, from the broker's words as RabbitMQ 3.13.7 writes them
+// ("low on " + memory / disk, joined by " & ") and from anything else (other). The full report keeps the words.
+func TestAggregate_ABlockedPeriodGetsItsWord(t *testing.T) {
+	cases := map[string]string{
+		"low on memory":           "memory",
+		"low on disk":             "disk",
+		"low on memory & disk":    "memory",
+		"no reason given":         "other",
+		"quota exceeded for user": "other",
+	}
+	for reason, want := range cases {
+		rows := []Row{{TimeStampMs: t0, Label: "X-amqp-setup", Code: "200", Success: true},
+			fail("X-amqp-publish", "503", "blocked by broker: "+reason+" (since=1005000)", t0+11000),
+			pub(t0+12000, 800, " (was blocked 1000ms)")}
+		st := AggregateStep(rows, in())
+		if len(st.Blocked) != 1 || st.Blocked[0].Kind != want || st.Blocked[0].Reason != reason {
+			t.Errorf("%q: blocked = %+v, want kind %q and the reason kept", reason, st.Blocked, want)
+		}
 	}
 }
 
@@ -250,7 +272,7 @@ func TestReadJTL_ReadsByHeaderNameNotPosition(t *testing.T) {
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := ReadJTL(p)
+	rows, err := ReadJTL(p, memlimit.Budget{})
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("rows=%v err=%v", rows, err)
 	}

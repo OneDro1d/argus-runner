@@ -8,7 +8,6 @@
 package chain
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -64,10 +63,32 @@ type Step struct {
 	// a later step's connection dropped. It is recorded as ran-after-failure, never as the named cause.
 	Always bool
 	// RequiresEarlierPass marks a step whose verdict is only meaningful when the SUT demonstrably
-	// answered earlier in the SAME chain (, the `unreachable` claim): it is judged only
+	// answered earlier in the SAME chain (the `unreachable` claim): it is judged only
 	// if an earlier step PASSED, else it is `not-measured` and never fired — a dead cluster must not
 	// pass every negative check.
 	RequiresEarlierPass bool
+	// OwnError marks a step whose `error` result is ITS OWN sentence, not a transport failure (the db step,
+	// a row cap, a duplicate column, a document over the cap and a refused connection are all
+	// `error`, and each says which). The chain still stops there (VR12-CH2), but the step keeps its own
+	// Observed instead of being rewritten to "SUT unreachable", and the steps after it are told which step
+	// ended the chain. Every other step type keeps the old wording.
+	OwnError bool
+}
+
+// OwnErrorPrefix begins the Observed of an `error` result that is ITS OWN sentence even though the step type
+// is not OwnError throughout (the amqp step: a refused connection keeps the old wording, a decompression bomb
+// does not). chain.Run treats such a result like an OwnError step's.
+const OwnErrorPrefix = "the delivered message decompresses to more than"
+
+// OwnErrorPrefixEmptyUnjudged begins the Observed of an amqp `queue is empty` step whose consume ended
+// WITHOUT a verdict from the queue (the consumer channel closed, the engine watchdog tore the
+// connection down, or a channel/connection error carried no AMQP code). That is an `error`, never an
+// empty queue. chain.Run keeps this sentence on the step like OwnErrorPrefix's.
+const OwnErrorPrefixEmptyUnjudged = "`queue is empty` could not be judged:"
+
+// hasOwnErrorPrefix reports whether an `error` result's Observed is the step's OWN sentence.
+func hasOwnErrorPrefix(observed string) bool {
+	return strings.HasPrefix(observed, OwnErrorPrefix) || strings.HasPrefix(observed, OwnErrorPrefixEmptyUnjudged)
 }
 
 // Run executes the steps IN ORDER, threading ONE correlation id across all of them.
@@ -287,10 +308,25 @@ func Run(cid string, steps []Step, budget ...time.Duration) report.ScenarioResul
 		//  3. every further call is another effect fired into a SUT that is already refusing.
 		if sr.RateLimited || isUnanswered(sr) {
 			stopReason = notMeasuredReason(sr)
-			res.Steps = append(res.Steps, report.StepResult{
-				Name: st.Name, Status: report.StepNotMeasured, CorrelationID: cid,
-				Observed: stopReason, MCPEnvelope: sr.MCPEnvelope,
-			})
+			if st.OwnError || hasOwnErrorPrefix(sr.Observed) {
+				// the step's own sentence stays on the step; the rest of the chain is told which step ended it
+				stopReason = fmt.Sprintf("step %q ended with an error (see its own result) - the chain stopped there; "+
+					"this step and every later one were not measured", st.Name)
+				res.Steps = append(res.Steps, report.StepResult{
+					Name: st.Name, Status: report.StatusError, CorrelationID: cid, Observed: sr.Observed,
+					BodyExcerpt: sr.BodyExcerpt, // author-only (the start of an unavailable answer)
+					// AC-F2.1: the code the step got stays with it (0 / "" when it got none)
+					ObservedStatus: sr.ObservedStatus, ObservedSQLState: sr.ObservedSQLState,
+				})
+			} else {
+				res.Steps = append(res.Steps, report.StepResult{
+					Name: st.Name, Status: report.StepNotMeasured, CorrelationID: cid,
+					Observed: stopReason, MCPEnvelope: sr.MCPEnvelope,
+					// AC-F2.1: an `error` step that DID get a response (an http body over the limit) keeps its status;
+					// a step that got no answer has none, so nothing is written
+					ObservedStatus: sr.ObservedStatus, ObservedSQLState: sr.ObservedSQLState,
+				})
+			}
 			// ⚠ THIS step DID fire a request — it asked and got no usable answer. The request
 			// panel counts REQUESTS, not verdicts, so it is recorded (as an error outcome: the
 			// test could not get a response). Only the steps AFTER it fire nothing.
@@ -305,6 +341,9 @@ func Run(cid string, steps []Step, budget ...time.Duration) report.ScenarioResul
 			// exists to remove, pointed the other way.
 			if firstFailure == "" {
 				res.Status = report.StatusError
+				if (st.OwnError || hasOwnErrorPrefix(sr.Observed)) && res.Failure == nil {
+					res.Failure = &report.Failure{Observed: "step '" + st.Name + "' ended with an error: " + sr.Observed}
+				}
 			}
 			if sr.RateLimited {
 				res.RateLimited = true
@@ -433,6 +472,11 @@ func notMeasuredReason(sr report.StepResult) string {
 		}
 		return "SUT rate-limited" + wait + " — the chain stopped here; this step and every later one were not measured"
 	}
+	// A step the money-path guard refused (nothing was sent) says WHY in its own words: reading "SUT
+	// unreachable" there would send the owner looking for a network fault that does not exist.
+	if strings.HasPrefix(sr.Observed, MoneyResolvedRefusal) || strings.HasPrefix(sr.Observed, MoneyWriteRefusal) {
+		return sr.Observed + " — nothing was sent; the chain stopped here and this step and every later one were not measured"
+	}
 	return "SUT unreachable — the chain stopped here; this step and every later one were not measured"
 }
 
@@ -478,113 +522,7 @@ func MCPCleanup(s Step) Step {
 // not known when the chain is built. save maps a capture variable to a path into THIS step's
 // response (capture.go); nil means this step saves nothing.
 func MCPStep(name string, cl *mcp.Client, tool, argsJSON string, expect mcp.Expect, save map[string]scenario.SaveSpec) Step {
-	return Step{Name: name,
-		// VR12-CH1 rule 3: can this step be given its inputs AT ALL? Asked before the call, using
-		// the SAME bindSaved the args and the assertion use, so the answer cannot drift from what
-		// the step would actually do. An unresolved ${saved.…} means the step that produces it did
-		// not pass — this step was never tested, and firing it would only add an echo.
-		Needs: func(vars map[string]string) error {
-			if _, err := bindSaved(argsJSON, vars); err != nil {
-				return err
-			}
-			return needsBodyAsserts(expect.Body, vars)
-		},
-		Run: func(cid string, vars map[string]string) report.StepResult {
-			bound, err := bindSaved(argsJSON, vars)
-			if err != nil {
-				// an authoring error, not a SUT failure — fail the step here and name the variable
-				// rather than letting the literal placeholder reach the SUT and be misread as its bug.
-				return report.StepResult{Status: "failed", Observed: err.Error()}
-			}
-			var args any = map[string]any{}
-			if strings.TrimSpace(bound) != "" {
-				if err := json.Unmarshal([]byte(bound), &args); err != nil {
-					return report.StepResult{Status: "failed",
-						Observed: "step args are not valid JSON after binding ${saved.…}: " + err.Error()}
-				}
-			}
-			// VR10-S2 (owner-locked): the CONTENT assertion binds ${saved.<var>} with the SAME bindSaved
-			// as the args, into a fresh per-execution copy — `expect` itself is never mutated, because a
-			// chain can be re-run and a mutated Expect would carry one run's id into the next. Bound here,
-			// with the args and before the call, for the same reason the args are: an unbound variable is
-			// an authoring error that names the variable, and the literal placeholder must never be
-			// compared against the answer (it would silently pass or silently fail on the SUT's wording).
-			want, err := bindExpect(expect, vars)
-			if err != nil {
-				return report.StepResult{Status: "failed", Observed: "content assertion: " + err.Error()}
-			}
-			// ONE request id per call, prefixed by the chain's correlation id (mcp.PerCallRequestID). It
-			// used to be `cid` itself on every step, and a SUT enforcing request-id uniqueness refused
-			// every step after the first as "request_id reused".
-			res := cl.Call(mcp.CallInput{Tool: tool, Args: args, RequestID: mcp.PerCallRequestID(cid)})
-			// VR10-R1 (owner D12): the chain path converges on the SAME judge, so it gets the same fix —
-			// the SUT's declared throttle rides on the client, which is the endpoint this step calls.
-			v := mcp.JudgeWithRateLimit(res, want, cl.RateLimit)
-			st := report.StepResult{Status: "failed", Observed: v.Observed}
-			if !v.Pass && v.Plane == mcp.PlaneBody {
-				// a content-claim miss. The text points at the step's failed_claims —
-				// the per-claim record, built here from what THIS call's answer showed — instead of a
-				// failure record that does not exist. `expect` is the claims as written, `want` the
-				// bound copy the judge compared.
-				st.Observed = chainBodyNote(v.Observed)
-				st.FailedClaims, st.FailedClaimsOmitted = failedBodyClaims(mcp.BodyClaimText(res, want), expect.Body, want.Body, vars, nil)
-			}
-			if v.RateLimited {
-				// NOT MEASURED, not failed. The rollup below promotes the whole chain scenario on it.
-				st.Status = report.StatusError
-				st.RateLimited = true
-				st.RetryAfterMs = int(v.RetryAfter.Milliseconds())
-			}
-			// The ENFORCED marker (VR10-S2-12): the content assertions the judge actually evaluated — on a
-			// success step once both planes passed, and on an expected error once its error plane matched
-			// (V31-005). A plane failure never reaches them. Text for the test hat, count for both hats.
-			//
-			// ⚠ The `ErrorPlane == PlaneNone` condition is GONE, not widened: enforcedAssertions returns
-			// nothing for a step with no body check, so a step that carries none is unchanged either way.
-			if v.Pass || v.Plane == mcp.PlaneBody {
-				// a numeric threshold bound from the store is shown AS WRITTEN
-				// (${saved.n}), never as the measured value. Every other claim keeps its long-pinned
-				// BOUND rendering (TestMCPStep_SavedValueBindsIntoTheBodyAssertion).
-				st.AssertionsEnforced = enforcedAssertions(keepSavedThresholdsAsWritten(expect, want))
-				st.AssertionsEnforcedCount = len(st.AssertionsEnforced)
-			}
-			if !v.Pass {
-				// PROB-1: carry the SUT's own envelope on a non-passing step. `Observed` alone
-				// ("responder returned result.isError:true") is the same string for every tool-plane
-				// failure, so the actual error text — the only thing that separates TEST_BUG from
-				// CODE_BUG — was unreachable in-env for every chained scenario. Failures only: a
-				// passing step's envelope is transcript, and report.json is already ~120KB for 45
-				// scenarios.
-				st.MCPEnvelope = res.Raw
-			}
-			// CAPTURE: extract what this step declared to save. Done AFTER judging (so the status is
-			// known) but reported as a failure of THIS step when a path does not resolve — the break
-			// belongs where the authoring mistake is, not two steps later when something else receives
-			// an empty id. Only attempted on a passing step: a failed response has no payload worth
-			// threading, and reporting a save error over a real assertion failure would bury it.
-			if v.Pass && len(save) > 0 {
-				captured := make(map[string]string, len(save))
-				for name, sp := range save {
-					val, fail := saveFromMCP(res.Raw, name, sp)
-					if fail != "" {
-						return report.StepResult{Status: "failed", MCPEnvelope: res.Raw, Observed: fail}
-					}
-					captured[name] = val
-				}
-				st.Captured = captured
-			}
-			switch {
-			case v.Pass:
-				st.Status = "passed"
-			case v.Plane == "unreachable" || v.Plane == "transport":
-				// r3: no response from the SUT (endpoint unreachable / transport-handshake failure)
-				// is an EXECUTION error, NOT a negative response — mirror the standalone MCP path
-				// (mcp_scenario.go mcpRequestOutcome) so stepOutcome maps it to OutcomeError, keeping
-				// the 3-way request classification consistent across the standalone and chained paths.
-				st.Status = report.StatusError
-			}
-			return st
-		}}
+	return MCPStepWith(name, cl, tool, argsJSON, expect, save, MCPOptions{})
 }
 
 // bindExpect returns a per-execution COPY of expect with ${saved.<var>} bound into its content
@@ -605,8 +543,10 @@ func bindExpect(expect mcp.Expect, vars map[string]string) (mcp.Expect, error) {
 	return want, nil
 }
 
-// enforcedAssertions renders the content assertions the judge evaluated, with their BOUND values —
-// the text behind report.StepResult.AssertionsEnforced (test hat; the product hat keeps the count).
+// enforcedAssertions renders the content assertions the judge evaluated — the text behind
+// report.StepResult.AssertionsEnforced (test hat; the product hat keeps the count). Callers pass the
+// claims AS WRITTEN (`${saved.x}` unbound), never the judge's bound copy: a saved value is the SUT's
+// answer and must never be printed.
 // VR12-E8: renders EVERY assertion the judge evaluated, not the first of each kind, and names the
 // FIELD when one was declared. Before this, a step declaring two content assertions recorded one —
 // so `assertions_enforced` under-reported exactly as the judging did, and the report agreed with
@@ -618,7 +558,33 @@ func enforcedAssertions(want mcp.Expect) []string {
 		if a.Scoped() {
 			where = "field " + a.Field
 		}
+		if a.Extracted {
+			// a claim about the document `extract` cut out says so
+			where = "extracted " + where
+		}
+		if a.Every != "" {
+			// `every <array-path>` — each element of the array, the field read inside it.
+			where = "every element of " + a.Every + ", " + where
+			if a.Field == "." || a.Field == "" {
+				where = "every element of " + a.Every
+				if a.Extracted {
+					where = "extracted " + where
+				}
+			}
+		}
 		switch a.Op {
+		case mcp.BodyEQOp:
+			out = append(out, where+" == "+a.Value)
+		case mcp.BodyWithinOp:
+			out = append(out, where+" within "+a.Tol+" of "+a.Value)
+		case mcp.BodyNotContainsOp:
+			out = append(out, where+" does not contain "+strconv.Quote(a.Value))
+		case mcp.BodyNotMatchesOp:
+			out = append(out, where+" does not match /"+a.Value+"/")
+		case mcp.BodyNotEqualsOp:
+			out = append(out, where+" does not equal "+strconv.Quote(a.Value))
+		case mcp.BodyAbsentOp:
+			out = append(out, where+" is absent")
 		case mcp.BodyMatchesOp:
 			out = append(out, where+" matches /"+a.Value+"/")
 		case mcp.BodyExistsOp:

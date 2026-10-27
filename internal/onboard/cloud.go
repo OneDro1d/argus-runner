@@ -193,19 +193,32 @@ type EnrollmentResult struct {
 	ExpiresIn    int    `json:"expires_in"`
 }
 
-// MintEnrollment mints one enrollment credential for the caller's workspace (AC-D25). The token is
-// returned ONCE, exactly as the control plane returns it — cloud-enroll writes it straight to
-// DIR/<instance>.enrollment and never logs it.
-func (c *CloudClient) MintEnrollment(ctx context.Context, token string) (*EnrollmentResult, error) {
-	var out EnrollmentResult
-	code, err := c.postJSON(ctx, "/api/enrollments", []byte("{}"), token, &out)
+// MintEnrollment mints one enrollment credential (AC-D25). The token is returned ONCE, exactly as the
+// control plane returns it — cloud-enroll writes it straight to DIR/<instance>.enrollment and never logs it.
+//
+// workspace is empty for the owner's session (its own workspace; the body is the unchanged `{}`). A
+// USER-GLOBAL author PAT has no workspace of its own, so it names one of the owner's in the body;
+// the control plane checks the owner owns it.
+func (c *CloudClient) MintEnrollment(ctx context.Context, token, workspace string) (*EnrollmentResult, error) {
+	reqBody := []byte("{}")
+	if workspace != "" {
+		reqBody, _ = json.Marshal(map[string]string{"workspace": workspace})
+	}
+	var out struct {
+		EnrollmentResult
+		Error string `json:"error"`
+	}
+	code, err := c.postJSON(ctx, "/api/enrollments", reqBody, token, &out)
 	if err != nil {
 		return nil, err
 	}
 	if code != http.StatusOK || out.Token == "" {
+		if out.Error != "" {
+			return nil, &HTTPStatusError{Status: code, Msg: "mint enrollment: " + out.Error}
+		}
 		return nil, &HTTPStatusError{Status: code, Msg: fmt.Sprintf("mint enrollment failed: status %d", code)}
 	}
-	return &out, nil
+	return &out.EnrollmentResult, nil
 }
 
 // RevokeEnrollment retires an enrollment credential (`cloud-enroll --revoke <id>`, AC-D25) via
@@ -247,8 +260,10 @@ Signing into your Argus account.
 A browser window is opening; if it didn't, open this link yourself:
    %s
 
-Create your OneDroid account (first time here) or log in.
-That approves your device, saves your token, and continues onboarding automatically.
+Create your OneDroid account (first time here) or log in, then check that the code on the page
+matches the one in this terminal and click "Approve this device". That one click approves your
+device, saves your token, and continues onboarding automatically. If you did not start this
+sign-in yourself, click Deny.
 
 Waiting for you to sign in…
 
@@ -522,13 +537,20 @@ func (c *CloudClient) RegisterRouter(ctx context.Context, sessionToken, routerID
 func (c *CloudClient) TeardownInstance(ctx context.Context, sessionToken, instanceID string) (deleted bool, err error) {
 	body, _ := json.Marshal(map[string]string{"instance_id": instanceID})
 	var out struct {
-		Deleted bool `json:"deleted"`
+		Deleted bool   `json:"deleted"`
+		Error   string `json:"error"`
 	}
 	code, err := c.postJSON(ctx, "/api/instances/delete", body, sessionToken, &out)
 	if err != nil {
 		return false, err
 	}
 	if code != http.StatusOK {
+		// the server's own sentence, not a bare status (a user-global PAT saw
+		// "teardown failed: status 403" and nothing else). ⚠ "status <code>" stays in the text: teardown.sh
+		// matches `status 401` to name a rejected credential.
+		if out.Error != "" {
+			return false, &HTTPStatusError{Status: code, Msg: fmt.Sprintf("teardown failed: status %d: %s", code, out.Error)}
+		}
 		return false, &HTTPStatusError{Status: code, Msg: fmt.Sprintf("teardown failed: status %d", code)}
 	}
 	return out.Deleted, nil
@@ -710,7 +732,7 @@ func (c *CloudClient) VerifyToolsList(ctx context.Context, authorToken string) (
 
 // ── D1 (R9/R11): seed the cloud scenario catalog at onboarding ────────────────────────────────────
 // The cloud registry starts empty; the onboarder uploads the baked/BYO scenarios so the web Scenarios
-// page + author__list_scenarios show them from the first run.
+// page + author_list_scenarios show them from the first run.
 
 // ScenarioFile is one scenario to seed: its registry key (POSIX-relative path) + the markdown content.
 type ScenarioFile struct {
@@ -732,7 +754,7 @@ type SeedResult struct {
 	Failed  []SeedFailure `json:"failed,omitempty"`
 }
 
-// SeedScenarios uploads each scenario into the cloud catalog via the author__write_scenario MCP tool,
+// SeedScenarios uploads each scenario into the cloud catalog via the author_write_scenario MCP tool,
 // reusing ONE streamable-HTTP session (initialize once, then a tools/call per scenario). Each write
 // carries the registered instance_id + the registry path + the content; the CP validates-then-writes.
 // A per-scenario validation/tool failure is RECORDED (not fatal) so one bad scenario never blocks the
@@ -768,7 +790,7 @@ func (c *CloudClient) SeedScenarios(ctx context.Context, authorToken, instanceID
 	return res, nil
 }
 
-// parseWriteResult reads an author__write_scenario JSON-RPC response: (written, message-when-not). A
+// parseWriteResult reads an author_write_scenario JSON-RPC response: (written, message-when-not). A
 // top-level JSON-RPC error, an empty result, an isError tool result, or a payload with written:false
 // all count as NOT written — the returned message surfaces the CP's own validation text.
 func parseWriteResult(status int, body []byte) (bool, string) {
@@ -1056,12 +1078,37 @@ func (c *CloudClient) do(req *http.Request, out any) (int, error) {
 		var refusal struct {
 			Reason string `json:"reason"`
 		}
-		if json.Unmarshal(body, &refusal) == nil && refusal.Reason == BoundTokenReason {
-			return status, &HTTPStatusError{Status: status, Msg: BoundTokenMessage}
+		if json.Unmarshal(body, &refusal) == nil {
+			switch {
+			// the two routes that accept only the owner's session. Whatever the reason
+			// (an older control plane still says workspace_bound_token here), the true sentence is
+			// "sign in as the owner", never "or a token for all workspaces", which they refuse as well.
+			case refusal.Reason == SessionRequiredReason,
+				refusal.Reason == BoundTokenReason && sessionOnlyPath(req.URL.Path):
+				return status, &HTTPStatusError{Status: status, Msg: SessionRequiredMessage}
+			case refusal.Reason == BoundTokenReason:
+				return status, &HTTPStatusError{Status: status, Msg: BoundTokenMessage}
+			}
 		}
 	}
 	return status, nil
 }
+
+// sessionOnlyPath is true for the routes the control plane answers only to the owner's signed-in session
+// (POST /api/instances/delete, teardown; POST /api/workspaces/switch).
+func sessionOnlyPath(p string) bool {
+	return p == "/api/instances/delete" || p == "/api/workspaces/switch"
+}
+
+// SessionRequiredReason is the `reason` the control plane puts on a 403 for a personal access token (of
+// either kind) on a route that accepts only the owner's own session.
+const SessionRequiredReason = "session_required"
+
+// SessionRequiredMessage is what the operator is told when teardown or a workspace switch is handed a
+// personal access token. It must not suggest another token: these routes refuse every one.
+const SessionRequiredMessage = "the control plane refused this token: this action needs the owner's own sign-in " +
+	"(argus cloud-login, or the web), and a personal access token cannot do it, whether it is bound to one workspace " +
+	"or valid for all of them. Sign in as the owner and run it again"
 
 // BoundTokenReason is the `reason` the control plane puts on a 403 for a workspace-bound token.
 const BoundTokenReason = "workspace_bound_token"

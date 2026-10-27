@@ -45,8 +45,16 @@ properties:
           # VR-TH1: `api-key` and `mtls` REMOVED 2026-09-22 — neither had any implementation, and
           # neither COULD be honoured as declared: AuthTarget carries exactly one credential field
           # (bearer_token), so there is no header-name for an api-key and no cert/key pair for mtls.
-          type: { enum: [bearer, none] }
+          type: { enum: [bearer, clerk_session, none] }
           bearer_token: { type: string }
+          # clerk_session keys. The two *_env values are environment variable NAMES (the
+          # Secret exec-tokens carries the values), never the key itself. Enforced in internal/config
+          # (clerksession.go): both refs required with clerk_session, refused without it.
+          secret_key_env: { type: string, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+          user_id_env: { type: string, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+          jwt_template: { type: string, pattern: "^[A-Za-z0-9_.-]+$" }
+          api_url: { type: string }                      # default https://api.clerk.com
+          allow_clerk_session_on_prod: { type: boolean } # default false; the explicit production opt-in
       mcp:
         $ref: "#/$defs/mcp_target"
       mcp_targets:
@@ -65,13 +73,67 @@ properties:
   #
   # Unknown keys under rate_limit / signature / pause are refused at load, by name, in CODE — the
   # `additionalProperties: false` below documents that; it does not enforce it.
-  # T5.4: this SUT moves real money. Turns on the money-path guard, ENFORCED IN CODE at both doors
-  # (config.Validate and argus.runOneScenario, via scenario.MoneyGuardViolations): only plain HTTP
-  # GETs run; MCP, UI, AMQP and non-GET chain steps, any CLEANUP that runs something, and any path
-  # naming order/quote/swap/rebalance/claim are refused by name. Absent = false = nothing changes.
+  # T5.4, made the OWNER'S switch by: Argus is agnostic about what a system's checks may
+  # do. `money_handling: true` is a switch the system's owner sets in the owner's own config and it means
+  # "refuse what my money_writes.allow list does not name". ENFORCED IN CODE at every door (config.Validate,
+  # argus.runOneScenario and the control plane, via scenario.MoneyGuardViolations). With it on and no
+  # list, only plain HTTP GETs of paths naming no order/quote/swap/rebalance/claim run; every MCP tool
+  # call, bus op, db step, logs step, UI drive and any CLEANUP that runs something is refused by name.
+  # Absent = false = nothing is enforced.
   money_handling:
     type: boolean
-    description: "true = this SUT moves real money: every scenario must be a plain HTTP GET on a non-money path, with CLEANUP N/A. Refused otherwise, at validate time AND at run time."
+    description: "true = refuse what money_writes.allow does not name: with no list, every scenario must be a plain HTTP GET on a path naming no money word, with CLEANUP N/A. Refused otherwise, at validate time AND at run time."
+  # The owner's list (T5.4 follow-up 2026-09-26; every engine). VALID ONLY beside
+  # money_handling: true, never empty. Strict at load: an unknown or mistyped key is refused by name with
+  # its entry index (`money_writes.allow[3]: …`). An entry never widens: another path, queue, routing key,
+  # op or tool than the one named is refused as if unlisted. An amqp or mcp entry is ALL-OR-NOTHING for that
+  # op/tool: Argus cannot cap a bus publish or a tool call the way max_amount caps an HTTP body.
+  money_writes:
+    type: object
+    additionalProperties: false
+    required: [allow]
+    properties:
+      allow:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          additionalProperties: false
+          properties:
+            engine:
+              type: string
+              enum: [http, amqp, mcp, db, logs, cleanup, ui, fault]
+              description: "absent or http = an HTTP entry (method + path); amqp | mcp | db | logs | cleanup | ui | fault = one step kind. Fields of the other kinds are refused. cleanup, ui and fault need an execution plane that has them: an older one refuses the entry when the config loads."
+            # ── an HTTP entry ──
+            method: { type: string, description: "HTTP entry: required. GET is accepted (it exempts the money-word path rule for that route) and must be spends: false." }
+            path:
+              type: string
+              description: "HTTP entry: required, exact, starting with '/'. A whole segment may be a placeholder {name} (letters, digits, underscore) matching exactly one non-empty segment. No '*', no '?', no partial-segment placeholder (x{id}), no ${…}."
+            spends: { type: boolean, description: "HTTP entry: required. Refused on every other engine." }
+            amount_field: { type: string, description: "HTTP entry, spends: true: dotted path into the JSON request body." }
+            max_amount: { type: number, description: "HTTP entry, spends: true: per-request ceiling (> 0)." }
+            max_per_run: { type: integer, description: "HTTP entry, spends: true: spends per run, across every scenario (>= 1)." }
+            # ── an amqp entry ──
+            op:
+              type: string
+              enum: [publish, consume, listen, declare_queue, declare_exchange, queue_bind, queue_delete, queue_unbind, exchange_delete]
+              description: "amqp entry: required."
+            exchange: { type: string, description: "amqp: used by publish (\"\" = the default exchange), listen, queue_bind, declare_exchange, queue_unbind, exchange_delete. Compared exactly." }
+            routing_key: { type: string, description: "amqp: used by publish, listen, queue_bind and queue_unbind. Compared exactly." }
+            queue: { type: string, description: "amqp: used by consume, declare_queue, queue_bind, queue_delete, queue_unbind. Compared exactly." }
+            stream: { type: string, description: "amqp, op: listen only: allows a chain `bus` step bound by `stream: <this name>`, compared exactly. Never together with exchange or routing_key (ambiguous: refused). It never covers a bus step bound by exchange + routing_key, and an exchange + routing_key listen entry never covers a stream-bound step. Only the executor's config can resolve a stream, so the entry names the stream itself." }
+            # ── an mcp or db entry ──
+            target: { type: string, description: "mcp: a key of targets.mcp_targets (absent = targets.mcp). db: a key of targets.database_targets (absent = targets.database)." }
+            tool: { type: string, description: "mcp entry: required, the exact tool name." }
+            # ── a cleanup, ui or fault entry ──
+            form:
+              type: string
+              enum: [sql, bash]
+              description: "cleanup entry: required. Allows a runnable ## CLEANUP block of this form; listing the form allows whatever the block does (a sql block is any statement against targets.database, a bash block is sh -c in the executor). A scenario with blocks of both forms needs both entries; N/A needs none."
+            spec:
+              type: string
+              description: "ui entry: required. The spec path exactly as the ui scenario or the ui chain step names it (the TRIGGER payload `spec`, else the TRIGGER url). Exact match; a spec built at run time (${…}) never matches. The entry allows whatever that spec does in the browser: Argus cannot bound a browser drive. The generic read-only spec is tests/live/argus-declared.spec.ts. There is no app_url field: the page address can come from the runner's environment."
+            # engine: fault takes no other field: it allows fault chain steps, and fault_allowed_targets still bounds what they may touch.
   # S9: the operator's explicit mark of the broker targets an `AMQP Load` scenario may
   # drive. TOP-LEVEL, never under `targets` (an older executor decodes `targets` strictly and would refuse
   # a new key there; a top-level key is ignored by it). OFF BY DEFAULT: absent / empty / unlisted = every
@@ -197,6 +259,19 @@ $defs:
     additionalProperties: false
     properties:
       base_url: { type: string }
+      # a NAMED target's own auth (wins over targets.auth for scenarios that select it);
+      # refused on the plain targets.http slot. Same shape as targets.auth.
+      auth:
+        type: object
+        additionalProperties: false
+        properties:
+          type: { enum: [bearer, clerk_session, none] }
+          bearer_token: { type: string }
+          secret_key_env: { type: string, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+          user_id_env: { type: string, pattern: "^[A-Za-z_][A-Za-z0-9_]*$" }
+          jwt_template: { type: string, pattern: "^[A-Za-z0-9_.-]+$" }
+          api_url: { type: string }
+          allow_clerk_session_on_prod: { type: boolean }
   mcp_target:
     type: object
     additionalProperties: false
@@ -241,3 +316,31 @@ $defs:
       # and this block is additionalProperties:false, so the struct, the schema and the validator
       # must gain it together or a config carrying it is REFUSED rather than ignored.
       routing_keys: { type: object, description: "binding keys per exchange; `incoming` is the one the content tap binds with (V30-004)" }
+      # the `bus` chain step. None of these holds a credential. An executor older than the bus step refuses
+      # a config that carries them (targets keys are strict): upgrade the executor first, then the config.
+      vhost: { type: string, description: "optional; must equal the vhost the url names (checked when a bus step runs)" }
+      envelope:
+        type: object
+        additionalProperties: false
+        description: "where the run's correlation id travels in this broker's messages; a bus step against a target without envelope.correlation is an error (no default)"
+        properties:
+          correlation:
+            type: array
+            description: "sources in order; a message is correlated when ANY holds the id (equal, or starting with '<id>.'). Each entry sets exactly one of property, header, body."
+            items:
+              type: object
+              additionalProperties: false
+              properties:
+                property: { enum: [correlation_id, message_id, type, app_id, reply_to] }
+                header: { type: string }
+                body: { type: string, description: "dotted path into the decoded JSON body" }
+          list_payload: { type: boolean, description: "the body is a JSON list; each object element is a record (GoKit)" }
+      streams:
+        type: object
+        description: "named bindings a scenario's bus step selects with `stream`"
+        additionalProperties:
+          type: object
+          additionalProperties: false
+          properties:
+            exchange: { type: string }
+            routing_key: { type: string }

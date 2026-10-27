@@ -60,7 +60,7 @@ type Options struct {
 	StandAs          string            // the node Argus stands as; "" = the only actor
 	ControlArgs      map[string]string // "mcp-guardrail.tool" etc.
 	// Validate, when set, is run over EVERY generated check; a check it refuses fails the import. The CLI
-	// passes toolcore.ValidateAll — the validator author__validate_scenario uses.
+	// passes toolcore.ValidateAll — the validator author_validate_scenario uses.
 	Validate func(string) (*scenario.Scenario, []scenario.Error)
 }
 

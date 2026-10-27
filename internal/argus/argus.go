@@ -9,6 +9,7 @@
 package argus
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/csv"
@@ -16,6 +17,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -29,6 +32,7 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/config"
 	"github.com/OneDro1d/argus-runner/internal/httpload"
 	"github.com/OneDro1d/argus-runner/internal/mcp"
+	"github.com/OneDro1d/argus-runner/internal/memlimit"
 	"github.com/OneDro1d/argus-runner/internal/obsquery"
 	"github.com/OneDro1d/argus-runner/internal/report"
 	"github.com/OneDro1d/argus-runner/internal/scenario"
@@ -113,7 +117,7 @@ var brokerTapLayers = []string{"Message Flow"}
 const (
 	// tapTTLMillis is x-expires AND x-message-ttl on the tap. It is the GUARANTEE the queue goes
 	// away: the tearDown delete is the tidy path, and a killed run is reaped by the broker itself.
-	tapTTLMillis = 120000
+	tapTTLMillis = scenario.ListenQueueTTLMillis
 	// tapReadCap bounds one /get. A tap sees every message published to the exchange while it is
 	// bound, not only ours, so the read is capped and the evaluator says when it hit the cap —
 	// "no message for this id" and "the cap hid it" are different answers.
@@ -302,6 +306,12 @@ func DeriveProps(c *config.Config, s *scenario.Scenario, corr string) (map[strin
 	// There is no default. A scenario that declares no status is refused at authoring time
 	// (VR12-E6) and, if it predates the rule, is reported rather than guessed at — never judged
 	// against a number nobody wrote.
+	// a claim listing two codes (`status=200/201`) is REFUSED, never read as its first code.
+	// The run loop's preflight reports it before getting here; this is the second door for every other
+	// caller of DeriveProps, so no path wires expect.status from half of what the author wrote.
+	if serr := scenario.CheckDeclaredStatuses(s.RunnableExpect()); serr != nil {
+		return nil, serr
+	}
 	status1, status2 := extractDeclaredStatuses(s.RunnableExpect())
 	if status1 > 0 {
 		props["expect.status"] = strconv.Itoa(status1)
@@ -361,10 +371,22 @@ func DeriveProps(c *config.Config, s *scenario.Scenario, corr string) (map[strin
 		props["trigger.second"] = "true"
 	}
 	// auth header (config-driven; generic). Empty => template sends no usable token.
-	if c.Targets.Auth != nil && c.Targets.Auth.BearerToken != "" {
+	//
+	// the block is the selected NAMED target's own `auth:` when it has one, else targets.auth
+	// (config.HTTPAuthFor). A clerk_session block sends a freshly checked session token here — and, like the
+	// static token, only until the scenario's own Authorization line (below) replaces it, in which case no
+	// session is minted at all.
+	_, auth := c.HTTPAuthFor(sel)
+	if ckey, viaSession := clerkHeaderKey(c, sel, s); viaSession {
+		tok, serr := sessionBearer(c, ckey)
+		if serr != nil {
+			return nil, serr
+		}
+		props["auth.header"] = "Bearer " + tok
+	} else if auth != nil && auth.BearerToken != "" {
 		// V31-003 (the owner's "yes"): the config token gets the correlation id — and ONLY that. Its
 		// ${VAR} was already expanded when the config was loaded (config.go:746-752).
-		props["auth.header"] = "Bearer " + fillCorrelationID(c.Targets.Auth.BearerToken, corr)
+		props["auth.header"] = "Bearer " + fillCorrelationID(auth.BearerToken, corr)
 	}
 	// 4.8: a scenario can OVERRIDE the auth header from its TRIGGER (a wrong/absent token for a
 	// permissions test). Presence of the Authorization header wins over the config default — an
@@ -449,7 +471,7 @@ func DeriveProps(c *config.Config, s *scenario.Scenario, corr string) (map[strin
 			case len(dbx.Columns) > 0 || dbx.RowCount >= 0:
 				// per RUN, and prefixed so a SUT's broker grant can be written against
 				// `argus-tap-*` rather than a queue name nobody can predict.
-				props["mq.tap.queue"] = "argus-tap-" + corr
+				props["mq.tap.queue"] = scenario.ListenQueuePrefix + corr
 				props["mq.tap.ttl_ms"] = strconv.Itoa(tapTTLMillis)
 				props["mq.tap.read_cap"] = strconv.Itoa(tapReadCap)
 				if e, ok := mb.Exchanges["incoming"]; ok {
@@ -528,6 +550,20 @@ func DeriveProps(c *config.Config, s *scenario.Scenario, corr string) (map[strin
 		props["loki.saga_values"] = jsonStrings(jf.SagaValues)
 		props["loki.step_fields"] = jsonStrings(jf.StepNameFields)
 		props["loki.log_format"] = c.LogFormat()
+		// against an environment's SHARED Loki the template reads the configured Loki (the SAME
+		// url the executor's --loki carries under --obs adopt) with the cluster+namespace selector, not the
+		// per-instance `loki:3100` + `service` label. The verdict is unchanged: it is made on the parsed line in
+		// Groovy, and the selector only narrows which lines Loki returns. An instance with its own Loki sets
+		// neither prop, and the template then sends exactly the query it always sent.
+		if cluster := c.SharedLokiCluster(); cluster != "" {
+			src := SharedLogSourceFor(c, cluster, os.Getenv(sutNamespaceEnvVar), "")
+			sel, serr := src.Selector()
+			if serr != nil {
+				return nil, fmt.Errorf("saga-presence against the shared Loki: %w", serr)
+			}
+			props["loki.url"] = c.LokiURLConfigured()
+			props["loki.selector"] = sel
+		}
 	}
 	// FINDING-7: structured EXPECT for content layers so the template EVALUATES the
 	// scenario's column/count/negative assertions (not just a correlation_id substring).
@@ -793,10 +829,29 @@ func RunAllWithMode(c *config.Config, scenariosDir, resultsDir, project, layerFi
 
 // RunAllWithTarget is RunAllWithMode plus the run-level target of a comparison member (ARGUS-CMP-11).
 func RunAllWithTarget(c *config.Config, scenariosDir, resultsDir, project, layerFilter, tagFilter, idFilter, runID string, r Runner, ev obsquery.SandboxEvidence, mode, compareTarget string) (*RunResult, error) {
+	return RunAllWithTally(c, scenariosDir, resultsDir, project, layerFilter, tagFilter, idFilter, runID, r, ev, mode, compareTarget, nil)
+}
+
+// RunAllWithTally is RunAllWithTarget plus the run's live Tally: the counts so far, for the executor's mid-run
+// heartbeat. The loop reports each check ONCE, at the point its row is final for the loop (after the rate-limit
+// re-fire and the cleanup), and how many checks the run selected before the first one fires. tally nil is
+// RunAllWithTarget exactly: the hook only reads rows the loop already built and never changes one.
+func RunAllWithTally(c *config.Config, scenariosDir, resultsDir, project, layerFilter, tagFilter, idFilter, runID string, r Runner, ev obsquery.SandboxEvidence, mode, compareTarget string, tally *Tally) (*RunResult, error) {
+	return RunAllWithLogs(c, scenariosDir, resultsDir, project, layerFilter, tagFilter, idFilter, runID, r, ev, mode, compareTarget, tally, nil)
+}
+
+// RunAllWithLogs is RunAllWithTally plus the executor's own Loki, for a chain's `logs` step.
+// logs must be an UNTYPED nil when the executor has no Loki (toolcore.logsReaderFor): a nil *Loki inside the
+// interface would read as a reader.
+func RunAllWithLogs(c *config.Config, scenariosDir, resultsDir, project, layerFilter, tagFilter, idFilter, runID string, r Runner, ev obsquery.SandboxEvidence, mode, compareTarget string, tally *Tally, logs obsquery.LogsReader) (*RunResult, error) {
 	scns, err := collectScenarios(scenariosDir, layerFilter, tagFilter, idFilter)
 	if err != nil {
 		return nil, err
 	}
+	// a clerk_session block gets its sessions for THIS run, and they are revoked when it
+	// returns — normally, on an error, or by panic. The caller's config is not changed.
+	c, endSessions := attachSessions(c)
+	defer endSessions()
 	// 0700: the results dir holds JMeter's run logs and raw samples. The credentials no longer
 	// reach them (secret_props.go), but nothing JMeter writes there is meant for another user.
 	if err := os.MkdirAll(resultsDir, 0o700); err != nil {
@@ -839,6 +894,13 @@ func RunAllWithTarget(c *config.Config, scenariosDir, resultsDir, project, layer
 	// money_writes block; ledger is always safe to Reserve against even when allow is empty/nil.
 	moneyAllow := c.MoneyWriteAllowlist()
 	moneyLedger := &scenario.MoneySpendLedger{}
+	// Known before the first check fires: the whole-run refusals above have already returned, so this is the
+	// number the loop below will actually run. Counts only, like everything the tally holds.
+	tally.SetPlanned(len(scns))
+
+	// the precondition tier. Probed ONCE, here, before any check fires; nil (and so no cluster
+	// is touched, no row changes) when no selected check says `Depends on`.
+	pre := planPreconditions(context.Background(), c, scns)
 
 	for _, sf := range scns {
 		layer := PrimaryLayer(sf.s)
@@ -849,17 +911,34 @@ func RunAllWithTarget(c *config.Config, scenariosDir, resultsDir, project, layer
 		// scenario runs and closes after its throttle re-fire and BEFORE its cleanup ( a cleanup
 		// talks to the database, not to the agent). A pacer pause inside a re-fire stays inside it.
 		windowStart := time.Now()
-		res := runOneScenario(c, sf, corr, resultsDir, r, moneyAllow, moneyLedger, mode, oc)
+		// a check whose precondition is absent (not_applicable) or whose probe is broken (error)
+		// is NOT executed: nothing is fired at the system under test.
+		res, notExecuted := pre.rowFor(sf, corr)
+		if !notExecuted {
+			res = runOneScenarioWithLogs(c, sf, corr, resultsDir, r, moneyAllow, moneyLedger, mode, oc, logs)
+		}
 		// The SUT said "slow down". Pause the run HERE — between scenarios, outside every
 		// scenario's own timeout clock — and re-fire this one scenario once.
 		//
 		// ⛔ AC-D18b: never a chain carrying an amqp step (mayRefire) — a re-fire would re-publish into
 		// a real agent's inbox. That row keeps the not-measured status it already has.
-		if res.RateLimited && mayRefire(sf.s) {
+		if !notExecuted && res.RateLimited && mayRefire(sf.s) {
+			// ⛔ A SCENARIO WHOSE ANY ATTEMPT FIRED IS NEVER "REFUSED BEFORE FIRING". The first
+			// attempt came back rate-limited, so it was sent (a row refused before firing is never RateLimited).
+			// The re-fire can be refused at a run door (the money ledger's max_per_run reserved the first attempt's
+			// spend), and its row then carries the mark: the cleanup of a scenario that DID send a request would be
+			// skipped and recorded "refused before firing". The mark is cleared on the re-fire's row.
+			firstAttemptFired := !res.RefusedBeforeFiring
 			res = p.handle(res, func() report.ScenarioResult {
 				oc.clearCheck(sf.s.ID) // compare mode: the first attempt's stored files go before the second writes (nil-safe, a no-op elsewhere)
-				return runOneScenario(c, sf, corr, resultsDir, r, moneyAllow, moneyLedger, mode, oc)
+				return runOneScenarioWithLogs(c, sf, corr, resultsDir, r, moneyAllow, moneyLedger, mode, oc, logs)
 			})
+			if firstAttemptFired {
+				res.RefusedBeforeFiring = false
+			}
+		} else if !notExecuted && res.RateLimited && chainHasBusStep(sf.s) {
+			// not re-fired (mayRefire), and the row says so.
+			noteBusNotRetried(&res)
 		}
 		res.WindowStart, res.WindowEnd = windowStart, time.Now()
 		// ── VR12-C2 (V29-015) — CLEANUP RUNS HERE, ON EVERY PATH ─────────────────────────────────
@@ -871,7 +950,17 @@ func RunAllWithTarget(c *config.Config, scenariosDir, resultsDir, project, layer
 		// ⛔ THE RESULT IS ATTACHED AND NEVER CONSULTED. `res.Status` is already decided above and
 		// nothing below reads `res.Cleanup`: a green cleanup cannot rescue a failed scenario and a
 		// red one cannot fail a passing one. Guarded by TestCleanup_NeverChangesTheVerdict.
-		res.Cleanup = RunCleanup(c, sf.s, corr, r)
+		//
+		// ⛔ — EXCEPT A SCENARIO REFUSED BEFORE FIRING. It fired nothing, so it created nothing
+		// to clean up, and the refusal's own comment promises "no CLEANUP": a `## CLEANUP` block is a
+		// sql / bash block that writes, and running one for a scenario the money guard (or the read-only
+		// VERIFY rule) refused was a way past the guard for a file that skipped the validator. The blocks are
+		// RECORDED as not run, with the reason (refusedCleanup), never skipped silently.
+		if res.RefusedBeforeFiring {
+			res.Cleanup = refusedCleanup(sf.s)
+		} else {
+			res.Cleanup = RunCleanup(c, sf.s, corr, r)
+		}
 
 		// VR12-E13 — TIER 3. Attached at the ONE point every scenario's row passes through, after the
 		// throttle retry so it rides the row that is actually reported.
@@ -882,6 +971,10 @@ func RunAllWithTarget(c *config.Config, scenariosDir, resultsDir, project, layer
 		// than inside any executor's success path.
 		res.Unexecuted = UnexecutedAfterRun(sf.s, res)
 		byLayer[layer] = append(byLayer[layer], res)
+		// The ONE point a check is reported to the live tally: the row is final for this loop (re-fire and
+		// cleanup done), once per check, so a re-fired check is counted once, with the row that is reported.
+		// PROVISIONAL: applySurvivalPlane below can still move a passed row to degraded when the run ends.
+		tally.Finished(res)
 	}
 
 	// AC-11: the survival-plane pass runs BEFORE summarize (it can move a scenario from `passed` to
@@ -891,6 +984,9 @@ func RunAllWithTarget(c *config.Config, scenariosDir, resultsDir, project, layer
 	// survival plane and before summarize, and it never changes a status, so the tallies are unaffected.
 	applySandboxPolicy(c, byLayer, ev)
 	rep := summarize(project, byLayer)
+	if pre != nil {
+		rep.Preconditions = pre.ordered
+	}
 	// P3 #23: capture the SUT namespace's environment for a load run — see environment.go. nil on
 	// any run with no declared LOAD profile, exactly like the per-scenario Load field it accompanies.
 	rep.Environment = captureEnvironmentFor(scns, mode, c.TestTargets)
@@ -910,8 +1006,32 @@ func RunAllWithTarget(c *config.Config, scenariosDir, resultsDir, project, layer
 // before firing it.
 const MoneyGuardRefusal = "refused before firing: this SUT is declared money_handling, and "
 
+// VerifySQLRefusal prefixes the observed text of a scenario whose `## VERIFY` query broke a read-only
+// rule (scenario.VerifySQLReadOnlyViolations) and was refused before firing. The rule's own
+// sentences follow it, joined by "; ".
+const VerifySQLRefusal = "refused before firing: its ## VERIFY query is not a single read-only SELECT: "
+
+// refusedBeforeFiring marks a row as one a run-door refusal returned before anything was fired (the run
+// loop reads the mark to skip the scenario's CLEANUP). The mark is runtime-only.
+func refusedBeforeFiring(r report.ScenarioResult) report.ScenarioResult {
+	r.RefusedBeforeFiring = true
+	return r
+}
+
 func runOneScenario(c *config.Config, sf scenarioFile, corr, resultsDir string, r Runner,
 	moneyAllow scenario.MoneyWriteAllowlist, moneyLedger *scenario.MoneySpendLedger, mode string, oc *outputCtx) report.ScenarioResult {
+	return runOneScenarioWithLogs(c, sf, corr, resultsDir, r, moneyAllow, moneyLedger, mode, oc, nil)
+}
+
+// runnerChosen is called by the dispatch with the runner kind it is about to hand the scenario to. It is a
+// no-op in production; a test sets it to observe the choice (the guard-vs-dispatch table test).
+var runnerChosen = func(scenario.RunnerKind) {}
+
+// runOneScenarioWithLogs is runOneScenario plus the executor's Loki reader for a chain's logs step;
+// nil = this executor has no Loki, and a chain carrying a logs step is refused by name at
+// preflight. The reader is used by nothing else.
+func runOneScenarioWithLogs(c *config.Config, sf scenarioFile, corr, resultsDir string, r Runner,
+	moneyAllow scenario.MoneyWriteAllowlist, moneyLedger *scenario.MoneySpendLedger, mode string, oc *outputCtx, logs obsquery.LogsReader) report.ScenarioResult {
 	layer := PrimaryLayer(sf.s)
 	{
 		// ⛔ T5.4 — THE MONEY-PATH GUARD, AT THE LAST DOOR. validate-config refuses these scenarios
@@ -920,11 +1040,25 @@ func runOneScenario(c *config.Config, sf scenarioFile, corr, resultsDir string, 
 		// no SUT call, no CLEANUP. `error`, never `failed` — it says nothing about the SUT.
 		if c.MoneyHandling {
 			if v := scenario.MoneyGuardViolations(sf.s, moneyAllow); len(v) > 0 {
-				return report.ScenarioResult{
+				return refusedBeforeFiring(report.ScenarioResult{
 					ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
 					Failure: &report.Failure{Observed: MoneyGuardRefusal + strings.Join(v, "; ")},
-				}
+				})
 			}
+		}
+		// ⛔ — THE SINGLE-SELECT RULE FOR `## VERIFY` SQL, AT THE LAST DOOR. The author path
+		// (scenario.Validate) applies scenario.VerifySQLErrors already; a run loads scenarios with Parse, so a
+		// file that never passed the validator (a catalog seeded earlier, a hand-edited kit) would hand
+		// whatever SQL it holds to the JDBC sampler. ONLY the read-only rules (one statement, begins with
+		// SELECT/WITH, no mutating keyword): the same implementation, filtered, so the door never refuses a
+		// query the author path accepts, and a live check written before a MEASURING rule existed keeps
+		// running. For EVERY instance: it keeps Argus read-only against a database, it is not a money rule.
+		// Nothing is fired: no SUT call, no JDBC query, no CLEANUP. `error`, never `failed`.
+		if v := scenario.VerifySQLReadOnlyViolations(sf.s); len(v) > 0 {
+			return refusedBeforeFiring(report.ScenarioResult{
+				ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
+				Failure: &report.Failure{Observed: VerifySQLRefusal + strings.Join(v, "; ")},
+			})
 		}
 		// VR10-S3: a **Target** word that names nothing usable is refused HERE, for every runner
 		// path, before anything is fired — and never replaced by the plain slot (that silent
@@ -961,7 +1095,7 @@ func runOneScenario(c *config.Config, sf scenarioFile, corr, resultsDir string, 
 			return *refused
 		}
 
-		// ARGUS-CMP-3 (, design 11.2 item 4) — A `## COMPARE` THIS EXECUTOR CANNOT HONOUR IS
+		// ARGUS-CMP-3 (design 11.2 item 4) — A `## COMPARE` THIS EXECUTOR CANNOT HONOUR IS
 		// NOT RUN, AT THE SAME LAST DOOR. In mode `compare` only: a section with a problem, a key this
 		// executor does not know, or a key from a newer release is `error` "refused before firing", and
 		// nothing is fired. In every other mode the section is inert and the check runs exactly as before.
@@ -990,20 +1124,26 @@ func runOneScenario(c *config.Config, sf scenarioFile, corr, resultsDir string, 
 		// so a file with neither gets R10's, which is the more basic fault.
 		if len(sf.s.RunnableExpect()) == 0 &&
 			!(contains(sf.s.Tags, UITag) && scenario.UINamesItsOwnSpec(sf.s)) {
-			return report.ScenarioResult{
+			return refusedBeforeFiring(report.ScenarioResult{
 				ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
 				Failure: &report.Failure{Observed: AssertsNothingObserved},
-			}
+			})
 		}
 
 		// AMQP Load: one JMeter run per step of the declared ramp. Past S9's door above;
 		// it never reaches DeriveProps (an AMQP Load scenario has no HTTP request to derive).
-		if layer == scenario.AMQPLoadLayer {
+		//
+		// ⛔ WHICH RUNNER IS scenario.RunnerKindOf's ANSWER, and the money guard asks the same function: the guard
+		// judges the scenario AS the runner it gets here. Order: AMQP Load, HTTP Load, chain, mcp,
+		// ui, else JMeter by layer. runnerChosen is a test seam (a no-op) that names the choice.
+		kind := scenario.RunnerKindOf(sf.s)
+		runnerChosen(kind)
+		if kind == scenario.RunnerAMQPLoad {
 			return runAMQPLoad(c, sf.s, corr, resultsDir, r, mode)
 		}
 		// HTTP Load: one JMeter run per step of the declared ramp, stopping at the first step
 		// that is not comfortable. Past its door above.
-		if layer == scenario.HTTPLoadLayer {
+		if kind == scenario.RunnerHTTPLoad {
 			return runHTTPLoad(c, sf.s, corr, resultsDir, r, mode)
 		}
 
@@ -1012,18 +1152,19 @@ func runOneScenario(c *config.Config, sf scenarioFile, corr, resultsDir string, 
 		// (collected, correlated, reported, tag/layer-selectable) as any scenario.
 		// chain scenario: multi-step (MCP→…→UI) sequenced in Go, ONE cid threaded across
 		// all steps, per-step status + partial-failure on a mid-chain break (D3.6 / UC-32/63).
-		if contains(sf.s.Tags, ChainTag) {
-			return runChainScenarioWithOutputs(c, sf.s, corr, ui.VendorDir, moneyAllow, moneyLedger, oc)
+		if kind == scenario.RunnerChain {
+			return runChainScenarioWithFaults(c, sf.s, corr, ui.VendorDir, moneyAllow, moneyLedger, oc,
+				faultEnv{JournalDir: FaultJournalDir(resultsDir), Logs: logs})
 		}
 
-		if contains(sf.s.Tags, MCPTag) {
+		if kind == scenario.RunnerMCP {
 			return oc.withNotSupported(sf.s, runMCPScenario(c, sf.s, corr))
 		}
 
 		// ui scenario: runner-driven VENDORED Playwright (D4 / UC-84). The runner spawns
 		// the OS process, maps exit+artifact to a verdict (passed / SUT-failed / exec-error),
 		// and rides the SAME pipeline (correlated, reported, tag/layer-selectable). NO JMeter.
-		if contains(sf.s.Tags, UITag) {
+		if kind == scenario.RunnerUI {
 			return oc.withNotSupported(sf.s, runUIScenario(sf.s, corr, ui.VendorDir))
 		}
 
@@ -1065,6 +1206,18 @@ func runOneScenario(c *config.Config, sf scenarioFile, corr, resultsDir string, 
 			}
 		}
 
+		// A STATUS CLAIM THAT LISTS TWO CODES IS REPORTED, NEVER JUDGED ON ITS FIRST.
+		// `status=200/201` used to wire expect.status=200 and fire; the 201 was dropped with no word. The
+		// validator refuses it at write time (scenario.Validate); this is the executor's door for a file
+		// that predates the rule. `error`, not `failed`: nothing about the SUT was measured, and nothing is
+		// fired. Same reader as the validator (scenario.CheckDeclaredStatuses), so the two cannot disagree.
+		if serr := scenario.CheckDeclaredStatuses(sf.s.RunnableExpect()); serr != nil {
+			return report.ScenarioResult{
+				ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
+				Failure: &report.Failure{Observed: serr.Error() + " — preflight"},
+			}
+		}
+
 		props, perr := DeriveProps(c, sf.s, corr)
 		if errors.Is(perr, ErrNoRoutingKey) {
 			// not measured, and the gap is the config's: `error`, never `failed` (only `failed` blames the SUT)
@@ -1072,6 +1225,9 @@ func runOneScenario(c *config.Config, sf scenarioFile, corr, resultsDir string, 
 				ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
 				Failure: &report.Failure{Observed: NoRoutingKeyRefusal + " — preflight"},
 			}
+		}
+		if res, ok := sessionRefusal(sf.s, corr, perr); ok {
+			return res
 		}
 		if perr != nil {
 			return targetRefused(sf.s, corr, perr)
@@ -1084,15 +1240,34 @@ func runOneScenario(c *config.Config, sf scenarioFile, corr, resultsDir string, 
 		// against reality rather than against a literal in the file. Nothing is fired on a refusal:
 		// `error`, never `failed` — same contract as the structural guard above.
 		if c.MoneyHandling {
-			if entry := moneyAllow.Match(props["trigger.method"], props["trigger.path"]); entry != nil && entry.Spends {
+			// THE RESOLVED REQUEST IS WHAT IS ALLOWED, here too. A plain TRIGGER binds nothing
+			// from a response, but the request JMeter sends is props, not the file: when an entry is what let
+			// the file through, the method and path in props must be covered by the same list and satisfy the
+			// same rule (scenario.ResolvedRequestViolations), or nothing is fired. A file no entry covers was
+			// judged on its own text and nothing differs but the correlation id, so it is not re-judged.
+			triggerURL, uerr := url.Parse(props["trigger.path"])
+			if uerr != nil {
+				triggerURL = nil // ResolvedRequestViolations refuses a nil url; MatchResolved matches nothing on it
+			}
+			if moneyAllow.Match(sf.s.Trigger.Method, sf.s.Trigger.URL) != nil {
+				if v := scenario.ResolvedRequestViolations("the TRIGGER", props["trigger.method"], sf.s.Trigger.URL, triggerURL, moneyAllow); len(v) > 0 {
+					return refusedBeforeFiring(report.ScenarioResult{ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
+						Failure: &report.Failure{Observed: MoneyGuardRefusal + strings.Join(v, "; ")}})
+				}
+			}
+			var entry *scenario.MoneyWriteAllow
+			if triggerURL != nil {
+				entry = moneyAllow.MatchResolved(props["trigger.method"], triggerURL)
+			}
+			if entry != nil && entry.Spends {
 				if msg := scenario.EvaluateSpendAmount(entry, props["trigger.payload"]); msg != "" {
-					return report.ScenarioResult{ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
-						Failure: &report.Failure{Observed: MoneyGuardRefusal + "its declared money_writes spend limit refused it: " + msg}}
+					return refusedBeforeFiring(report.ScenarioResult{ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
+						Failure: &report.Failure{Observed: MoneyGuardRefusal + "its declared money_writes spend limit refused it: " + msg}})
 				}
 				if ok, _ := moneyLedger.Reserve(entry); !ok {
-					return report.ScenarioResult{ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
+					return refusedBeforeFiring(report.ScenarioResult{ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
 						Failure: &report.Failure{Observed: fmt.Sprintf("%sits declared money_writes spend limit refused it: %s %s already reached its max_per_run (%d) for this run",
-							MoneyGuardRefusal, entry.Method, entry.Path, entry.MaxPerRun)}}
+							MoneyGuardRefusal, entry.Method, entry.Path, entry.MaxPerRun)}})
 				}
 			}
 		}
@@ -1141,6 +1316,12 @@ func runOneScenario(c *config.Config, sf scenarioFile, corr, resultsDir string, 
 		// In EVERY layer a declared `status=` is asserted FIRST, against the SUT-trigger
 		// sample(s): a content layer whose trigger answered the wrong code is `failed` before
 		// its content assertion is consulted (see the content case below).
+		// a .jtl with more rows than the executor holds in memory is never judged on a prefix.
+		// The rig ran, so this is `error` (not a SUT `failed`) with the words, and nothing is read.
+		if runErr == nil && jtlOverCap(jtl) {
+			return report.ScenarioResult{ID: sf.s.ID, CorrelationID: corr, Status: report.StatusError,
+				Failure: &report.Failure{Observed: jtlTooLargeObserved(jtl)}, Outputs: recorded}
+		}
 		codes, labels, tsMs, elapsedPerRow, durMs, msgs := readJTLCodesElapsed(jtl)
 		res := report.ScenarioResult{ID: sf.s.ID, CorrelationID: corr, DurationMs: durMs, Status: "failed", Outputs: recorded}
 		// Test-requests panel (r3, 1a′): record each SUT-trigger sample as a timestamped
@@ -1357,6 +1538,9 @@ func runOneScenario(c *config.Config, sf scenarioFile, corr, resultsDir string, 
 				res.Load.P95Ms, res.Load.TargetP95Ms, res.Load.ErrorRate, res.Load.MaxErrorRate)
 			if len(res.Load.Errors) > 0 {
 				// say WHY requests got no answer, not only how many. Already scrubbed.
+				// ⛔ AC-F2.2: this quotes the load tool's message (Reason), which can quote what the app sent. It is
+				// safe ONLY because failure.observed is in limitedNotSent (internal/runner/limitedreport.go) and the
+				// results push carries no Observed (internal/runner/mapper.go). Never add failure.observed to the keep list.
 				observed += fmt.Sprintf("; top transport failure: %s (%d of %d requests)",
 					res.Load.Errors[0].Reason, res.Load.Errors[0].Count, res.Load.Samples)
 			}
@@ -1422,41 +1606,131 @@ const maxObservedStatusCodes = 16
 // responseMessage text (readJTLCodesElapsed turns a non-numeric code into 0 and drops it), for the load
 // record's transport-failure reasons and timeline. The verification probes are excluded, as everywhere.
 func readJTLLoadSamples(jtlPath, scenarioID string) []report.LoadSample {
+	var out []report.LoadSample
+	n, err := eachJTLRow(jtlPath, maxJTLSamples(), func(get func(string) string) {
+		if isVerifySample(get("label"), scenarioID) {
+			return
+		}
+		s := report.LoadSample{Code: keepJTLField(get("responseCode")), Message: keepJTLField(get("responseMessage"))}
+		// A field that does not parse reads as 0, and the row is KEPT: it still counts in the errors and the
+		// percentiles. StartMs 0 means "no start time", which report.LoadTimelineFrom documents by leaving
+		// the sample out of the timeline only; a negative elapsed is clamped there too.
+		s.ElapsedMs, _ = strconv.Atoi(get("elapsed"))
+		s.StartMs, _ = strconv.ParseInt(get("timeStamp"), 10, 64)
+		out = append(out, s)
+	})
+	if err != nil || n < 1 {
+		return nil // unreadable, empty or over maxJTLSamples (the run loop has already refused that, honestly)
+	}
+	return out
+}
+
+// maxJTLSamples is the most .jtl data rows the per-sample readers below will hold. The run
+// loop counts the rows first (jtlOverCap) and ends a scenario whose .jtl is larger `error` with
+// jtlTooLargeObserved, so these readers are never asked for more; if one is, it returns nothing, which every
+// caller already treats as "no usable result" and never as a pass.
+//
+// WHY 1,000,000 AT THE DEFAULT: a plain `## LOAD` check keeps about 56 bytes per sample in readJTLCodesElapsed's
+// five index-aligned slices, plus 16 in the report's request list, so a million samples is about 100 MB. Before
+// the cap the whole file was read into a [][]string (about 20 strings per row) three times over, which is what
+// held the executor near 1 GB. The HTTP and AMQP ramps keep more per sample and have their own, lower cap
+// (amqpload.JTLRowsFloor).
+//
+// THE CAP GROWS WITH THE MEMORY THE EXECUTOR IS GIVEN: the floor below is the cap at the default
+// 1536Mi container, below it, or when no limit can be read (exactly as before), and memlimit.Budget.Scale raises
+// it in proportion to the limit, so a 4Gi executor admits 2,666,666. A fixed cap would have ended as `error` two
+// real runs that PASSED on shop-dev-aks (1,662,518 and 1,572,671 samples, limit 4Gi), with advice (more memory)
+// that could not help. Which limit: memlimit.Read (the smaller of the cgroup limit and what GOMEMLIMIT implies).
+var jtlSampleFloor = 1_000_000 // a var only so a test can lower it
+
+// jtlMemOptions is where the caps learn the memory the process is given; the zero value reads the real
+// container. A var only so a test can pin a fake one.
+var jtlMemOptions memlimit.Options
+
+// jtlMemory is the memory budget the caps are scaled on (internal/memlimit is the one place that reads cgroups).
+func jtlMemory() memlimit.Budget { return memlimit.Read(jtlMemOptions) }
+
+// maxJTLSamples is the cap in force now: jtlSampleFloor scaled by the memory the process is given.
+func maxJTLSamples() int { return jtlMemory().Scale(jtlSampleFloor) }
+
+// jtlTooLargeObserved is the scenario's words when its .jtl is over the cap. Reality only (VR-C8): the cap that was
+// hit, the samples the file holds (counted without keeping any) and the memory limit the cap was derived from.
+func jtlTooLargeObserved(jtlPath string) string {
+	limit := maxJTLSamples() // the SAME function jtlOverCap used: the words can never name a different cap
+	seen := "more than " + strconv.Itoa(limit)
+	if n, err := eachJTLRow(jtlPath, math.MaxInt, func(func(string) string) {}); err == nil {
+		seen = strconv.Itoa(n)
+	} else if n > limit {
+		seen = "at least " + strconv.Itoa(n)
+	}
+	return fmt.Sprintf("the load run wrote %s samples, more than the cap of %d samples the executor holds in memory to judge a run at its memory limit (%s); "+
+		"the scenario was NOT judged. The cap grows with that limit (%d samples per %d MiB): give the executor more memory (onboard with --executor-memory), "+
+		"or lower the scenario's users, rate or duration", seen, limit, jtlMemory().Basis, jtlSampleFloor, memlimit.DefaultContainerBytes>>20)
+}
+
+// eachJTLRow streams a JMeter .jtl (CSV, columns read by header NAME) and calls fn with a getter for each data
+// row, holding one row at a time. It stops with an error once the file has more than max data rows. It returns
+// the number of data rows seen. A missing file or a CSV error is an error; a file with only a header is 0, nil.
+// Strings fn keeps must go through keepJTLField (a field is a substring of a per-record string).
+func eachJTLRow(jtlPath string, max int, fn func(get func(string) string)) (int, error) {
 	f, err := os.Open(jtlPath)
 	if err != nil {
-		return nil
+		return 0, err
 	}
 	defer f.Close()
 	rd := csv.NewReader(f)
 	rd.FieldsPerRecord = -1
-	rows, err := rd.ReadAll()
-	if err != nil || len(rows) < 2 {
-		return nil
+	rd.ReuseRecord = true
+	first, err := rd.Read()
+	if err == io.EOF {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
 	}
 	head := map[string]int{}
-	for i, h := range rows[0] {
+	for i, h := range first {
 		head[h] = i
 	}
-	get := func(row []string, key string) string {
+	n := 0
+	var row []string
+	get := func(key string) string {
 		if i, ok := head[key]; ok && i < len(row) {
 			return row[i]
 		}
 		return ""
 	}
-	var out []report.LoadSample
-	for _, row := range rows[1:] {
-		if isVerifySample(get(row, "label"), scenarioID) {
-			continue
+	for {
+		rec, err := rd.Read()
+		if err == io.EOF {
+			return n, nil
 		}
-		s := report.LoadSample{Code: get(row, "responseCode"), Message: get(row, "responseMessage")}
-		// A field that does not parse reads as 0, and the row is KEPT: it still counts in the errors and the
-		// percentiles. StartMs 0 means "no start time", which report.LoadTimelineFrom documents by leaving
-		// the sample out of the timeline only; a negative elapsed is clamped there too.
-		s.ElapsedMs, _ = strconv.Atoi(get(row, "elapsed"))
-		s.StartMs, _ = strconv.ParseInt(get(row, "timeStamp"), 10, 64)
-		out = append(out, s)
+		if err != nil {
+			return n, err
+		}
+		if n >= max {
+			return n, errJTLOverCap
+		}
+		n++
+		row = rec
+		fn(get)
 	}
-	return out
+}
+
+var errJTLOverCap = errors.New("the .jtl has more rows than the executor holds")
+
+// keepJTLField copies a field out of the reader's per-record string so a kept value does not pin its record.
+func keepJTLField(s string) string {
+	if s == "" {
+		return ""
+	}
+	return strings.Clone(s)
+}
+
+// jtlOverCap reports whether the .jtl has more than maxJTLSamples data rows, counting them one at a time.
+func jtlOverCap(jtlPath string) bool {
+	_, err := eachJTLRow(jtlPath, maxJTLSamples(), func(func(string) string) {})
+	return errors.Is(err, errJTLOverCap)
 }
 
 // sutTriggerElapsed is classifyRequestSamples's verify-exclusion (AC-11), applied to elapsed times
@@ -1478,7 +1752,9 @@ func sutTriggerElapsed(codes []int, labels []string, elapsedPerRow []int, scenar
 
 // summarize builds the report (layers + counts) from the per-layer results.
 func summarize(project string, byLayer map[string][]report.ScenarioResult) *report.Report {
-	rep := &report.Report{Project: project, Mode: "ci"}
+	// ClaimsAsWritten (AC-F2): this code writes every claim text as the author wrote it (${saved.<var>} unbound), so
+	// the report says so; get_limited_report refuses a report without the stamp (an older executor's).
+	rep := &report.Report{Project: project, Mode: "ci", ClaimsAsWritten: true}
 	var layerNames []string
 	for l := range byLayer {
 		layerNames = append(layerNames, l)
@@ -1488,28 +1764,8 @@ func summarize(project string, byLayer map[string][]report.ScenarioResult) *repo
 		scs := byLayer[l]
 		rep.Layers = append(rep.Layers, report.Layer{Layer: layerDir[l], Scenarios: scs})
 		for _, s := range scs {
-			rep.Summary.Total++
-			switch s.Status {
-			case "passed":
-				rep.Summary.Passed++
-			case "failed":
-				rep.Summary.Failed++
-			case report.StatusError:
-				rep.Summary.Errored++ // execution/harness failure — non-green, DISTINCT from failed (UC-62)
-				if s.RateLimited {
-					// VR10-R1: "rate-limited" is a REASON INSIDE errored (owner D4: no fourth
-					// status), so it is counted here and never in Passed/Failed — a pass rate is
-					// over MEASURED scenarios only.
-					rep.Summary.RateLimitedScenarios++
-				}
-			case report.StatusDegraded:
-				// AC-11: DEGRADED is counted on its own — never in Passed (its assertions did not
-				// simply pass unremarked) and never in Failed/Errored (nothing was wrong or
-				// unmeasured). A pass rate stays a pass rate; a DEGRADED run is visible separately.
-				rep.Summary.Degraded++
-			default:
-				rep.Summary.Skipped++
-			}
+			rep.Faults = append(rep.Faults, s.Faults...) // nil (and omitted) when no scenario applied one
+			countScenario(&rep.Summary, s)               // the status-to-count mapping, shared with the live Tally (tally.go)
 		}
 	}
 	return rep
@@ -1571,7 +1827,10 @@ func allNeedJMeter(scns []scenarioFile) bool {
 		return false
 	}
 	for _, sf := range scns {
-		if contains(sf.s.Tags, MCPTag) || contains(sf.s.Tags, UITag) || contains(sf.s.Tags, ChainTag) {
+		// the runner the dispatch will give it (scenario.RunnerKindOf): a chain/mcp/ui scenario on a load layer
+		// is a JMeter load run, and a "ui, chain" file is a chain either way.
+		switch scenario.RunnerKindOf(sf.s) {
+		case scenario.RunnerChain, scenario.RunnerMCP, scenario.RunnerUI:
 			return false
 		}
 	}
@@ -1616,29 +1875,9 @@ func readJTLCodes(jtlPath string) (codes []int, labels []string, tsMs []int64, e
 // failure needs the message — both carry a non-numeric responseCode, parsed as 0 below). All
 // slices are index-aligned.
 func readJTLCodesElapsed(jtlPath string) (codes []int, labels []string, tsMs []int64, elapsedPerRow []int, elapsedMs int, msgs []string) {
-	f, err := os.Open(jtlPath)
-	if err != nil {
-		return nil, nil, nil, nil, 0, nil
-	}
-	defer f.Close()
-	rd := csv.NewReader(f)
-	rd.FieldsPerRecord = -1
-	rows, err := rd.ReadAll()
-	if err != nil || len(rows) < 2 {
-		return nil, nil, nil, nil, 0, nil
-	}
-	head := map[string]int{}
-	for i, h := range rows[0] {
-		head[h] = i
-	}
-	get := func(row []string, key string) string {
-		if i, ok := head[key]; ok && i < len(row) {
-			return row[i]
-		}
-		return ""
-	}
-	for _, row := range rows[1:] {
-		e, eerr := strconv.Atoi(get(row, "elapsed"))
+	labelSeen := map[string]string{} // labels repeat on every row: one copy of each
+	n, err := eachJTLRow(jtlPath, maxJTLSamples(), func(get func(string) string) {
+		e, eerr := strconv.Atoi(get("elapsed"))
 		if eerr != nil {
 			e = 0
 		}
@@ -1646,18 +1885,32 @@ func readJTLCodesElapsed(jtlPath string) (codes []int, labels []string, tsMs []i
 			elapsedMs = e
 		}
 		elapsedPerRow = append(elapsedPerRow, e)
-		labels = append(labels, get(row, "label"))
-		msgs = append(msgs, get(row, "responseMessage"))
-		if n, err := strconv.Atoi(get(row, "responseCode")); err == nil {
+		l := get("label")
+		if c, ok := labelSeen[l]; ok {
+			l = c
+		} else {
+			l = keepJTLField(l)
+			if len(labelSeen) < 1024 {
+				labelSeen[l] = l
+			}
+		}
+		labels = append(labels, l)
+		msgs = append(msgs, keepJTLField(get("responseMessage")))
+		if n, err := strconv.Atoi(get("responseCode")); err == nil {
 			codes = append(codes, n)
 		} else {
 			codes = append(codes, 0) // non-numeric (e.g. connection error, or a socket TIMEOUT) => 0
 		}
-		if ts, err := strconv.ParseInt(get(row, "timeStamp"), 10, 64); err == nil {
+		if ts, err := strconv.ParseInt(get("timeStamp"), 10, 64); err == nil {
 			tsMs = append(tsMs, ts)
 		} else {
 			tsMs = append(tsMs, 0) // absent/non-numeric => fall back to now at classify time
 		}
+	})
+	if err != nil || n < 1 {
+		// unreadable, empty, or over maxJTLSamples (the run loop has already refused that, honestly): nothing
+		// usable, which judge() reads as "no result row", never as a pass.
+		return nil, nil, nil, nil, 0, nil
 	}
 	return codes, labels, tsMs, elapsedPerRow, elapsedMs, msgs
 }
@@ -1751,35 +2004,18 @@ func isVerifySample(label, scenarioID string) bool {
 // which reflects assertion results) + the first failure's message. Used for
 // content layers (Database State / Message Flow / External Delivery).
 func readJTLSuccess(jtlPath string) (allOK bool, firstFailMsg string) {
-	f, err := os.Open(jtlPath)
-	if err != nil {
-		return false, ""
-	}
-	defer f.Close()
-	rd := csv.NewReader(f)
-	rd.FieldsPerRecord = -1
-	rows, err := rd.ReadAll()
-	if err != nil || len(rows) < 2 {
-		return false, ""
-	}
-	head := map[string]int{}
-	for i, h := range rows[0] {
-		head[h] = i
-	}
-	get := func(row []string, key string) string {
-		if i, ok := head[key]; ok && i < len(row) {
-			return row[i]
-		}
-		return ""
-	}
+	// One row at a time and no row kept, so the size of the file never matters here (no cap, no copy).
 	allOK = true
-	for _, row := range rows[1:] {
-		if !strings.EqualFold(get(row, "success"), "true") {
+	n, err := eachJTLRow(jtlPath, int(^uint(0)>>1), func(get func(string) string) {
+		if !strings.EqualFold(get("success"), "true") {
 			allOK = false
 			if firstFailMsg == "" {
-				firstFailMsg = strings.TrimSpace(get(row, "label") + ": " + get(row, "responseCode") + " " + get(row, "responseMessage") + " " + get(row, "failureMessage"))
+				firstFailMsg = strings.TrimSpace(get("label") + ": " + get("responseCode") + " " + get("responseMessage") + " " + get("failureMessage"))
 			}
 		}
+	})
+	if err != nil || n < 1 {
+		return false, ""
 	}
 	return allOK, firstFailMsg
 }

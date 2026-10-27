@@ -159,7 +159,25 @@ func waitCloseReason(closed <-chan *amqp.Error) *amqp.Error {
 // response, so it comes back as an error from Channel.Consume — no
 // NotifyClose race is needed here the way PublishConfirmed needs one.
 func (e *Engine) Consume(queue string, timeout time.Duration) (Outcome, []byte) {
-	return e.run(timeout+e.rpcTimeout, func() (Outcome, []byte) {
+	o, d := e.ConsumeDelivery(queue, timeout)
+	return o, d.Body
+}
+
+// Delivery is what one consumed message carried: the body and the properties a reader needs to decode it
+// (a gzip body announces itself in content-encoding).
+type Delivery struct {
+	Body            []byte
+	ContentEncoding string
+	ContentType     string
+}
+
+// ConsumeDelivery is Consume returning the delivery's properties as well as its body. Same single-message,
+// ack-on-receipt behaviour; the Delivery is zero unless Outcome.OK.
+func (e *Engine) ConsumeDelivery(queue string, timeout time.Duration) (Outcome, Delivery) {
+	// got is written only by the operation, only on success, and read below only when the operation reported
+	// success - an abandoned (timed out) operation reports failure, so its late write is never read.
+	var got Delivery
+	o, _ := e.run(timeout+e.rpcTimeout, func() (Outcome, []byte) {
 		ch, err := e.conn.Channel()
 		if err != nil {
 			return errOutcome(err), nil
@@ -177,10 +195,38 @@ func (e *Engine) Consume(queue string, timeout time.Duration) (Outcome, []byte) 
 				return Outcome{OK: false, Text: "consumer channel closed before a message arrived"}, nil
 			}
 			_ = d.Ack(false)
-			return ok(), d.Body
+			got = Delivery{Body: d.Body, ContentEncoding: d.ContentEncoding, ContentType: d.ContentType}
+			return ok(), nil
 		case <-time.After(timeout):
-			return Outcome{OK: false, Text: "timed out waiting for a message"}, nil
+			// the ONLY branch that is "waited the full time on an open consumer and nothing came"; the
+			// closed-channel branch above and every error return carry TimedOut == false
+			return Outcome{OK: false, TimedOut: true, Text: "timed out waiting for a message"}, nil
 		}
+	})
+	if !o.OK {
+		return o, Delivery{}
+	}
+	return o, got
+}
+
+// Listen declares a private queue and binds it to exchange under routingKey, on ONE channel
+// . The queue is not durable, not auto-delete and not exclusive (the chain's later steps use
+// other connections), and carries x-expires and x-message-ttl of ttlMillis: the broker removes it by itself
+// even if the chain never gets to delete it. A refusal of either call is the broker's, with its code.
+func (e *Engine) Listen(queue, exchange, routingKey string, ttlMillis int) Outcome {
+	return e.withChannel(func(ch channel) error {
+		args := amqp.Table{"x-expires": int32(ttlMillis), "x-message-ttl": int32(ttlMillis)}
+		if _, err := ch.QueueDeclare(queue, false, false, false, false, args); err != nil {
+			return err
+		}
+		return ch.QueueBind(queue, routingKey, exchange, false, nil)
+	})
+}
+
+// BindQueue binds an existing queue to exchange under routingKey.
+func (e *Engine) BindQueue(queue, exchange, routingKey string) Outcome {
+	return e.withChannel(func(ch channel) error {
+		return ch.QueueBind(queue, routingKey, exchange, false, nil)
 	})
 }
 

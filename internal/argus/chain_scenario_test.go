@@ -71,7 +71,7 @@ func TestRunChainScenario_PartialFailure(t *testing.T) {
 	orig := uiRun
 	t.Cleanup(func() { uiRun = orig })
 	// pass unless the spec name contains "fail".
-	uiRun = func(vendorDir string, specs []string, appURL, cid string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+	uiRun = func(vendorDir string, specs []string, appURL, cid string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 		if strings.Contains(strings.Join(specs, " "), "fail") {
 			return 1, true, ""
 		}
@@ -113,7 +113,7 @@ func TestRunChainScenario_PartialFailure(t *testing.T) {
 func TestRunChainScenario_RequestCounts(t *testing.T) {
 	orig := uiRun
 	t.Cleanup(func() { uiRun = orig })
-	uiRun = func(vendorDir string, specs []string, appURL, cid string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+	uiRun = func(vendorDir string, specs []string, appURL, cid string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 		if strings.Contains(strings.Join(specs, " "), "fail") {
 			return 1, true, ""
 		}
@@ -142,7 +142,7 @@ func TestRunChainScenario_RequestCounts(t *testing.T) {
 func TestRunChainScenario_AllPass(t *testing.T) {
 	orig := uiRun
 	t.Cleanup(func() { uiRun = orig })
-	uiRun = func(vendorDir string, specs []string, appURL, cid string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+	uiRun = func(vendorDir string, specs []string, appURL, cid string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 		return 0, true, ""
 	}
 

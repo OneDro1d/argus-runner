@@ -41,9 +41,9 @@ func moneyWritesTestConfig() *config.Config {
 	no := false
 	cfg := &config.Config{MoneyHandling: true, MoneyWrites: &config.MoneyWritesConfig{
 		Allow: []config.MoneyWriteAllowEntry{
-			{Method: "POST", Path: "/api/v1/trading/quote", Spends: &no},
-			{Method: "POST", Path: "/api/v1/trading/order", Spends: &yes,
-				AmountField: "source_amount", MaxAmount: 25, MaxPerRun: 2},
+			{Method: "POST", Path: "/api/v1/pay/quote", Spends: &no},
+			{Method: "POST", Path: "/api/v1/pay/order", Spends: &yes,
+				AmountField: "pay_amount", MaxAmount: 25, MaxPerRun: 2},
 		},
 	}}
 	cfg.Project.Name = "p"
@@ -54,7 +54,7 @@ func moneyWritesTestConfig() *config.Config {
 func TestRunAll_MoneyWrites_UnderCapIsRunAndPasses(t *testing.T) {
 	dir := t.TempDir()
 	scDir := filepath.Join(dir, "scenarios")
-	writeMoneyWriteScenario(t, scDir, "MW-OK", "POST", "http://sut.invalid/api/v1/trading/order", `{"source_amount": 10}`)
+	writeMoneyWriteScenario(t, scDir, "MW-OK", "POST", "http://sut.invalid/api/v1/pay/order", `{"pay_amount": 10}`)
 
 	fr := &fakeRunner{pass: map[string]bool{"MW-OK": true}}
 	rr, err := RunAll(moneyWritesTestConfig(), scDir, filepath.Join(dir, "results"), "p", "", "", "", "", fr)
@@ -70,7 +70,7 @@ func TestRunAll_MoneyWrites_UnderCapIsRunAndPasses(t *testing.T) {
 func TestRunAll_MoneyWrites_OverMaxAmountNotSent(t *testing.T) {
 	dir := t.TempDir()
 	scDir := filepath.Join(dir, "scenarios")
-	writeMoneyWriteScenario(t, scDir, "MW-OVER", "POST", "http://sut.invalid/api/v1/trading/order", `{"source_amount": 999}`)
+	writeMoneyWriteScenario(t, scDir, "MW-OVER", "POST", "http://sut.invalid/api/v1/pay/order", `{"pay_amount": 999}`)
 
 	fr := &fakeRunner{pass: map[string]bool{"MW-OVER": true}} // would PASS if actually fired
 	rr, err := RunAll(moneyWritesTestConfig(), scDir, filepath.Join(dir, "results"), "p", "", "", "", "", fr)
@@ -92,7 +92,7 @@ func TestRunAll_MoneyWrites_OverMaxAmountNotSent(t *testing.T) {
 func TestRunAll_MoneyWrites_MissingAmountFieldNotSent(t *testing.T) {
 	dir := t.TempDir()
 	scDir := filepath.Join(dir, "scenarios")
-	writeMoneyWriteScenario(t, scDir, "MW-MISSING", "POST", "http://sut.invalid/api/v1/trading/order", `{"other": 1}`)
+	writeMoneyWriteScenario(t, scDir, "MW-MISSING", "POST", "http://sut.invalid/api/v1/pay/order", `{"other": 1}`)
 
 	fr := &fakeRunner{pass: map[string]bool{"MW-MISSING": true}}
 	rr, err := RunAll(moneyWritesTestConfig(), scDir, filepath.Join(dir, "results"), "p", "", "", "", "", fr)
@@ -110,9 +110,9 @@ func TestRunAll_MoneyWrites_MaxPerRunEnforcedAcrossTwoScenarios(t *testing.T) {
 	dir := t.TempDir()
 	scDir := filepath.Join(dir, "scenarios")
 	// max_per_run is 2 (moneyWritesTestConfig). Three scenarios each spend once.
-	writeMoneyWriteScenario(t, scDir, "MW-S1", "POST", "http://sut.invalid/api/v1/trading/order", `{"source_amount": 5}`)
-	writeMoneyWriteScenario(t, scDir, "MW-S2", "POST", "http://sut.invalid/api/v1/trading/order", `{"source_amount": 5}`)
-	writeMoneyWriteScenario(t, scDir, "MW-S3", "POST", "http://sut.invalid/api/v1/trading/order", `{"source_amount": 5}`)
+	writeMoneyWriteScenario(t, scDir, "MW-S1", "POST", "http://sut.invalid/api/v1/pay/order", `{"pay_amount": 5}`)
+	writeMoneyWriteScenario(t, scDir, "MW-S2", "POST", "http://sut.invalid/api/v1/pay/order", `{"pay_amount": 5}`)
+	writeMoneyWriteScenario(t, scDir, "MW-S3", "POST", "http://sut.invalid/api/v1/pay/order", `{"pay_amount": 5}`)
 
 	fr := &fakeRunner{pass: map[string]bool{"MW-S1": true, "MW-S2": true, "MW-S3": true}}
 	rr, err := RunAll(moneyWritesTestConfig(), scDir, filepath.Join(dir, "results"), "p", "", "", "", "", fr)
@@ -144,7 +144,7 @@ func TestRunAll_MoneyWrites_MaxPerRunEnforcedAcrossTwoScenarios(t *testing.T) {
 func TestRunAll_MoneyWrites_UnlistedWriteStillRefused(t *testing.T) {
 	dir := t.TempDir()
 	scDir := filepath.Join(dir, "scenarios")
-	writeMoneyWriteScenario(t, scDir, "MW-UNLISTED", "POST", "http://sut.invalid/api/v1/trading/rebalance", `{}`)
+	writeMoneyWriteScenario(t, scDir, "MW-UNLISTED", "POST", "http://sut.invalid/api/v1/pay/rebalance", `{}`)
 
 	fr := &fakeRunner{pass: map[string]bool{"MW-UNLISTED": true}}
 	rr, err := RunAll(moneyWritesTestConfig(), scDir, filepath.Join(dir, "results"), "p", "", "", "", "", fr)

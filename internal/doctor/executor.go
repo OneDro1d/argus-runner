@@ -35,6 +35,9 @@ type ExecutorInput struct {
 	// ConfigTargets is how many targets the --config argus-config declares (the enumeration
 	// validate-config probes); nil = no --config, or it did not parse, so nothing is known about it.
 	ConfigTargets *int
+	// UnprobedHosts is how many hosts the --scenarios chain steps dial by full URL that no --config target names
+	// (ConfigInput.Unprobed): the executor's probe never dials them, so a "ready" reading does not cover them.
+	UnprobedHosts int
 }
 
 // DockerProbe is what the caller found out about a Docker daemon on this host. The control plane
@@ -89,9 +92,17 @@ var knownFixes = []knownFix{
 	// The kit ships in the image, so an executor's version is also the kit a re-onboard of it would use.
 	{Version: "0.3.43", ID: "#308 (AC-D50)", Effect: "onboarding with the kit this release ships no longer destroys the instance it has just registered " +
 		"(an older kit's host check sends no token, a control plane from rev 22 answers 401, and the exit trap tears the healthy instance down) — never re-onboard with an older kit"},
+	// A tester's work (2026-10-07..09) ran on a 0.3.65 executor this table called current; each of these cost a
+	// run or a triage pass (tester findings F15, F19, F20).
+	{Version: "0.3.66", ID: "#610 (issue #606)", Effect: "a chain's http steps send X-Correlation-Id (before it, the SUT's own logs held nothing " +
+		"a run could be found by, so Loki and the sagas view were empty for every chain scenario)"},
+	{Version: "0.3.68", ID: "#623 (issue #621)", Effect: `a chain's http request may run as long as the chain's ## TIMEOUT leaves it (before it, ` +
+		`every request was cut at 30 s whatever ## TIMEOUT said, and reported as "SUT unreachable", which stops the chain)`},
+	{Version: "0.3.68", ID: "#633 (issue #632)", Effect: "a step's report lists every failed claim up to 100, then counts the rest (before it, it listed at most 10 " +
+		"and did not say it had stopped, so a step showing exactly 10 could hide more)"},
 }
 
-const updateBlockWhere = "the update block the control plane publishes for it (Environments page, or `update_command` from author__get_executor_status)"
+const updateBlockWhere = "the update block the control plane publishes for it (Environments page, or `update_command` from author_get_executor_status)"
 
 // CheckExecutorVersion answers, per executor your runs can land on: is it one the control plane still
 // gives work to, does it have the fixes whose absence first runs have tripped over, and would the

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/OneDro1d/argus-runner/internal/anatomy"
+	"github.com/OneDro1d/argus-runner/internal/argus"
 	"github.com/OneDro1d/argus-runner/internal/config"
 	"github.com/OneDro1d/argus-runner/internal/federation"
 )
@@ -55,7 +56,7 @@ type Config struct {
 	Addr string
 	// Fed, when CPURL is set, engages the federation executor.
 	Fed FedConfig
-	// MCP, when set, is the in-env runner__* MCP surface mounted on THIS listener (R4 the MERGED
+	// MCP, when set, is the in-env runner_* MCP surface mounted on THIS listener (R4 the MERGED
 	// per-instance workload, M3.1 §D-3.1.1/ADR-11, CP-M3-125): ONE process owns the machine
 	// identity + the federation loop + the MCP surface — the two-container identity-key load-order
 	// race is dead by construction. The caller (cmd/argus) assembles the mcpserver handler.
@@ -87,7 +88,7 @@ func Bootstrap(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	mux := http.NewServeMux()
 	anatomy.Health(mux, func() bool { return true })
-	// R4 (CP-M3-125): the merged workload serves the runner__* MCP surface on the same listener.
+	// R4 (CP-M3-125): the merged workload serves the runner_* MCP surface on the same listener.
 	if cfg.MCP != nil {
 		for _, p := range []string{"/sse", "/message", "/mcp", "/metrics"} {
 			mux.Handle(p, cfg.MCP)
@@ -215,7 +216,9 @@ func Bootstrap(ctx context.Context, cfg Config) (*Server, error) {
 				Dir: OutboxDir(cfg.Fed.Exec.ResultsRoot, cfg.Fed.InstanceID),
 				Log: cfg.Log,
 			},
-			Log: cfg.Log,
+			// the in-flight marker, beside the outbox, so a restart can say a run was cut short.
+			InFlight: &InFlight{Dir: InFlightDir(cfg.Fed.Exec.ResultsRoot, cfg.Fed.InstanceID)},
+			Log:      cfg.Log,
 			// VR6-W1: what the executor DIALS to answer "is this instance's SUT reachable?". It is the
 			// only thing on the SUT's network, so it is the only vantage that can answer at all.
 			//
@@ -227,6 +230,10 @@ func Bootstrap(ctx context.Context, cfg Config) (*Server, error) {
 			// see Executor.ConfigPath's own doc for why it is carried here rather than re-derived
 			// through ExecConfig, which Loop does not hold.
 			ConfigPath: cfg.Fed.Exec.ConfigPath,
+			// the fault undo journal a run writes beside its results (the toolcore
+			// Env.Instance is the tool instance, "local" by default - execEnv), replayed before the
+			// first poll.
+			FaultJournalDir: argus.FaultJournalDir(filepath.Join(cfg.Fed.Exec.ResultsRoot, toolInstanceOrLocal(cfg.Fed.Exec))),
 		}
 		// UC073: if the SUT declares a deployment probe, watch it and auto-emit markers on redeploy.
 		// The closure itself was built above, beside X25519Priv, so the run path's copy of ExecConfig

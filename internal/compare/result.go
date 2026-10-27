@@ -89,7 +89,7 @@ type Run struct {
 	VersionKey string
 	Status     string // completed | degraded | failed | abandoned | anything else = not terminal yet. `failed` WITH Outcomes is a run that ran with a failing check (ARGUS-CMP-14); `failed` without any is one that never ran its checks
 	SetHash    string
-	Outcomes   map[string]string // check id -> passed | failed | errored | degraded
+	Outcomes   map[string]string // check id -> passed | failed | errored | degraded | not_applicable
 	Outputs    []ScenarioOutput
 }
 

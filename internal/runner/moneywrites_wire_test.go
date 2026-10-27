@@ -15,7 +15,7 @@ import (
 
 func TestMoneyWritesAllowFor_DeclaredBlockReported(t *testing.T) {
 	p := writeMoneyConfig(t, "money_handling: true\n"+
-		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/trading/quote\n      spends: false\n")
+		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/pay/quote\n      spends: false\n")
 	got := moneyWritesAllowFor(p)
 	if got == nil {
 		t.Fatal("moneyWritesAllowFor(declared block) = nil, want the encoded allowlist")
@@ -24,8 +24,8 @@ func TestMoneyWritesAllowFor_DeclaredBlockReported(t *testing.T) {
 	if err := json.Unmarshal(got, &al); err != nil {
 		t.Fatalf("moneyWritesAllowFor did not produce valid JSON: %v (%s)", err, got)
 	}
-	if len(al) != 1 || al[0]["path"] != "/api/v1/trading/quote" {
-		t.Fatalf("decoded allowlist = %+v, want one entry for /api/v1/trading/quote", al)
+	if len(al) != 1 || al[0]["path"] != "/api/v1/pay/quote" {
+		t.Fatalf("decoded allowlist = %+v, want one entry for /api/v1/pay/quote", al)
 	}
 }
 

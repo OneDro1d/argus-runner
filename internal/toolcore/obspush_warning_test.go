@@ -36,7 +36,7 @@ func TestRun_ReportsARefusedObservabilityPush(t *testing.T) {
 	}
 	ws, _ := p.(map[string]any)["obs_push_warnings"].([]string)
 	joined := strings.Join(ws, "\n")
-	if !strings.Contains(joined, "request-event push to Loki failed: loki push returned 429: maximum active stream limit exceeded") {
+	if !strings.Contains(joined, "request-event push to Loki failed: 0/1 lines sent (batch 1/1 failed): loki push returned 429: maximum active stream limit exceeded") {
 		t.Errorf("the Loki refusal, with Loki's reason, is not reported; obs_push_warnings = %q", ws)
 	}
 	if !strings.Contains(joined, "metrics push to the pushgateway failed") {

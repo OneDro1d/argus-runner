@@ -83,8 +83,8 @@ func newLeakRig(t *testing.T, fresh, refresh string) *leakRig {
 			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": rig.freshJWT, "refresh_token": rig.refresh, "expires_in": 900})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/instances":
 			rig.bearers = append(rig.bearers, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-			_, _ = w.Write([]byte(`{"workspace":"ws-1","instances":[{"instance_id":"sut-demo","runner_version":"0.3.44",` +
-				`"version_state":"current","min_supported_version":"0.3.0","min_recommended_version":"0.3.44"}]}`))
+			_, _ = w.Write([]byte(`{"workspace":"ws-1","instances":[{"instance_id":"sut-demo","runner_version":"0.3.68",` +
+				`"version_state":"current","min_supported_version":"0.3.0","min_recommended_version":"0.3.68"}]}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -281,7 +281,7 @@ func TestDoctor_NoCredentialLeak(t *testing.T) {
 		secret     func() leakSecret
 		wantIn     string // what the token-file check must say it found
 	}{
-		{"--token-file runner, runner JWT", "runner", func() leakSecret { return jwt("runner", "tf-runner-jwt", soon) }, "runner__run accepts it"},
+		{"--token-file runner, runner JWT", "runner", func() leakSecret { return jwt("runner", "tf-runner-jwt", soon) }, "runner_run accepts it"},
 		{"--token-file runner, odts_ PAT", "runner", func() leakSecret { return pat("tf-runner-pat") }, "not the runner access token"},
 		{"--token-file author, odts_ PAT", "author", func() leakSecret { return pat("tf-author-pat") }, "odts_ PAT"},
 		{"--token-file author, author JWT", "author", func() leakSecret { return jwt("author", "tf-author-jwt", soon) }, "JWT"},

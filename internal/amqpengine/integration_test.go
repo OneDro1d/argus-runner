@@ -3,12 +3,12 @@ package amqpengine_test
 // AC-D18 integration test: proves amqpengine's probes against a REAL
 // RabbitMQ broker, provisioned with a restricted user that mirrors
 // msgbus's actual "argus-test" worker identity (deploy/k8s/15-registry.yaml
-// + cmd/msgbus-provision/provision.go buildIdentities, manager "hop"):
+// + cmd/msgbus-provision/provision.go buildIdentities, the manager):
 //
 //	vhost configure: ^$                                     (deny-all)
 //	vhost write:     ^(msgbus\.inbox|msgbus\.presence)$
 //	vhost read:      ^(msgbus\.agent\.argus-test|msgbus\.presence\.stream)$
-//	topic write on msgbus.inbox: ^inbox\.agent\.hop$        (policy.TopicWriteRegex, worker role)
+//	topic write on msgbus.inbox: ^inbox\.agent\.alpha$        (policy.TopicWriteRegex, worker role)
 //	topic read on msgbus.inbox:  ^$                         (deny-all)
 //
 // Skipped unless ARGUS_TEST_AMQP_URL is set (the restricted user's URL).
@@ -32,9 +32,9 @@ import (
 
 const (
 	testExchange  = "msgbus.inbox"
-	hopQueue      = "msgbus.agent.hop" // stands in for the manager's queue
-	allowedRK     = "inbox.agent.hop"  // the ONLY routing key argus-test's topic permission allows
-	forbiddenRK   = "inbox.all"        // a manager-only routing key; refused for a worker
+	hopQueue      = "msgbus.agent.alpha" // stands in for the manager's queue
+	allowedRK     = "inbox.agent.alpha"  // the ONLY routing key argus-test's topic permission allows
+	forbiddenRK   = "inbox.all"          // a manager-only routing key; refused for a worker
 	restrictedUID = "argus-test"
 	spoofedUID    = "someone-else"
 )
@@ -148,7 +148,7 @@ func TestAMQPEngine_Integration(t *testing.T) {
 			Source:        envelope.SourceSystem,
 			OriginTrust:   envelope.TrustAgent,
 			FromAgentID:   restrictedUID,
-			ToInbox:       "agent.hop",
+			ToInbox:       "agent.alpha",
 			Prompt:        "AC-D18 integration: allowed publish must be delivered",
 			Reply:         envelope.Reply{Mode: envelope.ReplyNone},
 			CorrelationID: "corr-ac-d18-allowed-publish",

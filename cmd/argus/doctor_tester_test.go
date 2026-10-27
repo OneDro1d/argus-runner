@@ -29,6 +29,8 @@ type testerCP struct {
 	inst     string
 	// rowExtra is JSON members appended to each /api/instances row (version_state and the floors), e.g. `,"version_state":"current"`.
 	rowExtra string
+	// runnerVersion is each row's runner_version; "" = 0.3.68, which carries every fix in doctor's knownFixes.
+	runnerVersion string
 }
 
 func newTesterCP(t *testing.T, token string, tools []string, inst, lastSeen string) *testerCP {
@@ -47,9 +49,13 @@ func newTesterCP(t *testing.T, token string, tools []string, inst, lastSeen stri
 		case r.URL.Path == "/api/instances":
 			// inst: "" = no instance registered, "a,b" = several.
 			var rows []string
+			rv := cp.runnerVersion
+			if rv == "" {
+				rv = "0.3.68"
+			}
 			for _, id := range strings.Split(cp.inst, ",") {
 				if id != "" {
-					rows = append(rows, fmt.Sprintf(`{"instance_id":%q,"runner_version":"0.3.46","last_seen":%s%s}`, id, cp.lastSeen, cp.rowExtra))
+					rows = append(rows, fmt.Sprintf(`{"instance_id":%q,"runner_version":%q,"last_seen":%s%s}`, id, rv, cp.lastSeen, cp.rowExtra))
 				}
 			}
 			_, _ = fmt.Fprintf(w, `{"workspace":"msgbus","instances":[%s]}`, strings.Join(rows, ","))
@@ -364,5 +370,49 @@ func TestDoctorUsage_DocumentsTester(t *testing.T) {
 		if !strings.Contains(doctorUsage, want) {
 			t.Errorf("doctor usage lacks %q", want)
 		}
+	}
+}
+
+// a tester's machine, 2026-10-07: a tester with no tester.env yet (the token is the LAST thing onboarding hands over) ran
+// doctor --tester --kubeconfig <file> and got "no token to work with" for every phase, cluster and
+// namespace included — which need kubectl, not the token. The kubeconfig had no current-context, which the
+// cluster check would have named. The kubectl phases must run whatever the token's state.
+func TestDoctorTester_ClusterChecksRunWithoutATesterEnv(t *testing.T) {
+	cp := newTesterCP(t, plantedToken, authorTools(3), "msgbus-homelab", recentSeen())
+	calls := fakeKubectlDoctor(t)
+	absent := filepath.Join(t.TempDir(), "tester.env")
+	kc := filepath.Join(t.TempDir(), "pilot.kubeconfig")
+	rep, rc, _, _ := runDoctorTester(t, "--env-file", absent, "--control-plane", cp.srv.URL, "--instance", "msgbus-homelab", "--kubeconfig", kc)
+	if rc != exitFailed {
+		t.Errorf("rc = %d, want %d: the token is still missing", rc, exitFailed)
+	}
+	if c := statusOf(t, rep, "tester-token"); c.Status != doctor.StatusFail {
+		t.Errorf("tester-token = %+v, want fail", c)
+	}
+	if c := statusOf(t, rep, "tester-cluster"); c.Status != doctor.StatusOK || !strings.Contains(c.Subject, "--kubeconfig "+kc) {
+		t.Errorf("tester-cluster = %+v, want ok via --kubeconfig", c)
+	}
+	if c := statusOf(t, rep, "tester-namespace"); c.Status != doctor.StatusOK || !strings.Contains(c.Subject, "argus-inst-msgbus-homelab") {
+		t.Errorf("tester-namespace = %+v, want ok", c)
+	}
+	for _, id := range []string{"tester-tools", "tester-workspace"} {
+		if c := statusOf(t, rep, id); c.Status != doctor.StatusSkip {
+			t.Errorf("%s = %+v, want skip", id, c)
+		}
+	}
+	b, _ := os.ReadFile(calls)
+	if !strings.Contains(string(b), "--kubeconfig "+kc) {
+		t.Errorf("kubectl was not run with --kubeconfig; calls:\n%s", b)
+	}
+	cp.mu.Lock()
+	defer cp.mu.Unlock()
+	if len(cp.bearers) != 0 {
+		t.Errorf("the control plane was contacted %d times with no token", len(cp.bearers))
+	}
+
+	t.Setenv("FAKE_KUBECTL_NS_MISSING", "1")
+	rep, _, _, _ = runDoctorTester(t, "--env-file", absent, "--control-plane", cp.srv.URL, "--instance", "msgbus-homelab", "--kubeconfig", kc)
+	if c := statusOf(t, rep, "tester-namespace"); c.Status != doctor.StatusFail || !strings.Contains(c.Detail, "NotFound") {
+		t.Errorf("missing namespace, no token: tester-namespace = %+v, want fail", c)
 	}
 }

@@ -166,7 +166,7 @@ func checkTallies(cert *Certificate, verdictAnchors []CheckResult) CheckResult {
 	if cert.Format == FormatV1 && t.Degraded != 0 {
 		return bad("degraded is %d, but format %s has no degraded bucket", t.Degraded, FormatV1)
 	}
-	// The not_applicable bucket exists on v5 only. A count hidden under an older label is
+	// the not_applicable bucket exists on v5 only. A count hidden under an older label is
 	// refused; and an older verifier never reaches here for a v5 certificate (it refuses the format by name).
 	if cert.Format != FormatV5 && (t.NotApplicable != 0 || cert.Verdict == VerdictNotApplicable) {
 		return bad("not_applicable is %d (verdict %s), but format %s has no not_applicable bucket (only %s does)", t.NotApplicable, cert.Verdict, cert.Format, FormatV5)
@@ -213,14 +213,17 @@ func checkTallies(cert *Certificate, verdictAnchors []CheckResult) CheckResult {
 		return CheckResult{Name: name, Status: StatusVerified,
 			Detail: fmt.Sprintf("passed %d + failed %d + errored %d of set.scenario_count %d, consistent with verdict %s — NOT anchored on a v1 certificate: a consistency check only, see NOT ANCHORED below", t.Passed, t.Failed, t.Errored, n, cert.Verdict)}
 	}
-	// On a tallied format the tallies sit inside the anchored verdict payload, so the verdict anchor's
-	// read-back is the comparison with the chain. Rule: any verdict anchor MISMATCH -> MISMATCH; else at
-	// least one VERIFIED -> VERIFIED naming the chain(s) it was compared on (an unreachable sibling does
-	// not void a read-back that happened); else internal consistency only.
+	// GitHub #617: on a tallied format the tallies sit INSIDE the anchored verdict payload, so the
+	// verdict anchor's read-back IS the comparison with the chain. The line may claim it only when
+	// that anchor really verified; a mismatching one makes this a MISMATCH too; an anchor that was
+	// not read back (pending, unreachable, absent) leaves an internal-consistency check, said so.
 	counts := fmt.Sprintf("passed %d + failed %d + errored %d + degraded %d of set.scenario_count %d, consistent with verdict %s", t.Passed, t.Failed, t.Errored, t.Degraded, n, cert.Verdict)
 	if cert.Format == FormatV5 { // the line of every older format is unchanged
 		counts = fmt.Sprintf("passed %d + failed %d + errored %d + degraded %d + not_applicable %d of set.scenario_count %d, consistent with verdict %s", t.Passed, t.Failed, t.Errored, t.Degraded, t.NotApplicable, n, cert.Verdict)
 	}
+	// Rule: any verdict anchor MISMATCH -> MISMATCH; else at least one VERIFIED -> VERIFIED naming the
+	// chain(s) it was compared on (an unreachable sibling does not void a read-back that happened);
+	// else internal consistency only.
 	var verifiedOn []string
 	mismatched := 0
 	for _, r := range verdictAnchors {
@@ -313,7 +316,7 @@ func checkMeasurement(cert *Certificate) CheckResult {
 	if m == nil {
 		return bad("a %s certificate must carry artifact_measurement; it has been removed", cert.Format)
 	}
-	// The fault list is part of the record the bundle hash commits to. v4 REQUIRES one and
+	// the fault list is part of the record the bundle hash commits to. v4 REQUIRES one and
 	// every other format forbids it, so neither stripping the list nor hiding it under a v3 label survives.
 	switch {
 	case cert.Format == FormatV4 && len(cert.Faults) == 0:
@@ -323,7 +326,7 @@ func checkMeasurement(cert *Certificate) CheckResult {
 	case (cert.Format == FormatV4 || cert.Format == FormatV5) && len(cert.Faults) > 0 && !m.Bound:
 		return bad("faults can only be bound to a bound measurement; this one is not")
 	}
-	// The precondition list is part of the record the bundle hash commits to. v5 REQUIRES one
+	// the precondition list is part of the record the bundle hash commits to. v5 REQUIRES one
 	// (or a not_applicable tally that one must explain) and every other format forbids it.
 	switch {
 	case cert.Format != FormatV5 && len(cert.Preconditions) > 0:
@@ -555,7 +558,7 @@ func Verify(ctx context.Context, cert *Certificate, svc chainread.ChainService, 
 		// An unknown format cannot be rebuilt into ANY payload, so nothing below could be compared:
 		// answer once, by name, and let Overall refuse it.
 		return []CheckResult{{Name: "certificate format", Status: StatusMismatch,
-			Detail: fmt.Sprintf("format %q is not one this verifier knows (want %s, %s, %s, %s or %s)", cert.Format, FormatV5, FormatV4, Format, FormatV2, FormatV1)}}
+			Detail: fmt.Sprintf("format %q is not one this verifier knows (want %s, %s, %s, %s or %s)", cert.Format, Format, FormatV2, FormatV1, FormatV4, FormatV5)}}
 	}
 	roles := roleOfAnchors(cert.Anchors)
 

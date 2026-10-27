@@ -3,6 +3,7 @@ package argus
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,13 @@ type argusFakeBroker struct {
 	closed      int
 	dialError   error
 	consumeBody []byte // TestAMQPChain_ConsumeBodyClaimResolvesCid8 — the delivered message a `consume` returns
+	//
+	consumeEncoding string
+	consumed        []string
+	waits           []time.Duration
+	listens         [][4]string
+	binds           [][3]string
+	deleted         []string
 }
 
 func (f *argusFakeBroker) PublishConfirmed(_, _ string, body []byte, props amqpengine.Props) amqpengine.Outcome {
@@ -39,16 +47,34 @@ func (f *argusFakeBroker) PublishConfirmed(_, _ string, body []byte, props amqpe
 	f.props = append(f.props, props)
 	return f.outcome
 }
-func (f *argusFakeBroker) Consume(string, time.Duration) (amqpengine.Outcome, []byte) {
+func (f *argusFakeBroker) ConsumeDelivery(queue string, wait time.Duration) (amqpengine.Outcome, amqpengine.Delivery) {
 	f.other++
-	return f.outcome, f.consumeBody
+	f.consumed = append(f.consumed, queue)
+	f.waits = append(f.waits, wait)
+	return f.outcome, amqpengine.Delivery{Body: f.consumeBody, ContentEncoding: f.consumeEncoding}
+}
+
+// Listen / BindQueue record what the chain asked of the broker.
+func (f *argusFakeBroker) Listen(queue, exchange, routingKey string, ttl int) amqpengine.Outcome {
+	f.other++
+	f.listens = append(f.listens, [4]string{queue, exchange, routingKey, strconv.Itoa(ttl)})
+	return f.outcome
+}
+func (f *argusFakeBroker) BindQueue(queue, exchange, routingKey string) amqpengine.Outcome {
+	f.other++
+	f.binds = append(f.binds, [3]string{queue, exchange, routingKey})
+	return f.outcome
 }
 func (f *argusFakeBroker) DeclareQueue(string) amqpengine.Outcome { f.other++; return f.outcome }
 func (f *argusFakeBroker) DeclareExchange(string, string) amqpengine.Outcome {
 	f.other++
 	return f.outcome
 }
-func (f *argusFakeBroker) DeleteQueue(string) amqpengine.Outcome { f.other++; return f.outcome }
+func (f *argusFakeBroker) DeleteQueue(name string) amqpengine.Outcome {
+	f.other++
+	f.deleted = append(f.deleted, name)
+	return f.outcome
+}
 func (f *argusFakeBroker) UnbindQueue(string, string, string) amqpengine.Outcome {
 	f.other++
 	return f.outcome
@@ -71,11 +97,11 @@ func withFakeBroker(t *testing.T, f *argusFakeBroker) {
 }
 
 const spoofTrigger = `{"steps":[{"type":"amqp","name":"spoof","op":"publish","url_env":"MSGBUS_ARGUS_TEST_URL",` +
-	`"exchange":"msgbus.inbox","routing_key":"inbox.agent.hop","user_id":"hop",` +
-	`"envelope":{"to_inbox":"agent.hop","from_agent_id":"argus-test","intent":"DECISION_REQUEST","prompt":"argus-test: ${correlation_id}"}}]}`
+	`"exchange":"msgbus.inbox","routing_key":"inbox.agent.alpha","user_id":"alpha",` +
+	`"envelope":{"to_inbox":"agent.alpha","from_agent_id":"argus-test","intent":"DECISION_REQUEST","prompt":"argus-test: ${correlation_id}"}}]}`
 
 func TestAMQPChain_SpoofRefusedAndEnvelopeResolved(t *testing.T) {
-	f := &argusFakeBroker{outcome: amqpengine.Outcome{Code: 406, Text: "PRECONDITION_FAILED - user_id property set to 'hop'"}}
+	f := &argusFakeBroker{outcome: amqpengine.Outcome{Code: 406, Text: "PRECONDITION_FAILED - user_id property set to 'alpha'"}}
 	withFakeBroker(t, f)
 	s := scenario.Parse(chainRunMD("", spoofTrigger, "### Runnable\n- step spoof: broker refuses with 406\n"))
 	res := runChainScenario(&config.Config{}, s, "tr-amqp-e2e", "testkit/ui")
@@ -92,10 +118,10 @@ func TestAMQPChain_SpoofRefusedAndEnvelopeResolved(t *testing.T) {
 	if m.Prompt != "argus-test: tr-amqp-e2e" {
 		t.Fatalf("${correlation_id} must resolve in the prompt: %q", m.Prompt)
 	}
-	if m.Intent != envelope.IntentDecisionRequest || m.ToInbox != "agent.hop" || m.FromAgentID != "argus-test" || m.CorrelationID != "tr-amqp-e2e" {
+	if m.Intent != envelope.IntentDecisionRequest || m.ToInbox != "agent.alpha" || m.FromAgentID != "argus-test" || m.CorrelationID != "tr-amqp-e2e" {
 		t.Fatalf("envelope: %+v", m)
 	}
-	if f.props[0].UserID != "hop" {
+	if f.props[0].UserID != "alpha" {
 		t.Fatalf("user_id prop: %q", f.props[0].UserID)
 	}
 	if got := res.Steps[0].AssertionsEnforced; len(got) != 1 || got[0] != "broker refuses with 406" {

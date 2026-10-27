@@ -22,9 +22,9 @@ import (
 // where results land. The scenario set is NOT here — it arrives per-run in the assignment (D-FED.3).
 type ExecConfig struct {
 	InstanceID string
-	// ToolInstance is the identity the in-env MCP surface reads results under (the runner__* tools
+	// ToolInstance is the identity the in-env MCP surface reads results under (the runner_* tools
 	// VALIDATE instance_id:"local", so that is what they scope to). R5-3: a federated run MUST write
-	// its report here — not under InstanceID — or runner__get_report cannot see a cloud run's evidence
+	// its report here — not under InstanceID — or runner_get_report cannot see a cloud run's evidence
 	// and the test agent re-runs directly to obtain it (two ledger rows for one request). Empty → "local".
 	ToolInstance string
 	ConfigPath   string // the SUT's argus-config.yaml (declares endpoints/targets)
@@ -99,16 +99,21 @@ type ExecConfig struct {
 	CatalogClient *Client
 }
 
+// toolInstanceOrLocal is the results sub-directory a federated run writes to (execEnv's Instance).
+func toolInstanceOrLocal(cfg ExecConfig) string {
+	if cfg.ToolInstance == "" {
+		return "local"
+	}
+	return cfg.ToolInstance
+}
+
 // execEnv builds the runner-core Env for a federated run. R5-3: the RESULTS identity is the TOOL
 // identity (ToolInstance, "local") so the in-env MCP surface can read this run's report/sagas/logs,
 // while the TELEMETRY label (ObsInstance) stays the REGISTERED instance id so the pushed metrics and
 // the Grafana deep-link land under the real instance. These two were conflated, which made a cloud
 // run's evidence unreachable in-env and provoked a duplicate direct re-run.
 func execEnv(cfg ExecConfig, scenariosDir string) toolcore.Env {
-	tool := cfg.ToolInstance
-	if tool == "" {
-		tool = "local"
-	}
+	tool := toolInstanceOrLocal(cfg)
 	return toolcore.Env{
 		Instance: tool, ObsInstance: cfg.InstanceID, ConfigPath: cfg.ConfigPath, ScenariosDir: scenariosDir,
 		ResultsRoot: cfg.ResultsRoot, ComposeFile: cfg.ComposeFile,
@@ -132,8 +137,12 @@ func NewRunFunc(cfg ExecConfig) RunFunc {
 		// particular assignment passed through a control plane that still has the check. Refused
 		// before any materialization or SUT effect — a final run against no pinned artifact must never
 		// execute, not just never be recorded as one.
+		//
+		// AC-F1: every error this function returns is built with ownWordsf (its text is Argus's own) or holds a
+		// withheld lower error (withhold) — it becomes the run's failure reason (executor.go, direct.go). An error
+		// returned any other way is sent as Argus's fixed sentence, never as its text (ownwords.go).
 		if a.Mode == "final" && a.ArtifactDigest == "" {
-			return federation.ResultsPush{}, fmt.Errorf("refused: a final run requires an artifact digest")
+			return federation.ResultsPush{}, ownWordsf("refused: a final run requires an artifact digest")
 		}
 		// AC-4/AC-4b: a `final` or `scheduled` assignment must arrive SEALED — EXPECT must never
 		// cross to this executor in the clear for a certifying run. The control plane's own pickup
@@ -145,7 +154,7 @@ func NewRunFunc(cfg ExecConfig) RunFunc {
 		if a.Mode == "final" || a.Mode == "scheduled" || a.Mode == "rehearsal" {
 			for _, sc := range a.Scenarios {
 				if sc.Sealed == nil {
-					return federation.ResultsPush{}, fmt.Errorf("refused: a %s run's scenarios must arrive sealed", a.Mode)
+					return federation.ResultsPush{}, ownWordsf("refused: a %s run's scenarios must arrive sealed", a.Mode)
 				}
 			}
 		}
@@ -157,7 +166,7 @@ func NewRunFunc(cfg ExecConfig) RunFunc {
 			scenarios = a.CompareScenarios
 			for _, sc := range scenarios {
 				if sc.Sealed == nil {
-					return federation.ResultsPush{}, fmt.Errorf("refused: a %s run's scenarios must arrive sealed", a.Mode)
+					return federation.ResultsPush{}, ownWordsf("refused: a %s run's scenarios must arrive sealed", a.Mode)
 				}
 			}
 		}
@@ -168,7 +177,7 @@ func NewRunFunc(cfg ExecConfig) RunFunc {
 		if a.Mode == "final" || a.Mode == "scheduled" || a.Mode == report.ModeCompare {
 			m := takeMeasurement(ctx, cfg, a)
 			if rerr := artifactmeasure.RefuseIfMismatch(m); rerr != nil {
-				return federation.ResultsPush{}, rerr
+				return federation.ResultsPush{}, ownWordsf("%w", rerr) // the declared and the running image digests
 			}
 			meas = &m
 		}
@@ -188,7 +197,7 @@ func NewRunFunc(cfg ExecConfig) RunFunc {
 		sutFP, sutFPAt := probeSutFingerprint(ctx, cfg.SutFingerprint)
 		dir, cleanup, openFailures, err := materialize(cfg.ResultsRoot, runID, scenarios, cfg.X25519Priv)
 		if err != nil {
-			return federation.ResultsPush{}, fmt.Errorf("materialize: %w", err)
+			return federation.ResultsPush{}, ownWordsf("materialize: %w", err) // file-system errors: paths of ours
 		}
 		defer cleanup()
 		// Migration 077: which VERSION of each namespace this run touches. Read here, after the scenarios are
@@ -199,17 +208,22 @@ func NewRunFunc(cfg ExecConfig) RunFunc {
 		// The set is pre-scoped by PickupNext, so run unfiltered over the materialized dir.
 		env := execEnv(cfg, dir)
 		env.RunMode = reportMode(a)
+		// The live counts the heartbeat reads while this run is going; nil when nothing started one.
+		env.Tally = tallyFrom(ctx)
 		// ARGUS-CMP-11: the target a comparison member names rides the assignment; only a `compare` run reads it.
 		if a.Mode == report.ModeCompare {
 			env.CompareTarget = a.CompareTarget
 		}
+		// AC-F1: toolcore.Run's error is sent only in the shapes runCoreErr knows (the config load, no scenario source,
+		// a file-system failure under toolcore's own step words) and withheld in any other — what the app answers
+		// becomes a ROW of the report, never this error (argus.RunAllWithLogs).
 		if _, _, rerr := toolcoreRun(env, runID, "", "", ""); rerr != nil {
-			return federation.ResultsPush{}, fmt.Errorf("run: %w", rerr)
+			return federation.ResultsPush{}, ownWordsf("run: %w", runCoreErr(rerr))
 		}
 
 		rep, err := readReport(filepath.Join(cfg.ResultsRoot, env.Instance, "report.json"))
 		if err != nil {
-			return federation.ResultsPush{}, fmt.Errorf("read report: %w", err)
+			return federation.ResultsPush{}, ownWordsf("read report: %w", err) // a decode error is withheld by readReport
 		}
 		// R4-2: build the run-scoped Grafana deep-link (var-argus_instance=<instance>&var-current_run=<runID>)
 		// so a CLOUD run's ledger row links to ITS run under the correct instance — the direct path already
@@ -226,6 +240,14 @@ func NewRunFunc(cfg ExecConfig) RunFunc {
 		// the environment fingerprint on the push. Bodies and header values have no field here.
 		if a.Mode == report.ModeCompare {
 			attachCompareOutputs(&push, rep)
+		}
+		// the faults this run applied are part of what the verdict commits to. Set on the
+		// measurement BEFORE it is hashed (both bindMeasurement calls below read it); nothing is added when the
+		// run applied none, so such a run's hash and certificate are unchanged.
+		if meas != nil {
+			meas.Faults = measuredFaults(rep.Faults)
+			// and the precondition results, for the same reason and with the same rule.
+			meas.Preconditions = measuredPreconditions(rep.Preconditions)
 		}
 		bindMeasurement(&push, meas)
 		// AC-4b: a scenario whose sealed body failed to open (wrong key, wrong run_id, tampered) NEVER
@@ -358,6 +380,8 @@ func openSealedBody(priv *ecdh.PrivateKey, sealed federation.SealedBody, runID s
 	return federation.OpenBody(priv, sealed, runID)
 }
 
+// readReport reads the in-env report. AC-F1: the report holds the app's answers, and a decode error can quote a
+// character or a whole number of the file, so a decode failure is WITHHELD; a file-system failure is a path of ours.
 func readReport(path string) (*report.Report, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -365,7 +389,22 @@ func readReport(path string) (*report.Report, error) {
 	}
 	var r report.Report
 	if err := json.Unmarshal(b, &r); err != nil {
-		return nil, err
+		return nil, withhold(reportNotDecodable, err)
 	}
 	return &r, nil
+}
+
+// writeReport re-serialises rep over an already-written report.json/runs/<id>.json. AC-F1: an encode
+// error over a report that holds the app's answers is withheld, as readReport's decode error is.
+// (This build never publishes a build record, so nothing in the executor calls it; the withholding
+// tests drive it directly.)
+func writeReport(path string, rep *report.Report) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(rep, "", "  ")
+	if err != nil {
+		return withhold(reportNotEncodable, err)
+	}
+	return os.WriteFile(path, b, 0o644)
 }

@@ -1,6 +1,6 @@
 package argus
 
-// cmp11_test.go -- ARGUS-CMP-11 (, -17): the executor half of tolerance values, load numbers and the
+// cmp11_test.go -- ARGUS-CMP-11 (-17): the executor half of tolerance values, load numbers and the
 // target of a comparison member. The REAL run loop (RunAllWithTarget) over real scenario files; the SUT is an httptest
 // server (chain http steps) or a fake JMeter Runner that writes the .jtl and the capture side files (the JMX itself is
 // not run here).
@@ -210,6 +210,10 @@ func normalizedRow(t *testing.T, row report.ScenarioResult) string {
 	steps := append([]report.StepResult(nil), row.Steps...)
 	for i := range steps {
 		steps[i].CorrelationID = ""
+		// a chain http step records how long its request took. It is a clock reading like
+		// DurationMs above: two runs of one check differ in it (0 ms and 1 ms made this comparison fail one
+		// run in a few), so it is removed with the other clock parts.
+		steps[i].ElapsedMs = nil
 	}
 	row.Steps = steps
 	b, err := json.Marshal(row)

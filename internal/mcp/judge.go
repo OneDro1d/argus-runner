@@ -18,7 +18,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -71,16 +70,34 @@ const (
 	BodyGTEOp = "gte"
 	BodyLTOp  = "lt"
 	BodyLTEOp = "lte"
+
+	// The claim forms the testers of live systems asked for. All of them are judged in Go
+	// only (chain http / chain mcp / mcp scenario / amqp consume); a plain JMeter scenario refuses them at
+	// authoring.
+	//
+	// BodyEQOp / BodyWithinOp compare NUMBERS (`1`, `1.0`, `1e0` are one value), never text: `==` and
+	// `within <tol> of <ref>`. BodyNotContainsOp / BodyNotMatchesOp / BodyNotEqualsOp are the negatives, whole
+	// body or field-scoped. BodyAbsentOp is `body has no <field>`.
+	BodyEQOp          = "eq"
+	BodyWithinOp      = "within"
+	BodyNotContainsOp = "not_contains"
+	BodyNotMatchesOp  = "not_matches"
+	BodyNotEqualsOp   = "not_equals"
+	BodyAbsentOp      = "absent"
 )
 
-// isNumericOp reports whether op is one of the four numeric comparison operators.
+// isNumericOp reports whether op compares numbers: the four orderings, `==` and `within`.
 func isNumericOp(op string) bool {
 	switch op {
-	case BodyGTOp, BodyGTEOp, BodyLTOp, BodyLTEOp:
+	case BodyGTOp, BodyGTEOp, BodyLTOp, BodyLTEOp, BodyEQOp, BodyWithinOp:
 		return true
 	}
 	return false
 }
+
+// IsNumericOp is isNumericOp for the chain binder and the validator: a claim of one of these ops whose
+// reference is one whole ${saved.<var>} must bind to a number.
+func IsNumericOp(op string) bool { return isNumericOp(op) }
 
 // BodyAssert is ONE parsed body assertion. Field is the whole point of the grammar: empty means
 // "anywhere in the answer" (the `body contains …` form); non-empty pins it to a named, possibly
@@ -94,6 +111,17 @@ type BodyAssert struct {
 	Field string
 	Op    string
 	Value string
+	// Tol is the tolerance of a `within` claim as written: a non-negative number
+	// (absolute), or a number followed by `%` (relative to the reference). Empty for every other op.
+	Tol string
+	// Every is the dotted path of a JSON ARRAY (`$` = the whole answer): the claim is
+	// judged on EVERY element, Field being resolved inside each (`.` = the element itself). Empty for a
+	// claim judged on the answer as a whole.
+	Every string
+	// Extracted says the claim is about the EXTRACTED document of an mcp step that declares
+	// `extract` (written `body extracted …`), not about the answer's own text. The judge never reads it: the
+	// step that owns the extraction picks the text each claim is judged on.
+	Extracted bool
 }
 
 // Scoped reports whether this assertion is pinned to a named field.
@@ -156,6 +184,15 @@ type CallResult struct {
 	// waiting is a SUT that did not answer IN TIME, which the runner reports `failed`, never
 	// `error` — the same distinction chain.go's Poll timeout already makes for a chained http step.
 	TimedOut bool
+	// Failure classifies a call that brought back no JSON-RPC answer (AC-D70.2), with the kinds ListTools uses:
+	// ListUnreachable (no answer at all), ListTimedOut (the deadline elapsed), ListHTTPStatus (HTTPStatus is set) or
+	// ListBadAnswer (an answer that is not a JSON-RPC answer). "" when an answer came. It is set beside Unreachable,
+	// TransportErr and TimedOut, which keep their meaning for the judge.
+	Failure    ListFailureKind
+	HTTPStatus int
+	// FailureDetail is the client's full description of that failure, FOR A LOG ONLY. For an endpoint that could not be
+	// reached it is Go's error text, which names the address; never put it in a text an agent or a report reads.
+	FailureDetail string
 }
 
 // Verdict is the judge's reality-only result.
@@ -252,22 +289,13 @@ func BodyAssertsMiss(text string, asserts []BodyAssert) bool {
 // field's actual value (VR-C8 holds exactly as it does for BodyAssertObserved).
 func BodyAssertsMissReason(text string, asserts []BodyAssert) (miss bool, nonNumeric bool) {
 	for _, a := range asserts {
-		if !bodyAssertMiss(text, a) {
+		r := evalAssert(text, a)
+		if !r.miss {
 			continue
 		}
 		miss = true
-		if !isNumericOp(a.Op) {
-			continue
-		}
-		target := text
-		ok := true
-		if a.Scoped() {
-			target, ok = jsonField(text, a.Field)
-		}
-		if ok {
-			if _, perr := strconv.ParseFloat(strings.TrimSpace(target), 64); perr != nil {
-				nonNumeric = true
-			}
+		if r.nonNumeric {
+			nonNumeric = true
 		}
 	}
 	return miss, nonNumeric
@@ -288,17 +316,11 @@ func BodyClaimText(r CallResult, want Expect) string {
 // unscoped claim the whole text. Author-side evidence: the caller bounds it and keeps it off every
 // builder path.
 func BodyAssertObservation(text string, a BodyAssert) (miss bool, observed string) {
-	if !bodyAssertMiss(text, a) {
+	r := evalAssert(text, a)
+	if !r.miss {
 		return false, ""
 	}
-	if !a.Scoped() {
-		return true, text
-	}
-	v, ok := jsonField(text, a.Field)
-	if !ok {
-		return true, FieldAbsentObserved
-	}
-	return true, v
+	return true, r.observed
 }
 
 // FieldAbsentObserved is the observed text of a field-scoped claim whose field the answer does not
@@ -354,30 +376,9 @@ func bodyMiss(text string, want Expect) bool {
 // field is absent, the assertion has not been satisfied. That is what steers an author to
 // `body contains …` for a text answer instead of letting a field assertion pass vacuously on prose.
 func bodyAssertMiss(text string, a BodyAssert) bool {
-	target := text
-	if a.Scoped() {
-		v, ok := jsonField(text, a.Field)
-		if !ok {
-			return true // R4: field absent, or the answer is not JSON → FAIL
-		}
-		target = v
-	}
-	switch a.Op {
-	case BodyExistsOp:
-		return false // reaching here means the field resolved, which IS the assertion
-	case BodyMatchesOp:
-		re, err := regexp.Compile(a.Value)
-		// A regex that does not compile is refused at validate/preflight before any call is made,
-		// so here it can only be a miss — never a silent pass.
-		return err != nil || !re.MatchString(target)
-	case BodyGTOp, BodyGTEOp, BodyLTOp, BodyLTEOp:
-		miss, _ := numericAssertMiss(target, a.Value, a.Op)
-		return miss
-	case BodyEqualsOp:
-		return target != a.Value // EXACT match — unlike BodyContainsOp, extra text either side is a miss
-	default:
-		return !strings.Contains(target, a.Value)
-	}
+	// one judgement for every form (claimeval.go), so the miss, the reason and the
+	// observed text can never disagree about whether a claim held.
+	return evalAssert(text, a).miss
 }
 
 // numericAssertMiss evaluates ONE numeric comparison. nonNumeric reports whether the MISS was
@@ -412,41 +413,15 @@ func numericAssertMiss(observed, thresholdStr, op string) (miss bool, nonNumeric
 // jsonField navigates a dotted path through a JSON document and returns the value as text.
 // Reports ok=false when the text is not JSON or the path does not resolve — R4 makes both a FAIL.
 func jsonField(text, path string) (string, bool) {
-	var doc any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &doc); err != nil {
+	doc, ok := decodeJSON(text)
+	if !ok {
 		return "", false
 	}
-	cur := doc
-	for _, seg := range strings.Split(path, ".") {
-		switch v := cur.(type) {
-		case map[string]any:
-			nxt, ok := v[seg]
-			if !ok {
-				return "", false
-			}
-			cur = nxt
-		case []any:
-			i, err := strconv.Atoi(seg)
-			if err != nil || i < 0 || i >= len(v) {
-				return "", false
-			}
-			cur = v[i]
-		default:
-			return "", false
-		}
-	}
-	switch v := cur.(type) {
-	case nil:
+	v, found := lookupPath(doc, path, false)
+	if !found {
 		return "", false
-	case string:
-		return v, true
-	default:
-		b, err := json.Marshal(v)
-		if err != nil {
-			return "", false
-		}
-		return string(b), true
 	}
+	return scalarText(v)
 }
 
 // observedReality describes ONLY what the responder actually did — never the

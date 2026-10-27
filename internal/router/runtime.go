@@ -8,194 +8,24 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"github.com/OneDro1d/argus-runner/internal/mcp"
 )
 
 // The router's runtime: how it reaches upstreams, which port it binds, and where its state lives.
 
-// ── the real forwarder ───────────────────────────────────────────────────────────────────────────
-
-// MCPForwarder forwards a routed call over the existing MCP client, which already speaks both
-// transports (Streamable HTTP and legacy SSE) and is declared, never guessed.
-type MCPForwarder struct {
-	// Transport is how upstreams are addressed. Both planes the router talks to are ordinary MCP
-	// servers: the in-env executor and the control plane both serve /mcp.
-	Transport mcp.Transport
-	// HostAlias reconciles the vantage the routing table was WRITTEN from (the host's) with the one
-	// the router is READING it from. Empty for a host process; set to `host.docker.internal` for the
-	// VR-R1 container, where an unrewritten `localhost` would loop every call back into the router.
-	// See vantage.go for why this is declared rather than detected.
-	HostAlias string
-}
-
-// Forward performs one tools/call against the resolved target.
-//
-// It maps the client's THREE distinct failure kinds onto errors that keep them distinct, because
-// collapsing them is the defect this build exists to remove:
-//   - Unreachable / TransportErr -> could not ASK (an error here; the proxy reports reached:false)
-//   - JSONRPCError               -> the protocol refused the call (an error, with its message)
-//   - IsError                    -> the TOOL answered, and its answer was a failure. NOT an error
-//     here: the upstream was reached and gave a real answer, so it is
-//     passed through as the payload for the caller to read.
-func (f MCPForwarder) Forward(t Target, tool string, args json.RawMessage) (any, bool, error) {
-	tr := f.Transport
-	if tr == "" {
-		tr = mcp.Streamable
-	}
-	// The rewrite happens HERE, at the last moment, and never in the stored state. The state file is
-	// the host's record of where things are; a router that rewrote it on load would hand the next
-	// reader — an operator running `router status`, or a host-process router started later against
-	// the same state — a URL that is only true for a container.
-	c := &mcp.Client{ServerURL: ResolveFromVantage(t.URL, f.HostAlias), Transport: tr, Token: t.Token}
-
-	var parsed any
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &parsed); err != nil {
-			return nil, false, fmt.Errorf("arguments are not valid JSON: %w", err)
-		}
-	}
-	parsed = localiseInstanceID(parsed, t.Plane)
-	res := c.Call(mcp.CallInput{Tool: CloudToolName(tool, t.Plane), Args: parsed})
-
-	if res.Unreachable {
-		return nil, false, fmt.Errorf("endpoint not reachable")
-	}
-	if res.TransportErr != "" {
-		return nil, false, fmt.Errorf("transport: %s", res.TransportErr)
-	}
-	if res.JSONRPCError != nil {
-		// The upstream ANSWERED, and its answer was "no". That is not the same as being
-		// unreachable, and the proxy must not report it as one — the same distinction
-		// this codebase preserves everywhere, applied one layer up.
-		//
-		// It matters concretely now that runner__run is forwarded synchronously: a busy executor
-		// replies -32002 "run already in progress on this instance", and rendering that as
-		// "could not reach the runner plane" would send someone to check the network for a
-		// perfectly healthy instance that simply said not yet.
-		return nil, false, &UpstreamRefusal{Code: res.JSONRPCError.Code, Message: res.JSONRPCError.Message}
-	}
-	// VR2-13 (V15-007) — ONE ENVELOPE, and this REVERSES the decision recorded here before.
-	//
-	// It used to `return json.RawMessage(res.Raw)` — the upstream's COMPLETE JSON-RPC envelope — on
-	// the reasoning that "the router is a router, and re-shaping an upstream's payload here would
-	// create a second contract to drift from the first". That reasoning is sound about SHAPE and
-	// wrong about NESTING: the proxy hands whatever it gets to mcpserver.Ok, which marshals it into
-	// the text of a content block. Returning an envelope therefore produced an envelope INSIDE an
-	// envelope, and every caller had to unwrap twice.
-	//
-	// Measured 2026-08-12: exactly 2 JSON-RPC envelopes deep on both compose and k3d — systemic, not
-	// a one-off. Owner ruling the same day: "there should not be envelope inside envelope, it should
-	// be wrapped once."
-	//
-	// So the router hands back the upstream's OWN payload and lets the proxy wrap it once. The
-	// upstream's result is {content:[{type:"text",text:"<the real JSON>"}], isError:bool}; the useful
-	// value is that inner text. It is returned PARSED when it is JSON, so the caller receives an
-	// object rather than a string containing an object — one wrap, one decode.
-	//
-	// isError travels alongside it rather than being flattened away. Dropping it would be a real
-	// regression: a tool that ANSWERED "failed" would arrive looking like a success, which is the
-	// class of silent-wrong-answer this codebase exists to remove.
-	return unwrapUpstream(res), res.IsError, nil
-}
-
-// unwrapUpstream turns an upstream CallResult into the value the proxy should wrap ONCE.
-//
-// It is deliberately total: every branch returns something a caller can read, because a router that
-// answered nothing is indistinguishable from one that could not be reached, and those are the two
-// states this codebase keeps apart everywhere else.
-func unwrapUpstream(res mcp.CallResult) any {
-	// The overwhelmingly common shape: a single text block carrying JSON.
-	if len(res.Content) == 1 && res.Content[0].Type == "text" {
-		var v any
-		if err := json.Unmarshal([]byte(res.Content[0].Text), &v); err == nil {
-			return v
-		}
-		// Not JSON — a tool is entitled to answer in prose. Hand back the text itself.
-		return res.Content[0].Text
-	}
-	// Several blocks, or a non-text block: hand back the content array unchanged rather than
-	// inventing a merge. Still ONE envelope; the caller sees exactly what the upstream sent.
-	if len(res.Content) > 0 {
-		return res.Content
-	}
-	// A result with no content at all. Returning the raw envelope here would reintroduce the very
-	// nesting this change removes, so report the emptiness as itself.
-	return map[string]any{"content": []any{}}
-}
-
-// UpstreamRefusal is an upstream that was REACHED and said no. It carries the upstream's own
-// JSON-RPC code so the refusal survives the hop with its meaning intact rather than being flattened
-// into "something went wrong" — a caller that sees -32002 knows to retry later, and one that sees a
-// scope error knows not to bother.
-type UpstreamRefusal struct {
-	Code    int
-	Message string
-}
-
-func (e *UpstreamRefusal) Error() string { return e.Message }
-
-// CloudToolName maps an agent-facing tool name to the name the CLOUD plane publishes (VR-C5).
-//
-// The agent keeps seeing `author__request_run` — that is what its folder has always listed, and
-// changing it would rewrite every skill and every doc for a cosmetic reason. The CLOUD publishes the
-// BARE `author_request_run`, because a gateway builds its displayed name from `__`-joined segments:
-//
-//	mcp__acme-atlassian__onedroid_argus__author_request_run
-//
-// A tool carrying `__` inside its own name splits that display into segments that no longer parse,
-// exactly where a user looks to tell which SUT they are addressing.
-//
-// Runner tools are untouched: they never reach a gateway.
-func CloudToolName(tool, plane string) string {
-	if plane != "author" {
-		return tool
-	}
-	return strings.Replace(tool, "author__", "author_", 1)
-}
+// ── the in-env instance id ────────────────────────────────────────────────────────────────────────
 
 // InEnvInstanceID is the instance id the IN-ENV executor answers to. It is `local` by contract
-// (CLAUDE.md: "the in-env runner__* tools take `local`; the cloud author__* tools take your
-// registered instance id"), and the executor enforces it:
+// (the in-env runner tools take `local`; the cloud author tools take the registered instance id),
+// and the executor enforces it:
 //
 //	{"error":"unknown instance_id \"orderservice-compose\" — this server serves instance \"local\" only"}
+//
+// THE JOIN THIS SERVES, measured against the live estate: the router ROUTES by the registered instance id
+// — that is how a folder reaches three SUTs through one endpoint — but the in-env executor it forwards to
+// serves exactly one instance and calls it `local`. So a runner call's instance_id is rewritten to `local`
+// on the way out (localiseRaw, runner.go), and an author call keeps the real id: the control plane resolves
+// tenancy and the run ledger from it. (Before AC-D70 the forwarder did this as localiseInstanceID.)
 const InEnvInstanceID = "local"
-
-// localiseInstanceID rewrites `instance_id` to `local` on the RUNNER plane, and leaves the author
-// plane untouched.
-//
-// THE JOIN THIS FIXES, measured against the live estate: the router ROUTES by the registered
-// instance id — that is how a folder reaches three SUTs through one endpoint — but the in-env
-// executor it forwards to serves exactly one instance and calls it `local`. Passing the id through
-// unchanged made every runner call fail with "unknown instance_id", while tools/list, the scope
-// checks and the transport all looked perfect.
-//
-// It survived the unit tests because they forward through a STUB that echoes whatever arguments it
-// is given: the assertion was "the right target was chosen", never "the payload the executor
-// receives is one it can answer". Only a real executor could say otherwise, and it did.
-//
-// The author plane keeps the real id — the control plane resolves tenancy and the run ledger from
-// it, so rewriting there would address the wrong instance entirely.
-func localiseInstanceID(parsed any, plane string) any {
-	if plane != "runner" {
-		return parsed
-	}
-	m, ok := parsed.(map[string]any)
-	if !ok {
-		return parsed
-	}
-	if _, present := m["instance_id"]; !present {
-		return parsed
-	}
-	// Copy: the caller's map may be shared, and a router that mutated its input would make the same
-	// call behave differently the second time.
-	out := make(map[string]any, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	out["instance_id"] = InEnvInstanceID
-	return out
-}
 
 // ── the sticky port (VR-R3) ──────────────────────────────────────────────────────────────────────
 

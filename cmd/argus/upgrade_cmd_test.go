@@ -763,6 +763,10 @@ func TestUpgrade_LeavesTheExecutorImageAndReplicasAlone(t *testing.T) {
 		!strings.Contains(out, "left alone") {
 		t.Errorf("the output must say the render's image differs and was left alone:\n%s", out)
 	}
+	if !strings.Contains(out, "render-k8s has no recorded kit") || !strings.Contains(out, "set image deployment/executor executor=") ||
+		!strings.Contains(out, "CLI at the NEW version") {
+		t.Errorf("the output must name the kubectl set image path for a render-k8s instance:\n%s", out)
+	}
 	if strings.Contains(c.patches(), "argus:newer") {
 		t.Errorf("the patch carries the render's image:\n%s", c.patches())
 	}

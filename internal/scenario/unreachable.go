@@ -40,6 +40,10 @@ func unreachableClaimProblem(claims []string) string {
 	if !StepClaimsUnreachable(claims) {
 		return ""
 	}
+	if StepClaimsElapsed(claims) {
+		return "`unreachable` cannot be combined with an `elapsed` claim on the same step: `unreachable` says no HTTP " +
+			"response arrived at all, so there is no response to time"
+	}
 	if len(claims) > 1 {
 		return fmt.Sprintf("`unreachable` cannot be combined with another claim on the same step (it says no "+
 			"HTTP response arrived at all, so a status or body claim beside it could never hold); this step "+

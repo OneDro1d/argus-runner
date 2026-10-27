@@ -96,16 +96,29 @@ const (
 	FloorE2 = "E2"
 )
 
+// UsesTolerance reports whether some rule of the set carries a `- **Tolerance**:` line (AC-F3). It is the data-access
+// question — a comparison with Tolerance sends the numbers at those paths from the environment to the control plane on
+// every run — and is answered here alone, never through KeyFloors: lowering a key's executor floor must not switch the
+// Limited refusals off. KeysNeedingE2 asks it too, so the two share one detector.
+func UsesTolerance(rules []*Rules) bool {
+	for _, r := range rules {
+		if r != nil && len(r.Tolerance) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // KeysNeedingE2 names, in a fixed order and as an author writes them, the `## COMPARE` keys that some rule of the set uses
 // and that KeyFloors files under E2 (ARGUS-CMP-11). It is what the control plane's floor reads, so the table stays the one
 // place a key's release is decided. Empty when no rule uses one.
 func KeysNeedingE2(rules []*Rules) []string {
-	var tol, nwt bool
+	tol := UsesTolerance(rules)
+	var nwt bool
 	for _, r := range rules {
 		if r == nil {
 			continue
 		}
-		tol = tol || len(r.Tolerance) > 0
 		nwt = nwt || len(r.NotWorseThan) > 0
 	}
 	var out []string

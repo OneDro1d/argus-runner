@@ -84,6 +84,7 @@ func TestDoctor_CredentialCheckKeepsNotVerifiedWhenDoctorDidNotAsk(t *testing.T)
 // F4: first-run mode prints the same lines as tester mode: on stderr, and as `lines` in the JSON.
 func TestDoctor_FirstRunPrintsLinesOnStderrAndInTheJSON(t *testing.T) {
 	noHats(t)
+	noRouterState(t)
 	t.Setenv(cpTokenEnv, "odts_"+"planted-tester-pat")
 	stubInstances(t, "ws-1", []doctor.ExecutorStatus{currentExecutor()}, nil)
 
@@ -118,6 +119,7 @@ func TestDoctor_FirstRunPrintsLinesOnStderrAndInTheJSON(t *testing.T) {
 // F5: tester mode judges the executor's version from the rows it already read.
 func TestDoctorTester_ExecutorBelowTheRecommendedFloorWarns(t *testing.T) {
 	cp := newTesterCP(t, plantedToken, append(authorTools(7), "runner__run"), "msgbus-homelab", recentSeen())
+	cp.runnerVersion = "0.3.46"
 	cp.rowExtra = `,"version_state":"update_recommended","min_supported_version":"0.3.0","min_recommended_version":"0.3.52","recommended_image":"argus-executor@sha256:abc"`
 	fakeKubectlDoctor(t)
 	env := writeTesterEnv(t, "ARGUS_TESTER_TOKEN_MSGBUS="+plantedToken+"\n")
@@ -146,7 +148,7 @@ func TestDoctorTester_ExecutorBelowTheRecommendedFloorWarns(t *testing.T) {
 
 func TestDoctorTester_ExecutorAtTheFloorPasses(t *testing.T) {
 	cp := newTesterCP(t, plantedToken, append(authorTools(7), "runner__run"), "msgbus-homelab", recentSeen())
-	cp.rowExtra = `,"version_state":"current","min_supported_version":"0.3.0","min_recommended_version":"0.3.46"`
+	cp.rowExtra = `,"version_state":"current","min_supported_version":"0.3.0","min_recommended_version":"0.3.68"`
 	fakeKubectlDoctor(t)
 	env := writeTesterEnv(t, "ARGUS_TESTER_TOKEN_MSGBUS="+plantedToken+"\n")
 

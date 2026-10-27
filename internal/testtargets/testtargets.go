@@ -1,5 +1,5 @@
 // Package testtargets is the pure core of "one Argus instance declares several named test targets"
-// (, UI-6 backend): the declaration shape, its load-time validation, the scenario →
+// (UI-6 backend): the declaration shape, its load-time validation, the scenario →
 // target mapping, and the wire encoding the executor reports and the control plane stores.
 //
 // ⚠ NAMING. "test target" is NOT the connection `targets:` block of argus-config (strict, http/database/…)

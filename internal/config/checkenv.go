@@ -24,7 +24,7 @@ import (
 //
 // ⚠ DELIVERY, NOT USE. This list decides what onboarding DELIVERS to the executor. It does not restrict
 // what a check may substitute: resolveVars (internal/argus/mcp_scenario.go) fills ANY name set in the
-// executor's environment, declared or not (, OPEN).
+// executor's environment, declared or not (OPEN).
 // ⛔ TOP-LEVEL, never under `targets`, for the reason load_allowed_targets is: `targets` is decoded
 // strictly, so an executor built before this key would refuse it there. A top-level key falls into an
 // older executor's lenient inline map and is IGNORED -- silently, which is why the docs say to upgrade
@@ -138,6 +138,14 @@ func (c *Config) credentialRefNames() map[string]bool {
 func (c *Config) declaredEnvRefs() []EnvRef {
 	have := c.credentialRefNames()
 	var out []EnvRef
+	// the NAMES a clerk_session block references ride this list too, under their own field
+	// label, so an unset one is refused by name at load and secrets-scan / doctor carry it.
+	for _, r := range c.clerkEnvRefs() {
+		if !have[r.Name] {
+			have[r.Name] = true
+			out = append(out, r)
+		}
+	}
 	for _, n := range c.CheckEnvNames() {
 		if !have[n] {
 			out = append(out, EnvRef{Name: n, Field: "check_env"})

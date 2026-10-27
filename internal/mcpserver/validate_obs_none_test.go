@@ -9,7 +9,7 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/toolcore"
 )
 
-// (a): the executor's runner__validate_config tool answers through
+// (a): the executor's runner_validate_config tool answers through
 // toolcore.ValidateConfig(env). With the obs mode in that Env (cmd/argus env() reads ARGUS_OBS_MODE)
 // an --obs none instance's config with no Grafana URL is valid; without it, it is refused.
 func TestDefaultTools_ValidateConfigHonoursObsNone(t *testing.T) {
@@ -29,7 +29,7 @@ func TestDefaultTools_ValidateConfigHonoursObsNone(t *testing.T) {
 		env := toolcore.Env{Instance: "local", ConfigPath: cfg, ScenariosDir: scen, ResultsRoot: t.TempDir(), Tier: "compose", ObsMode: c.mode}
 		var out Outcome
 		for _, tl := range DefaultTools(env) {
-			if tl.Name == "runner__validate_config" {
+			if tl.Name == "runner_validate_config" {
 				out = tl.Handler(json.RawMessage(`{"instance_id":"local"}`), Principal{})
 			}
 		}
@@ -38,7 +38,7 @@ func TestDefaultTools_ValidateConfigHonoursObsNone(t *testing.T) {
 			t.Fatalf("mode %q: payload is %T, want the validator's map", c.mode, out.Payload)
 		}
 		if got, _ := m["valid"].(bool); got != c.wantValid {
-			t.Errorf("mode %q: runner__validate_config valid=%v, want %v (tier=%v errors=%v error=%v)", c.mode, got, c.wantValid, m["tier"], m["errors"], m["error"])
+			t.Errorf("mode %q: runner_validate_config valid=%v, want %v (tier=%v errors=%v error=%v)", c.mode, got, c.wantValid, m["tier"], m["errors"], m["error"])
 		}
 	}
 }

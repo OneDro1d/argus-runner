@@ -43,7 +43,8 @@ package certificate
 //     verify a v5 certificate with the not_applicable count silently dropped.
 //
 // Format is what NEW certificates declare. FormatV1 and FormatV2 are still accepted on verify: every
-// certificate issued before v3 keeps verifying, as long as it is honest.
+// certificate issued before v3 keeps verifying, as long as it is honest. An older verifier refuses v5
+// by name (TestFormat_AnOlderVerifierRefusesV5).
 const (
 	Format   = "argus-certificate/v3"
 	FormatV2 = "argus-certificate/v2"
@@ -52,13 +53,15 @@ const (
 	FormatV5 = "argus-certificate/v5"
 )
 
-// Tallied reports whether format's verdict anchor is VerdictTallied (v2 to v5).
+// Tallied reports whether format's verdict anchor is ledger.VerdictTallied (v2 to v5).
 func Tallied(format string) bool {
 	return format == Format || format == FormatV2 || format == FormatV4 || format == FormatV5
 }
 
 // HasMeasurement reports whether format carries the artifact_measurement block (v3, v4 and v5).
-func HasMeasurement(format string) bool { return format == Format || format == FormatV4 || format == FormatV5 }
+func HasMeasurement(format string) bool {
+	return format == Format || format == FormatV4 || format == FormatV5
+}
 
 // KnownFormat reports whether this verifier understands format. An unknown one is refused by name.
 func KnownFormat(format string) bool {
@@ -128,8 +131,8 @@ type Tallies struct {
 	Failed   int `json:"failed"`
 	Errored  int `json:"errored"`
 	Degraded int `json:"degraded,omitempty"`
-	// NotApplicable (v5 only) is the scenarios not executed because a precondition they depend on is
-	// absent. checkTallies refuses it on any other format. Anchored in the v5 verdict payload.
+	// NotApplicable (v5 only) is the scenarios not executed because a precondition they depend
+	// on is absent. checkTallies refuses it on any other format. Anchored in the v5 verdict payload.
 	NotApplicable int `json:"not_applicable,omitempty"`
 }
 
@@ -229,6 +232,9 @@ type Certificate struct {
 	// certificate the control plane issues, nil only on one issued before it existed.
 	Anchoring *Anchoring `json:"anchoring,omitempty"`
 
+	// ArtifactMeasurement is required on a v3 certificate and absent on older ones.
+	ArtifactMeasurement *ArtifactMeasurement `json:"artifact_measurement,omitempty"`
+
 	// Faults is REQUIRED and non-empty on a v4 certificate and absent on every other format.
 	// The executor attests it; the anchored evidence_bundle_hash binds it.
 	Faults []Fault `json:"faults,omitempty"`
@@ -237,10 +243,7 @@ type Certificate struct {
 	// format. The executor attests it; the anchored evidence_bundle_hash binds it.
 	Preconditions []Precondition `json:"preconditions,omitempty"`
 
-	// ArtifactMeasurement is required on a v3 certificate and absent on older ones.
-	ArtifactMeasurement *ArtifactMeasurement `json:"artifact_measurement,omitempty"`
-
-	// T6.3 option C / once this run's reveal has been anchored (a roleReveal Anchor
+	// Once this run's reveal has been anchored (a roleReveal Anchor
 	// above exists — see verify.go's roleOfAnchors; not necessarily version 4), the certificate states
 	// that the seal is broken — WHEN, and the digest the chain committed to. Both empty together for a
 	// run whose reveal has not (yet) been anchored — the seal is intact; NEVER populated without a

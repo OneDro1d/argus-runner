@@ -175,7 +175,7 @@ func TestFailedClaims_HTTP_BoundedInCountAndLength(t *testing.T) {
 	}
 }
 
-// a step with 12 false claims lists all 12, in written order, the
+// (a tester's "done when"): a step with 12 false claims lists all 12, in written order, the
 // claims that held are absent, and nothing is reported omitted.
 func TestFailedClaims_HTTP_TwelveFalseClaimsAreAllListed(t *testing.T) {
 	srv := newSeqServer(t, map[string][]string{"/b": {`{"v": 1, "ok": "yes"}`}})

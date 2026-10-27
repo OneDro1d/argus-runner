@@ -305,7 +305,7 @@ func oldEncoderReference(t *testing.T, toInbox, fromAgentID, prompt, intentStr, 
 func TestHoldout_H7_EnvelopePreset_MatchesOldEncoder_ExceptMessageIDAndEnqueuedAt(t *testing.T) {
 	// corr must be the SAME run correlation id runOne's harness (amqp_test.go's runOneWant) actually
 	// uses ("tr-amqp-1", hardcoded there) — the envelope's correlationId defaults to the run's cid.
-	const toInbox, fromAgentID, prompt, intent, corr = "agent.hop", "argus-test", "argus-test: hello", "ASK", "tr-amqp-1"
+	const toInbox, fromAgentID, prompt, intent, corr = "agent.alpha", "argus-test", "argus-test: hello", "ASK", "tr-amqp-1"
 
 	oldBody, oldHeaders := oldEncoderReference(t, toInbox, fromAgentID, prompt, intent, corr)
 	oldMsg, err := envelope.DecodeWithHeaders(oldBody, oldHeaders)
@@ -313,7 +313,7 @@ func TestHoldout_H7_EnvelopePreset_MatchesOldEncoder_ExceptMessageIDAndEnqueuedA
 		t.Fatalf("decode old reference: %v", err)
 	}
 
-	spec := AMQPSpec{Op: "publish", URLEnv: "MSGBUS_ARGUS_TEST_URL", Exchange: "msgbus.inbox", RoutingKey: "inbox.agent.hop",
+	spec := AMQPSpec{Op: "publish", URLEnv: "MSGBUS_ARGUS_TEST_URL", Exchange: "msgbus.inbox", RoutingKey: "inbox.agent.alpha",
 		Envelope: &AMQPEnvelope{ToInbox: toInbox, FromAgentID: fromAgentID, Intent: intent, Prompt: prompt}}
 	f := &fakeBroker{outcome: amqpengine.Outcome{OK: true}}
 	sr := runOne(t, spec, scenario.BrokerClaim{Accepts: true}, f)

@@ -89,7 +89,7 @@ type Input struct {
 	TokenSource string
 	// Obs is the observability mode the onboarder will be given (--obs). Empty means bundled. Under "none"
 	// onboarding starts no shared argus-obs stack, so the compose-host-ports check does not apply
-	// (, UI-2).
+	// (UI-2).
 	Obs string
 }
 

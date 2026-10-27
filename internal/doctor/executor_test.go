@@ -42,8 +42,8 @@ func noDocker(in ExecutorInput) ExecutorInput {
 	return in
 }
 
-// REPLAY: one case per recorded incident this check claims (verify/2026-09-25-friction-investigation,
-// incidents-{A,B}-*.tsv; tagging in verify/2026-09-28-doctor-incident-tagging). The recorded state goes
+// REPLAY: one case per recorded incident this check claims (a tester's run,
+// tagging in a tester's run). The recorded state goes
 // in; the report must name the CAUSE (Detail) and the FIX (Fix). A:83 (a documented pin lagging the dev
 // builds) is tagged to this check too, but its versions were not recorded, so it has no replay here.
 func TestCheckExecutorVersion_Replay(t *testing.T) {
@@ -53,34 +53,34 @@ func TestCheckExecutorVersion_Replay(t *testing.T) {
 		detail      []string // every one must appear in Detail
 		fix         []string // every one must appear in Fix (case-insensitive)
 	}{
-		{"A:89", `handoffs/2026-09-22-en7-takeover-onboard-running.md:33 "0.3.36 runner lacks #135: always cleanup on mcp steps ignored"`,
+		{"A:89", `a tester's notes "0.3.36 runner lacks #135: always cleanup on mcp steps ignored"`,
 			asked(exec0336("sut-demo")), []string{"#135", `"always": true`, "mcp"}, []string{"0.3.37"}},
-		{"A:94", `handoffs/2026-09-22-sut-demo-live-prs-154-156.md:29 "0.3.36 lacks #135/#138/#140: passing UI rows still list bullets as unexecuted"`,
+		{"A:94", `a tester's notes "0.3.36 lacks #135/#138/#140: passing UI rows still list bullets as unexecuted"`,
 			asked(exec0336("sut-demo")), []string{"#138", "#140", "unexecuted"}, []string{"0.3.37"}},
 		{"B:15", `the tester notes "3 of 3 not evaluated (0.3.36 has no #139 cause line)"`,
 			asked(exec0336("sut-demo")), []string{"#140", "#139", "cause"}, []string{"0.3.37"}},
-		{"B:68", `handoffs/2026-09-25-hub-runner-window-mixup.md:47 "executor lost … fixed by #209, ships from v0.3.37-rc.1"`,
+		{"B:68", `a tester's notes "executor lost … fixed by #209, ships from v0.3.37-rc.1"`,
 			asked(exec0336("hub-tester")), []string{"#209", "executor lost"}, []string{"0.3.37"}},
-		{"B:77", `verify/2026-09-25-en7-sut-demo/PROOF-STATUS.md:17 "WEBUI-001 on the 0.3.36 executor lists all 4 enforced bullets under unexecuted"`,
+		{"B:77", `a tester's run "WEBUI-001 on the 0.3.36 executor lists all 4 enforced bullets under unexecuted"`,
 			asked(exec0336("sut-demo")), []string{"AC-D27", "unexecuted"}, []string{"0.3.37"}},
 		{"B:38", `the tester notes "The CP RECOMMENDS sha256:d7aff596… = 0.3.32, OLDER than ours"`,
 			asked(exec0336("sut-demo")), []string{"0.3.32", "NEWER", "DOWNGRADE", "d7aff596"}, []string{"do not run", "update block"}},
-		{"B:56", `verify/2026-09-23-hub-tester/ONBOARD-HUB-PIOTR.md:103 (recurrence of B:38)`,
+		{"B:56", `a tester's run (recurrence of B:38)`,
 			asked(exec0336("hub-tester")), []string{"0.3.32", "DOWNGRADE"}, []string{"do not run"}},
-		{"B:60", `handoffs/2026-09-24-hub-harness-up-9of12-green.md:42 "Never run the CP's update_command" (recurrence of B:38)`,
+		{"B:60", `a tester's notes "Never run the CP's update_command" (recurrence of B:38)`,
 			asked(exec0336("hub-tester")), []string{"0.3.32", "DOWNGRADE"}, []string{"do not run"}},
-		{"B:80", `NOTES.md:43 (09-25) "CP update_command recommends d7aff596… = 0.3.32 — a DOWNGRADE" (recurrence of B:38)`,
+		{"B:80", `a tester's notes (09-25) "CP update_command recommends d7aff596… = 0.3.32 — a DOWNGRADE" (recurrence of B:38)`,
 			asked(exec0336("hub-tester")), []string{"0.3.32", "DOWNGRADE"}, []string{"do not run"}},
-		{"A:95", `tester-upstream-notepad handoffs/2026-09-22-sut-demo-live-prs-154-156.md:30 "'\"' or '\\' in a ${VAR} value silently empties app_url (ui_scenario.go:54); app_url expanded twice."`,
+		{"A:95", `a tester's notes "'\"' or '\\' in a ${VAR} value silently empties app_url (ui_scenario.go:54); app_url expanded twice."`,
 			asked(exec0336("sut-demo")), []string{"#160", "quote or backslash", "${VAR}", "APP_URL"}, []string{"0.3.37"}},
-		{"B:28", `handoffs/2026-09-23-sut-demo-59-59-prs-awaiting-merge.md:65 "quote/backslash in ${VAR} empties the UI payload, internal/argus/ui_scenario.go:53-56"`,
+		{"B:28", `a tester's notes "quote/backslash in ${VAR} empties the UI payload, internal/argus/ui_scenario.go:53-56"`,
 			asked(exec0336("sut-demo")), []string{"#160", "quote or backslash", "payload"}, []string{"0.3.37"}},
 		// Rows recorded after the 09-25 investigation, each with its own source.
-		{"T0928:312", `verify/2026-09-28-before-trial/trial-timeline.txt:87 "no runner id paired for this instance … before author_get_report can relay to it" — the trial agent then called 19 reds "Memstore gaps"`,
+		{"T0928:312", `a tester's run "no runner id paired for this instance … before author_get_report can relay to it" — the trial agent then called 19 reds "Memstore gaps"`,
 			asked(exec0336("sut-demo")), []string{"#286", "author_get_report", "why"}, []string{"0.3.40"}},
 		{"GH:307", `issue #307 (AC-D50): "7 registrations, 7 destructions, 0 survivors across compose, k3d and managed AKS"; the 0.3.36 kit has the same probe (argus-kit-0.3.36/onboarding/onboard.sh:3784-3789)`,
 			asked(exec0336("sut-demo")), []string{"#308", "AC-D50", "destroy"}, []string{"0.3.43"}},
-		{"L0929:docker", `tester verify/2026-09-29-312-fix-check/NOTE.md § Addendum 2: the fix said "with the update block the control plane publishes", the block runs docker pull, and docker info here says "dial unix /var/run/docker.sock: connect: no such file or directory"`,
+		{"L0929:docker", `a tester's run § Addendum 2: the fix said "with the update block the control plane publishes", the block runs docker pull, and docker info here says "dial unix /var/run/docker.sock: connect: no such file or directory"`,
 			noDocker(asked(dockerBlock(exec0336("sut-demo")))), []string{"#135"}, []string{"cannot run on this host", "docker.sock", "ask your control-plane operator", "kit and kubeconfig paths"}},
 	}
 	for _, tc := range cases {
@@ -109,9 +109,63 @@ func TestCheckExecutorVersion_Replay(t *testing.T) {
 	}
 }
 
+// REPLAY of a tester's rows (a tester's run): an executor on 0.3.65 — the kit the pilot instance was onboarded with — was reported
+// "current, with every fix this doctor knows of", because the table stopped at 0.3.43. Each of these cost
+// a run or a triage pass before it was traced to the executor.
+func TestCheckExecutorVersion_ReplayThreeEngines(t *testing.T) {
+	exec0365 := ExecutorStatus{InstanceID: "pilot", RunnerVersion: "0.3.65", VersionState: federation.FloorCurrent,
+		MinSupported: "0.3.0", MinRecommended: "0.3.65", RecommendedImage: "argus-executor@sha256:0365"}
+	cases := []struct {
+		row, source string
+		detail      []string
+		fix         []string
+	}{
+		{"F15", `a tester's findings "chain http steps send no X-Correlation-Id": Loki and the sagas view empty for every chain scenario`,
+			[]string{"#610", "#606", "X-Correlation-Id"}, []string{"0.3.66: #610"}},
+		{"F19", `a tester's run EXPECT.md "chain HTTP steps cut at 30 s whatever ## TIMEOUT said, reported as SUT unreachable"`,
+			[]string{"#623", "#621", "30 s", "SUT unreachable"}, []string{"0.3.68: #623"}},
+		{"F20", `a tester's run EXPECT.md "two Go comparisons listed 10 failed claims where 11 were predicted"`,
+			[]string{"#633", "#632", "at most 10"}, []string{"0.3.68"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.row, func(t *testing.T) {
+			c := CheckExecutorVersion(asked(exec0365))
+			if c.Status != StatusWarn {
+				t.Errorf("%s: status = %q, want warn — 0.3.65 lacks the fix\nsource: %s\ndetail: %s", tc.row, c.Status, tc.source, c.Detail)
+			}
+			for _, s := range tc.detail {
+				if !strings.Contains(c.Detail, s) {
+					t.Errorf("%s: detail does not name %q\nsource: %s\ndetail: %s", tc.row, s, tc.source, c.Detail)
+				}
+			}
+			for _, s := range tc.fix {
+				if !strings.Contains(c.Fix, s) {
+					t.Errorf("%s: fix does not say %q\nfix: %s", tc.row, s, c.Fix)
+				}
+			}
+		})
+	}
+	t.Run("0.3.68 carries all three", func(t *testing.T) {
+		e := exec0365
+		e.RunnerVersion, e.MinRecommended = "0.3.68", "0.3.68"
+		c := CheckExecutorVersion(asked(e))
+		if c.Status != StatusOK || strings.Contains(c.Detail, "#610") || strings.Contains(c.Detail, "#633") {
+			t.Fatalf("got %+v", c)
+		}
+	})
+	t.Run("0.3.66 has the correlation id, not the 0.3.68 fixes", func(t *testing.T) {
+		e := exec0365
+		e.RunnerVersion, e.MinRecommended = "0.3.66", "0.3.66"
+		c := CheckExecutorVersion(asked(e))
+		if strings.Contains(c.Detail, "#610") || !strings.Contains(c.Detail, "#623") {
+			t.Fatalf("got %+v", c)
+		}
+	})
+}
+
 func TestCheckExecutorVersion(t *testing.T) {
-	current := ExecutorStatus{InstanceID: "sut-demo", RunnerVersion: "0.3.44", VersionState: federation.FloorCurrent,
-		MinSupported: "0.3.0", MinRecommended: "0.3.44", RecommendedImage: "argus-executor@sha256:06dc0675"}
+	current := ExecutorStatus{InstanceID: "sut-demo", RunnerVersion: "0.3.68", VersionState: federation.FloorCurrent,
+		MinSupported: "0.3.0", MinRecommended: "0.3.68", RecommendedImage: "argus-executor@sha256:06dc0675"}
 
 	// THE RULE: a check that could not ask is unknown, never ok — and says why it did not ask.
 	t.Run("not asked is unknown, with the reason and a fix", func(t *testing.T) {
@@ -157,7 +211,7 @@ func TestCheckExecutorVersion(t *testing.T) {
 			t.Fatalf("got %+v", c)
 		}
 	})
-	// (, reported by Talos from a Windows run): the control plane still
+	// (reported by a tester from a Windows run): the control plane still
 	// gives work to an executor it cannot rank, so doctor must not call that blocking.
 	t.Run("a version nobody can rank is a warning, with the control plane's reason and what to do", func(t *testing.T) {
 		for _, ver := range []string{"0.0.0-src+abc", "0.0.0-dev", "not-a-version", ""} {

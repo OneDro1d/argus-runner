@@ -81,12 +81,16 @@ func TestPushRequestEvents_StreamsLabelsAndBody(t *testing.T) {
 			}
 			last = ns
 			// body carries the ids + outcome.
-			var body map[string]string
+			var body map[string]any
 			if err := json.Unmarshal([]byte(v[1]), &body); err != nil {
 				t.Fatalf("line body not json: %q", v[1])
 			}
 			if body["run_id"] != "20260101T101500" || body["outcome"] != lbl["outcome"] || body["scenario_id"] == "" || body["correlation_id"] == "" {
 				t.Errorf("line body missing ids/outcome: %+v", body)
+			}
+			// events are aggregated per second, so every line carries its count.
+			if c, ok := body["count"].(float64); !ok || c < 1 {
+				t.Errorf("line body missing a count >= 1: %+v", body)
 			}
 		}
 	}

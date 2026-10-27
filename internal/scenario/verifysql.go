@@ -86,49 +86,103 @@ func maskSQL(q string) string {
 // It returns MESSAGES, not Errors: the caller owns the line number, because only it knows where the
 // query sits in the file.
 func VerifySQLErrors(query string, columns []string, standingState bool) []string {
+	var errs []string
+	for _, v := range verifySQLCheck(query, columns, standingState) {
+		errs = append(errs, v.msg)
+	}
+	return errs
+}
+
+// sqlViolation is one broken rule. readOnly marks the three rules that keep a VERIFY query from
+// CHANGING the database (VF8 one statement, VF9 begins with SELECT/WITH, VF4 no mutating keyword);
+// every other rule is about whether the query MEASURES anything (scoping, tautology, columns).
+type sqlViolation struct {
+	msg      string
+	readOnly bool
+}
+
+// sqlSubject says WHOSE query the shared rules are judging, so the sentences name the right thing: the
+// `## VERIFY` of a plain scenario, or the `query` of a chain `db` step. The RULES are the
+// same implementation (sqlCheck); only the words, the run-scoping requirement and the `${…}` rule differ.
+type sqlSubject struct {
+	the, a       string // "the VERIFY query" / "a VERIFY query"; "the db step's query" / "a db step's query"
+	measures     string // the clause that explains why a query that does not begin with SELECT is refused
+	mutateAdvice string // what to do with a statement that writes
+	dbStep       bool   // true: no run-scoping rule (VF5), no VF6, no `${…}` rule here (DBStepQueryPlaceholderProblems owns it)
+}
+
+var verifySubject = sqlSubject{
+	the: "the VERIFY query", a: "a VERIFY query",
+	measures: "it MEASURES the SUT's state and must not change it",
+	mutateAdvice: "a VERIFY measures the SUT, it never changes what it is measuring. Move the statement to " +
+		"`## CLEANUP`, which is executed for exactly this purpose",
+}
+
+var dbStepSubject = sqlSubject{
+	the: "the db step's query", a: "a db step's query",
+	measures: "a db step READS the system under test and must not change it",
+	mutateAdvice: "a db step only reads the system under test, it never changes it. A write belongs to the " +
+		"system's own API (an http or mcp step) or to `## CLEANUP`, never to a db step",
+	dbStep: true,
+}
+
+// verifySQLCheck is the ONE implementation of VF4-VF12 for a `## VERIFY`. VerifySQLErrors (the author path)
+// reports all of it; VerifySQLReadOnlyViolations (the run door) reports the readOnly subset, so the door can
+// never refuse a query the author path accepts. A chain `db` step asks the same implementation through
+// DBStepQueryErrors / DBStepReadOnlyViolations (sqlCheck with its own subject).
+func verifySQLCheck(query string, columns []string, standingState bool) []sqlViolation {
+	return sqlCheck(verifySubject, query, columns, standingState)
+}
+
+// sqlCheck is the implementation. standingState skips VF5 (run-scoping); a db step skips VF5, VF6 and VF11
+// (a db step is scoped by the author's own `params` / `${correlation_id}`, it has no `## EXPECT` columns, and
+// its `${…}` rule is DBStepQueryPlaceholderProblems).
+func sqlCheck(who sqlSubject, query string, columns []string, standingState bool) []sqlViolation {
 	raw := strings.TrimSpace(query)
 	if raw == "" {
 		return nil
 	}
 	masked := maskSQL(raw)
-	var errs []string
+	var out []sqlViolation
+	add := func(readOnly bool, msg string) { out = append(out, sqlViolation{msg: msg, readOnly: readOnly}) }
 
 	// ── VF8 — ONE statement. It also keeps VF4 enforceable: without it, a write can be smuggled in
 	// after a read and the "the query begins with SELECT" check still passes.
 	body := strings.TrimSuffix(strings.TrimSpace(masked), ";")
 	if strings.Contains(body, ";") {
-		errs = append(errs, "the VERIFY query contains more than one statement — a `;`-separated "+
+		add(true, who.the+" contains more than one statement — a `;`-separated "+
 			"second statement is how a WRITE gets smuggled in behind a read. One SELECT, no `;` "+
 			"except a single trailing one (VF8)")
 	}
 
 	// ── VF9 (2) — it must BEGIN with SELECT or WITH. A CTE is legitimate.
 	if !selectHeadRe.MatchString(masked) {
-		errs = append(errs, "a VERIFY query must begin with `SELECT` or `WITH` — it MEASURES the "+
-			"SUT's state and must not change it (VF9)")
+		add(true, who.a+" must begin with `SELECT` or `WITH` — "+who.measures+" (VF9)")
 	}
 
 	// ── VF7 — NO TAUTOLOGY. `SELECT 1` returns a row regardless of SUT state: the exact RO-09
 	// failure mode, caught directly rather than by its symptom.
 	if !fromRe.MatchString(masked) {
-		errs = append(errs, "the VERIFY query has no `FROM` — a query that reads no table returns "+
+		add(false, who.the+" has no `FROM` — a query that reads no table returns "+
 			"its row regardless of what the SUT did, which is a tautology and a guaranteed false "+
 			"green (VF7)")
 	}
 
 	// ── VF4 + VF12 — READ-ONLY, matched on WORD BOUNDARIES outside literals and comments.
 	if m := mutatingRe.FindString(masked); m != "" {
-		errs = append(errs, fmt.Sprintf("the VERIFY query contains `%s` — a VERIFY measures the SUT, "+
-			"it never changes what it is measuring. Move the statement to `## CLEANUP`, which is "+
-			"executed for exactly this purpose (VF4)", strings.ToUpper(m)))
+		add(true, fmt.Sprintf("%s contains `%s` — %s (VF4)", who.the, strings.ToUpper(m), who.mutateAdvice))
 	}
 
 	// ── VF9 (5) — balanced parentheses and quotes.
 	if n := strings.Count(masked, "("); n != strings.Count(masked, ")") {
-		errs = append(errs, "the VERIFY query has unbalanced parentheses (VF9)")
+		add(false, who.the+" has unbalanced parentheses (VF9)")
 	}
 	if strings.Count(raw, "'")%2 != 0 {
-		errs = append(errs, "the VERIFY query has an unterminated string literal (VF9)")
+		add(false, who.the+" has an unterminated string literal (VF9)")
+	}
+
+	if who.dbStep {
+		return out
 	}
 
 	// ── VF5 + VF11 — `${correlation_id}`, and ONLY that placeholder.
@@ -137,7 +191,7 @@ func VerifySQLErrors(query string, columns []string, standingState bool) []strin
 	// skip from becoming the SAME silent hack VF5 exists to stop: a `standing-state` scenario must
 	// prove its verdict comes from an asserted COLUMN VALUE, not from "some row exists".
 	if !standingState && !strings.Contains(raw, corrToken) {
-		errs = append(errs, "the VERIFY query is not scoped to this run — it must contain "+
+		add(false, "the VERIFY query is not scoped to this run — it must contain "+
 			"`${correlation_id}`. An unscoped query matches OTHER runs' rows, so it goes green on "+
 			"somebody else's data, and it gets worse the more concurrently the suite runs (VF5)")
 	}
@@ -145,14 +199,110 @@ func VerifySQLErrors(query string, columns []string, standingState bool) []strin
 		if m[0] == corrToken {
 			continue
 		}
-		errs = append(errs, fmt.Sprintf("`%s` is not substituted in a VERIFY query — `${correlation_id}` "+
+		add(false, fmt.Sprintf("`%s` is not substituted in a VERIFY query — `${correlation_id}` "+
 			"is the ONLY placeholder the runner replaces, so this reaches the database VERBATIM and "+
 			"the query fails or, worse, matches nothing and reads as a SUT defect (VF11)", m[0]))
 	}
 
 	// ── VF6 — every asserted column appears in the SELECT list.
-	errs = append(errs, missingColumns(masked, columns)...)
-	return errs
+	for _, m := range missingColumns(masked, columns) {
+		add(false, m)
+	}
+	return out
+}
+
+// DBStepQueryErrors applies the shared rules to the `query` of a chain `db` step: one
+// statement, begins with SELECT or WITH, no mutating keyword, has a FROM, balanced parentheses and quotes —
+// with sentences that name "the db step's query". No `${correlation_id}` is demanded and no time window.
+// The `${…}` rule is DBStepQueryPlaceholderProblems, so a caller asks for both.
+func DBStepQueryErrors(query string) []string {
+	var out []string
+	for _, v := range sqlCheck(dbStepSubject, query, nil, true) {
+		out = append(out, v.msg)
+	}
+	return out
+}
+
+// DBStepReadOnlyViolations is the read-only subset (VF8, VF9 begins-with, VF4) of DBStepQueryErrors, which is
+// what the executor's preflight enforces again before ANY step of the chain is built: one implementation,
+// filtered, exactly as VerifySQLReadOnlyViolations is for a `## VERIFY`.
+func DBStepReadOnlyViolations(query string) []string {
+	var out []string
+	for _, v := range sqlCheck(dbStepSubject, query, nil, true) {
+		if v.readOnly {
+			out = append(out, v.msg)
+		}
+	}
+	return out
+}
+
+// dbStepQueryPlaceholders are the only `${…}` a db step's query text may carry: the run's own id.
+var dbStepQueryPlaceholders = []string{"${cid}", "${correlation_id}", "${cid8}"}
+
+// DBStepSavedInQuerySentence is the ONE sentence for a `${saved.<var>}` in a db step's query text.
+func DBStepSavedInQuerySentence(ref string) string {
+	return fmt.Sprintf("the db step's query carries %s — a saved value is the system's own data and must never be "+
+		"spliced into SQL text. Write a numbered placeholder ($1, $2, …) in the query and pass the value through "+
+		"`params`, e.g. \"params\": [\"%s\"]", ref, ref)
+}
+
+// DBStepQueryPlaceholderProblems judges the `${…}` in a db step's query text: a `${saved.<var>}` is refused by
+// name with the sentence that sends the author to `params`, and any placeholder other than the run's own
+// correlation id (${cid}, ${correlation_id}, ${cid8}) is refused as one nothing fills in. The text it is given
+// is the query AS AUTHORED: at the executor's door that is the unsubstituted payload, so an environment value
+// can never have been spliced into it.
+func DBStepQueryPlaceholderProblems(query string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range placeholderRe.FindAllString(query, -1) {
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+		switch {
+		case savedAnyRe.MatchString(m):
+			out = append(out, DBStepSavedInQuerySentence(m))
+		case contains(dbStepQueryPlaceholders, m):
+		default:
+			out = append(out, fmt.Sprintf("the db step's query carries `%s`, which nothing fills in — only the run's own id "+
+				"(${correlation_id}, ${cid}, ${cid8}) is placed in a db step's query text; pass any other value "+
+				"through `params`", m))
+		}
+	}
+	return out
+}
+
+// VerifySQLReadOnlyViolations is what the RUN door enforces: only the rules that keep
+// a VERIFY query from changing the database. The measuring rules (VF5-VF7, VF11) stay author-path
+// only ON PURPOSE: a check written before one of them existed still measures what it measured, and
+// turning every such live check into an `error` at run time would be an outage with no safety gain.
+// It is a subset of VerifySQLErrors by construction (one implementation, filtered), so a query the
+// author path accepts is never refused here. A scenario with no VERIFY SQL returns nil.
+func VerifySQLReadOnlyViolations(s *Scenario) []string {
+	var out []string
+	for _, v := range verifySQLCheck(s.Verify.SQL, nil, true) {
+		if v.readOnly {
+			out = append(out, v.msg)
+		}
+	}
+	return out
+}
+
+// VerifySQLViolations is VerifySQLErrors with the inputs DERIVED FROM THE SCENARIO, so that the author
+// path (verifyErrors) and the run door (argus.runOneScenario) cannot disagree about one query: both
+// call this. `columns` are the columns the scenario's own runnable EXPECT bullets assert on (VF6) and
+// `standingState` is the `standing-state` tag (VF5b). A scenario with no VERIFY SQL returns nil.
+func VerifySQLViolations(s *Scenario) []string {
+	q := strings.TrimSpace(s.Verify.SQL)
+	if q == "" {
+		return nil
+	}
+	dbx := ParseDBExpect(s.RunnableExpect())
+	var cols []string
+	for name := range dbx.Columns {
+		cols = append(cols, name)
+	}
+	return VerifySQLErrors(q, cols, contains(s.Tags, standingStateTag))
 }
 
 // StandingStateExpectErrors is VF5b — the abuse guard on the `standing-state` opt-out from VF5.

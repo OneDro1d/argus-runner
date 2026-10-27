@@ -7,6 +7,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,6 +45,7 @@ type enrollCP struct {
 	revokeCalls    []string
 	nextMintID     int
 	expireAfterOK  int
+	mintBodies     []string // request bodies of the mints, in order (--workspace)
 }
 
 func newEnrollCP(t *testing.T, initialAccess, initialRefresh string) *enrollCP {
@@ -79,6 +81,8 @@ func newEnrollCP(t *testing.T, initialAccess, initialRefresh string) *enrollCP {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.mintAttempts++
+		bodyBytes, _ := io.ReadAll(r.Body)
+		f.mintBodies = append(f.mintBodies, string(bodyBytes))
 		got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if got == "" || got != f.validAccess {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -236,5 +240,71 @@ func TestCloudEnroll_NoTokenDirNoRevoke_IsUsageError(t *testing.T) {
 	out := captureEmit(t, func() { rc = cmdCloudEnroll(cf) })
 	if rc != exitUsage {
 		t.Fatalf("exit=%d, want exitUsage: %v", rc, out)
+	}
+}
+
+// `cloud-enroll --workspace <id>` reaches the mint request body (a user-global PAT names the
+// workspace it enrolls into), and without it the body is the unchanged `{}`.
+func TestCloudEnroll_WorkspaceFlagReachesTheRequestBody(t *testing.T) {
+	for _, tc := range []struct{ workspace, wantBody string }{
+		{"ws_b", `{"workspace":"ws_b"}`},
+		{"", `{}`},
+	} {
+		t.Run("workspace="+tc.workspace, func(t *testing.T) {
+			cp := newEnrollCP(t, "", "rt_1")
+			access := enrollFakeJWT(time.Now().Add(time.Hour))
+			cp.validAccess = access
+			seedEnrollSession(t, cp.URL, access, "rt_1")
+
+			cf := &commonFlags{controlPlane: cp.URL, instance: "alpha", tokenDir: t.TempDir(), workspaceID: tc.workspace}
+			var rc int
+			out := captureEmit(t, func() { rc = cmdCloudEnroll(cf) })
+			if rc != exitOK {
+				t.Fatalf("cloud-enroll exit=%d: %v", rc, out)
+			}
+			cp.mu.Lock()
+			bodies := append([]string(nil), cp.mintBodies...)
+			cp.mu.Unlock()
+			if len(bodies) != 1 || bodies[0] != tc.wantBody {
+				t.Fatalf("mint request bodies = %q, want [%q]", bodies, tc.wantBody)
+			}
+		})
+	}
+}
+
+// with a STATIC --token (a user-global author PAT), cloud-create-workspace presents it as the
+// bearer and cloud-enroll presents it with the named workspace - no session file, no browser login.
+func TestCloudCreateWorkspaceAndEnroll_WithAStaticToken(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		seen = append(seen, r.Method+" "+r.URL.Path+" auth="+r.Header.Get("Authorization")+" body="+string(b))
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/workspaces/create":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "ws_new", "name": "n"})
+		case "/api/enrollments":
+			_ = json.NewEncoder(w).Encode(map[string]any{"enrollment_token": "enrt_x", "enrollment_id": "e1", "workspace": "ws_new", "expires_in": 900})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(onboard.SessionEnvOverride, filepath.Join(t.TempDir(), "no-session.json")) // none exists
+
+	if rc := cmdCloudCreateWorkspace(&commonFlags{controlPlane: srv.URL, name: "n", token: "odts_static"}); rc != exitOK {
+		t.Fatalf("cloud-create-workspace exit=%d", rc)
+	}
+	if rc := cmdCloudEnroll(&commonFlags{controlPlane: srv.URL, instance: "alpha", tokenDir: t.TempDir(), token: "odts_static", workspaceID: "ws_new"}); rc != exitOK {
+		t.Fatalf("cloud-enroll exit=%d", rc)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{
+		`POST /api/workspaces/create auth=Bearer odts_static body={"name":"n"}`,
+		`POST /api/enrollments auth=Bearer odts_static body={"workspace":"ws_new"}`,
+	}
+	if strings.Join(seen, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("requests =\n%s\nwant\n%s", strings.Join(seen, "\n"), strings.Join(want, "\n"))
 	}
 }

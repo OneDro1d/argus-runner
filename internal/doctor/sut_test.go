@@ -26,7 +26,7 @@ func withSUT(e ExecutorStatus, state string, checkedAt *time.Time) ExecutorStatu
 }
 
 // documenso is the first open-source SUT onboarded on the compose tier (tester
-// verify/2026-10-01-documenso-native): its base_url is the in-network name http://documenso:3100/api/v2,
+// a tester's run): its base_url is the in-network name http://documenso:3100/api/v2,
 // which the executor can dial and the operator's host cannot.
 func documenso(state string, checkedAt *time.Time) ExecutorStatus {
 	e := exec0336("documenso-local")
@@ -137,10 +137,31 @@ func TestCheckSUTReachable_InstanceNarrows(t *testing.T) {
 
 // An old executor that has not reported is NOT told the probe is newer than it. The probe predates
 // this repository, and 0.3.36 executors (sut-demo, hub-tester) were read live on argus-dev on
-// 2026-10-01 reporting "ready" (tester verify/2026-10-01-doctor-sut-reachable/live-doctor.out).
+// 2026-10-01 reporting "ready" (a tester's run).
 func TestCheckSUTReachable_NeverMeasuredIsNotBlamedOnTheVersion(t *testing.T) {
 	c := CheckSUTReachable(asked(withSUT(exec0336("sut-demo"), sutNotChecked, nil)))
 	if c.Status != StatusUnknown || strings.Contains(c.Detail+c.Fix, "0.3.3") {
 		t.Fatalf("a 0.3.36 executor with no reading: %+v; want unknown, with no version advice", c)
+	}
+}
+
+// A tester's run: the executor's probe dials only argus-config's
+// targets, and 216 of the catalogue's 364 scenarios called two more hosts by full URL. "ready" must not
+// read as covering them; argus-config is where they are named (TestCheckConfig_UnprobedHosts).
+func TestCheckSUTReachable_ReadyDoesNotCoverUnprobedHosts(t *testing.T) {
+	in := asked(documenso("ready", &sutReadAt))
+	in.UnprobedHosts = 2
+	c := CheckSUTReachable(in)
+	if c.Status != StatusOK {
+		t.Fatalf("the probe's own answer is still ok: %+v", c)
+	}
+	for _, s := range []string{"2 hosts", "not", "argus-config"} {
+		if !strings.Contains(c.Detail, s) {
+			t.Errorf("Detail lacks %q:\n%s", s, c.Detail)
+		}
+	}
+	in.UnprobedHosts = 0
+	if c := CheckSUTReachable(in); strings.Contains(c.Detail, "full URL") {
+		t.Errorf("no unprobed host, yet the caveat is there:\n%s", c.Detail)
 	}
 }

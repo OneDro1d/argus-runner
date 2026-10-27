@@ -113,6 +113,99 @@ func TestQuota_fitsEverythingTheRendererEmits(t *testing.T) {
 	}
 }
 
+// The memory quota is sized from the executor's own limit (--executor-memory), not a flat 1536Mi per
+// replica. Found live on shop-dev-aks, 2026-10-19: with executors at 3Gi the quota stayed 9Gi and the
+// THIRD replica was refused (`exceeded quota: instance-quota, requested: limits.memory=3Gi, used: 6912Mi,
+// limited: 9Gi`). The default renders exactly what it did before (9216Mi = 3 x 1536 + 4608).
+func TestQuota_memoryFollowsTheExecutorMemorySetting(t *testing.T) {
+	for _, c := range []struct{ setting, want string }{
+		{"", "9216Mi"},
+		{"1536Mi", "9216Mi"},
+		{"3Gi", "13824Mi"},      // 3 x 3072 + 4608
+		{"4G", "16053Mi"},       // 4e9 B = 3814.7Mi, rounded UP to 3815: 3 x 3815 + 4608
+		{"402653184", "5760Mi"}, // the floor, 384Mi in bytes: 3 x 384 + 4608
+	} {
+		out, err := RenderExecutor(Instance{
+			ID: "quota-probe", SUTNamespace: "sut-ns", Image: "example/image:test",
+			CPURL: "https://cp.example", WorkspaceID: "ws", SUTName: "sut",
+			ArgusConfig: "project: sut\n", Replicas: 1, ExecutorMemory: c.setting,
+		})
+		if err != nil {
+			t.Fatalf("Render(--executor-memory %q): %v", c.setting, err)
+		}
+		if got := quotaLine(t, out, "limits.memory"); got != c.want {
+			t.Errorf("--executor-memory %q: quota limits.memory = %q, want %q", c.setting, got, c.want)
+		}
+	}
+}
+
+// The CPU quota is sized from the executor's own CPU limit (--executor-cpu), not a flat 1 CPU per replica: with
+// executors at 2 CPU each, a quota of 6 refuses the third executor (3 x 2 = 6 leaves nothing for loki, the
+// pushgateway and a promtail per node). The default renders exactly what it did before ("6" = 3 x 1 + 3 CPU).
+func TestQuota_cpuFollowsTheExecutorCPUSetting(t *testing.T) {
+	for _, c := range []struct {
+		setting  string
+		replicas int
+		want     string
+	}{
+		{"", 1, "6"},
+		{"", 3, "6"},
+		{"", 5, "8"},
+		{"1", 3, "6"},
+		{"1000m", 3, "6"},
+		{"2", 1, "9"}, // 3 x 2 + 3
+		{"2", 3, "9"},
+		{"2", 5, "13"},
+		{"4", 3, "15"},
+		{"1500m", 3, "7500m"}, // 3 x 1.5 + 3 = 7.5, not a whole CPU: millicores
+		{"1.5", 3, "7500m"},
+		{"0.5", 3, "4500m"},
+		{"150m", 3, "3450m"}, // the floor: 3 x 0.15 + 3
+		{"2500m", 3, "10500m"},
+		{"1.5", 4, "9"}, // 4 x 1.5 + 3 = 9, whole again
+	} {
+		out, err := RenderExecutor(Instance{
+			ID: "quota-probe", SUTNamespace: "sut-ns", Image: "example/image:test",
+			CPURL: "https://cp.example", WorkspaceID: "ws", SUTName: "sut",
+			ArgusConfig: "project: sut\n", Replicas: c.replicas, ExecutorCPU: c.setting,
+		})
+		if err != nil {
+			t.Fatalf("Render(--executor-cpu %q, replicas=%d): %v", c.setting, c.replicas, err)
+		}
+		if got := quotaLine(t, out, "limits.cpu"); got != c.want {
+			t.Errorf("--executor-cpu %q replicas=%d: quota limits.cpu = %q, want %q", c.setting, c.replicas, got, c.want)
+		}
+	}
+}
+
+// The quota always holds every executor at its limit: whatever the setting, quota - quotaReplicas x limit is the
+// 3 CPU of headroom, checked against what the renderer actually emitted for the limit.
+func TestQuota_cpuAlwaysHoldsTheExecutorsPlusHeadroom(t *testing.T) {
+	for _, setting := range []string{"", "1", "2", "1.5", "0.5", "1500m", "3333m", "0.333"} {
+		in := Instance{
+			ID: "quota-probe", SUTNamespace: "sut-ns", Image: "example/image:test",
+			CPURL: "https://cp.example", WorkspaceID: "ws", SUTName: "sut",
+			ArgusConfig: "project: sut\n", Replicas: 1, ExecutorCPU: setting,
+		}
+		out, err := RenderExecutor(in)
+		if err != nil {
+			t.Fatalf("%q: %v", setting, err)
+		}
+		_, lim := execResources(t, out)
+		limMilli, err := parseCPUQuantity(lim["cpu"].(string))
+		if err != nil {
+			t.Fatal(err)
+		}
+		quotaMilli, err := parseCPUQuantity(quotaLine(t, out, "limits.cpu"))
+		if err != nil {
+			t.Fatalf("%q: the quota %q is not a CPU quantity: %v", setting, quotaLine(t, out, "limits.cpu"), err)
+		}
+		if want := int64(activeReplicas)*limMilli + 3000; quotaMilli != want {
+			t.Errorf("--executor-cpu %q: quota %dm, want %d x %dm + 3000m = %dm", setting, quotaMilli, activeReplicas, limMilli, want)
+		}
+	}
+}
+
 // An explicitly supplied limit is the operator's call and must survive untouched.
 func TestQuota_explicitLimitsWin(t *testing.T) {
 	out, err := RenderExecutor(Instance{

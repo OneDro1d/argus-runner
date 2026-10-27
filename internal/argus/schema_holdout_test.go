@@ -83,7 +83,7 @@ func TestHoldout_H10_EnvelopePlusBody_MustBeRefused(t *testing.T) {
 	withFakeBroker(t, f)
 	trig := `{"steps":[{"type":"amqp","name":"spoof","op":"publish","url_env":"MSGBUS_ARGUS_TEST_URL",` +
 		`"exchange":"lab.inbox","routing_key":"lab.h10",` +
-		`"envelope":{"to_inbox":"agent.hop","from_agent_id":"argus-test","prompt":"hi"},"body":"hello"}]}`
+		`"envelope":{"to_inbox":"agent.alpha","from_agent_id":"argus-test","prompt":"hi"},"body":"hello"}]}`
 	s := scenario.Parse(chainRunMD("", trig, "### Runnable\n- step spoof: broker accepts\n"))
 	res := runChainScenario(&config.Config{}, s, "tr-h10-env-body", "testkit/ui")
 	if res.Status != "failed" {

@@ -1,9 +1,10 @@
 // Package mcpserver is the Argus MCP server: a hand-rolled native JSON-RPC 2.0
 // server (DEC-002 = Camp B; NOT an external SDK) that wraps the SAME internal/* runner-core the
-// CLI wraps. The IN-ENV instance exposes the 6 runner__* tools (mcpserver.DefaultTools; C1 dropped
-// the M2.5 author__* leftover — authoring moved to the cloud plane). The CLOUD control-plane
-// instance exposes the author__* tools (control.CloudTools). It speaks the legacy HTTP+SSE
-// 2-endpoint transport (GET /sse + POST /message?sessionId), protocolVersion "2024-11-05".
+// CLI wraps. The IN-ENV instance exposes the 6 runner_* tools (mcpserver.DefaultTools; C1 dropped
+// the M2.5 author-tool leftover — authoring moved to the cloud plane). The CLOUD control-plane
+// instance exposes the author_* tools (control.CloudTools). The local router serves a per-session
+// set instead (Server.SessionTools, AC-D69). It speaks the legacy HTTP+SSE 2-endpoint transport
+// (GET /sse + POST /message?sessionId) and Streamable HTTP, protocolVersion "2024-11-05".
 //
 // This file holds the wire types + the tool-registry abstraction. The protocol
 // state machine + dispatch live in server.go; the HTTP+SSE transport in
@@ -28,7 +29,7 @@ const (
 	CodeInvalidParams  = -32602
 	CodeInternal       = -32603
 	CodeUnauthorized   = -32001 // no / wrong-scope / unknown token (the auth plane)
-	CodeRunInProgress  = -32002 // DF-DEC-M25-01: a second runner__run while one is in flight
+	CodeRunInProgress  = -32002 // DF-DEC-M25-01: a second runner_run while one is in flight
 	CodeNoSession      = -32003 // tools/call before initialize / unknown-or-expired session (VR-H8)
 )
 
@@ -95,6 +96,11 @@ type Outcome struct {
 	Payload any
 	IsError bool
 	RPCErr  *RPCError
+	// Result, when set, IS the JSON-RPC result, sent as given; Payload, IsError and RPCErr are then ignored. It exists
+	// for the local router (AC-D69, decision 14), which passes another server's answer back UNCHANGED — wrapping it again
+	// in a text block would make the same call answer differently through the router and directly. A value that is not
+	// valid JSON is answered -32603 rather than dropped. Nothing else sets it.
+	Result json.RawMessage
 }
 
 // Principal is the authenticated caller (M3): the hat (scope) + the workspace the token is bound to +
@@ -105,7 +111,7 @@ type Principal struct {
 	Workspace string
 	Subject   string
 	// OwnerWide marks the ONE principal shape that is a builder without a workspace: an owner-wide
-	// builder PAT (, runner scope, workspace NULL). It is set ONLY by the control plane's
+	// builder PAT (runner scope, workspace NULL). It is set ONLY by the control plane's
 	// PAT authenticator (cloudauth.go), and isBuilder additionally needs a Subject with it. It is a marker
 	// rather than "Subject != empty" on purpose: the local router builds Product-hat principals with a
 	// Subject (the router token) and no workspace (router/proxy.go), and an own-OAuth runner token may
@@ -116,6 +122,22 @@ type Principal struct {
 	// workspace too. Set in one place (control/cloudauth.go, the PAT branch); read by control's
 	// refuseBoundPAT (tenancy.go) and the handlers in web.go that narrow a listing.
 	BoundPAT bool
+	// UserGlobalPAT is true ONLY for an author PAT (odts_...) minted with NO workspace: the owner's
+	// token for all workspaces. Like BoundPAT it is the credential KIND, which "Workspace == empty"
+	// cannot say (a signed-in session whose workspace claim is empty looks the same). Set in one place
+	// (control/cloudauth.go, the PAT branch); read only to choose the WORDS of a refusal on the routes
+	// that accept nothing but the owner's session. It grants and refuses nothing.
+	UserGlobalPAT bool
+	// DataAccess is the credential's AC-F3 type, dataaccess.Full or dataaccess.Limited: whether the app's answers may
+	// reach the Argus cloud through it. Set in one place for the control plane (control/cloudauth.go, every branch, on
+	// every call) and Full for the static token pair (staticAuth below). Read through dataaccess.IsFull, which reads an
+	// empty or unknown value as NOT Full — a source that forgets to set it can never serve the Full-only features.
+	DataAccess string
+	// WebSession is true ONLY for the website session (the Clerk sign-in token, or the workspace token the website
+	// gets at a switch): its DataAccess is the person's account permission, read on every call. Like BoundPAT it is
+	// the credential KIND; set in control/cloudauth.go only, read to choose the words of a refusal and to keep the
+	// person's own choices (the website permission, a token's type) to the person's own session.
+	WebSession bool
 }
 
 // Authenticator maps a bearer token to a Principal (or an error). The M2.5 path wraps a static
@@ -136,7 +158,7 @@ type Tool struct {
 	InputSchema map[string]any // JSON Schema; instance_id:string is present on every one
 	Handler     Handler
 	// PreCheck validates the ARGUMENTS alone, cheaply and with no side effect, so an argument
-	// error can be refused BEFORE an async tool announces itself. runner__run is dispatched in
+	// error can be refused BEFORE an async tool announces itself. runner_run is dispatched in
 	// the background: it takes the local run lock, mints a run_id and acquires the CP run fence
 	// before the handler ever runs, and the handler's Outcome is then DISCARDED (only ok/not-ok
 	// survives). Without this hook a bad argument produced {"status":"running"} + a run_id that
@@ -160,7 +182,7 @@ type Tool struct {
 	// starts the handler in a goroutine and answers {"status":"running", run_id} immediately, without
 	// waiting. The handler's Outcome is DISCARDED — nothing it returns reaches the caller.
 	//
-	// It is a FIELD because it used to be a name match on "runner__run", and the name is shared by two
+	// It is a FIELD because it used to be a match on the run tool's NAME, and the name is shared by two
 	// very different servers. The in-env executor is the one that runs scenarios and must not make an
 	// MCP client wait minutes for a reply. The local ROUTER registers a tool with the same name whose
 	// handler merely FORWARDS — and inherited the async branch by accident, which cost two defects:

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
+	"strings"
 
 	"github.com/OneDro1d/argus-runner/internal/argus"
 	"github.com/OneDro1d/argus-runner/internal/federation"
@@ -15,7 +17,7 @@ import (
 )
 
 // CommandFunc executes one relayed builder command envelope through the SAME in-process code the
-// local router's runner__* tools use (toolcore), never a shell, and returns its answer already
+// local router's runner_* tools use (toolcore), never a shell, and returns its answer already
 // reduced to whatever the verb's own custody rule allows through. A non-nil error becomes the
 // command's error field on the push back — the executor answers every command it dequeues, never
 // silently drops one.
@@ -29,13 +31,16 @@ type CommandFunc func(ctx context.Context, verb string, args json.RawMessage) (j
 // the control plane persists nothing from a result beyond the verdict fields it already keeps on
 // run_ledger, and the relay must never hand a builder more than that ledger already carries.
 type RelayedReport struct {
-	Status              string   `json:"status"`
-	RunID               string   `json:"run_id,omitempty"`
-	Mode                string   `json:"mode,omitempty"`
-	Passed              int      `json:"passed"`
-	Failed              int      `json:"failed"`
-	Errored             int      `json:"errored"`
-	Degraded            int      `json:"degraded"`
+	Status   string `json:"status"`
+	RunID    string `json:"run_id,omitempty"`
+	Mode     string `json:"mode,omitempty"`
+	Passed   int    `json:"passed"`
+	Failed   int    `json:"failed"`
+	Errored  int    `json:"errored"`
+	Degraded int    `json:"degraded"`
+	// NotApplicable: scenarios not executed because a precondition they depend on is absent.
+	// omitempty: a run without one relays the bytes it always did.
+	NotApplicable       int      `json:"not_applicable,omitempty"`
 	Total               int      `json:"total"`
 	FailingScenarios    []string `json:"failing_scenarios,omitempty"`
 	CorrelationIDs      []string `json:"correlation_ids,omitempty"`
@@ -55,11 +60,15 @@ func reduceReport(rep *report.Report, dashboardURL string) RelayedReport {
 	case rep.Summary.Degraded > 0:
 		// the assertions held but the SUT was in distress during the run: never relayed as a pass
 		status = "degraded"
+	case rep.Summary.Total > 0 && rep.Summary.NotApplicable == rep.Summary.Total:
+		// every check was not applicable: nothing was verified, so never relayed as a pass
+		status = report.StatusNotApplicable
 	}
 	out := RelayedReport{
 		Status: status, RunID: rep.RunID, Mode: rep.Mode,
 		Passed: rep.Summary.Passed, Failed: rep.Summary.Failed, Errored: rep.Summary.Errored, Degraded: rep.Summary.Degraded,
-		Total: rep.Summary.Total,
+		NotApplicable: rep.Summary.NotApplicable,
+		Total:         rep.Summary.Total,
 	}
 	// The verdict only, for every run that is not the builder's own: final, scheduled and rehearsal ran the
 	// certification set, and an unknown or empty mode is not proven to have run anything else. Keyed on
@@ -70,7 +79,7 @@ func reduceReport(rep *report.Report, dashboardURL string) RelayedReport {
 	}
 	for _, l := range rep.Layers {
 		for _, sc := range l.Scenarios {
-			if sc.Status != "passed" {
+			if sc.Status != "passed" && sc.Status != report.StatusNotApplicable { // not executed: neither passing nor failing
 				out.FailingScenarios = append(out.FailingScenarios, sc.ID)
 			}
 			if sc.CorrelationID != "" {
@@ -85,7 +94,7 @@ func reduceReport(rep *report.Report, dashboardURL string) RelayedReport {
 
 // NewCommandFunc builds the executor-side command executor for AC-17's relay. Each of the four verbs
 // the builder namespace publishes runs through the exact toolcore call the local router's own
-// runner__* tools make, against the SAME Env this package already builds for a real run (execEnv) —
+// runner_* tools make, against the SAME Env this package already builds for a real run (execEnv) —
 // one implementation, reached from a third transport now (local router, direct CLI, relay).
 //
 // `run` stays async at the SOURCE: it mints a run id, starts toolcore.Run in the background, and
@@ -122,10 +131,13 @@ func NewCommandFunc(cfg ExecConfig) CommandFunc {
 	}
 	return func(ctx context.Context, verb string, args json.RawMessage) (json.RawMessage, error) {
 		switch verb {
+		// AC-F1: a returned error becomes the command's error text (executor.go runCommands → CommandResult). Each one
+		// is built with ownWordsf (Argus's own text) or holds a withheld lower error (withhold); anything else is sent
+		// as Argus's fixed sentence, never as its text (ownwords.go).
 		case "validate_config":
 			p, _, err := toolcore.ValidateConfig(env)
 			if err != nil {
-				return nil, err
+				return nil, configLoadErr(err)
 			}
 			return json.Marshal(p)
 
@@ -143,7 +155,7 @@ func NewCommandFunc(cfg ExecConfig) CommandFunc {
 			_ = json.Unmarshal(args, &a)
 			p, _, err := toolcore.GetReport(env, role.Product, a.RunID)
 			if err != nil {
-				return nil, err
+				return nil, reportReadErr(err)
 			}
 			// item 7a (msgbus tester 2026-09-28): a run_id with no on-disk report yet (still
 			// running, or unknown) answers with a status map (status/run_id/note — see
@@ -154,7 +166,7 @@ func NewCommandFunc(cfg ExecConfig) CommandFunc {
 			}
 			rep, ok := p.(*report.Report)
 			if !ok {
-				return nil, fmt.Errorf("get_report: unexpected report shape %T", p)
+				return nil, ownWordsf("get_report: unexpected report shape %T", p)
 			}
 			var dash string
 			if dm, ok := toolcore.GetDashboardURL(env, "").(map[string]any); ok {
@@ -166,9 +178,9 @@ func NewCommandFunc(cfg ExecConfig) CommandFunc {
 		// above: the SAME on-disk run file (toolcore.GetReport, per-run-attributed — RO-06), read with
 		// role.Test instead of role.Product, so redactExpected is a no-op (role.Test.MustRedactExpected()
 		// is false) and the answer is marshaled WHOLE — never through reduceReport, which is the
-		// runner__get_report holdout rule and stays exactly as it was. Enqueued ONLY by the control
+		// runner_get_report holdout rule and stays exactly as it was. Enqueued ONLY by the control
 		// plane's author_get_report tool (internal/control/cloudtools.go); the builder-relay
-		// runner__get_report tool hard-codes verb "get_report" and its closed schema has no way to ask
+		// runner_get_report tool hard-codes verb "get_report" and its closed schema has no way to ask
 		// for "full", so this verb existing changes nothing about what a runner-scope caller can reach.
 		case "get_full_report":
 			var a struct {
@@ -177,7 +189,7 @@ func NewCommandFunc(cfg ExecConfig) CommandFunc {
 			_ = json.Unmarshal(args, &a)
 			p, _, err := toolcore.GetReport(env, role.Test, a.RunID)
 			if err != nil {
-				return nil, err
+				return nil, reportReadErr(err)
 			}
 			// item 7a: same not_found/pending_or_unknown map passthrough as get_report above — the
 			// SAME toolcore.GetReport call produces the SAME map shape for either hat.
@@ -186,9 +198,37 @@ func NewCommandFunc(cfg ExecConfig) CommandFunc {
 			}
 			rep, ok := p.(*report.Report)
 			if !ok {
-				return nil, fmt.Errorf("get_full_report: unexpected report shape %T", p)
+				return nil, ownWordsf("get_full_report: unexpected report shape %T", p)
 			}
 			return json.Marshal(rep)
+
+		// get_limited_report (AC-F2) answers the control plane's author_get_report_limited: the SAME on-disk run
+		// file as get_full_report, read with role.Test, then cut HERE, on the executor, to the keep list in
+		// limitedreport.go — a field is sent only if it is listed there, so nothing the app returned leaves the
+		// environment by this verb, apart from its status codes and SQLSTATE codes; a load test's errors leave only as
+		// words and counts (AC-F2.2). A refusal is a status answer (limitedRefusal), and each error a fixed sentence
+		// built with ownWordsf, never an underlying error's text, so the command's error text cannot carry the app's
+		// words either.
+		case "get_limited_report":
+			runID, ok := limitedRunID(args)
+			if !ok {
+				return limitedRefusal(limitedRefusedRunID, "", limitedRunIDNote)
+			}
+			p, _, err := toolcore.GetReport(env, role.Test, runID)
+			if err != nil {
+				if cfg.Log != nil {
+					cfg.Log("get_limited_report %s: %v", runID, err) // the detail stays in the executor's own log
+				}
+				return nil, errLimitedUnreadable
+			}
+			if m, ok := p.(map[string]any); ok {
+				return json.Marshal(m) // not_found / pending_or_unknown: Argus's own words and the checked run_id
+			}
+			rep, ok := p.(*report.Report)
+			if !ok { // unreachable today; the shape stays in the executor's own log (withhold), the sentence is sent
+				return nil, withhold(errLimitedUnreadable.Error(), fmt.Errorf("unexpected report shape %T", p))
+			}
+			return limitedReport(rep, runID)
 
 		case "run":
 			var a struct {
@@ -214,7 +254,7 @@ func NewCommandFunc(cfg ExecConfig) CommandFunc {
 		// get_output (ARGUS-CMP-3, design 10.3, executor side only) answers the drill-down of a compare
 		// run: the stored output file of ONE sample of ONE check of ONE run, straight from this executor's
 		// disk. It is the only place a recorded body ever leaves the executor, and it is enqueued only by an
-		// author tool on the control plane (no runner__* tool names it). The four inputs are checked by
+		// author tool on the control plane (no runner_* tool names it). The four inputs are checked by
 		// argus.ReadOutputFile so nothing outside the outputs directory can be read, and every failure is a
 		// closed error that carries no filesystem path and no echo of the input.
 		case "get_output":
@@ -225,18 +265,68 @@ func NewCommandFunc(cfg ExecConfig) CommandFunc {
 				Sample     *int   `json:"sample"`
 			}
 			if err := json.Unmarshal(args, &a); err != nil || a.Sample == nil {
-				return nil, argus.ErrBadOutputRef
+				return nil, ownWordsf("%w", argus.ErrBadOutputRef)
 			}
 			b, err := argus.ReadOutputFile(outputsBase, a.RunID, a.ScenarioID, a.Step, *a.Sample)
 			if err != nil {
-				return nil, err
+				return nil, outputReadErr(err)
 			}
 			return json.RawMessage(b), nil
 
 		default:
-			return nil, fmt.Errorf("unknown relayed verb %q", verb)
+			// the control plane's own verb, byte for byte: it matches "unknown relayed verb" to tell an older executor
+			return nil, ownWordsf("unknown relayed verb %q", verb)
 		}
 	}
+}
+
+// configLoadErr classifies validate_config's error for the relay (AC-F1). The one shape vouched for is the loading of
+// the operator's config ("load config: …" — its path, its lines, its keys, and the text of a file a message_schemas
+// entry names, which the Avro parser can quote whole), with a typed encoding/json error in it withheld (the loader
+// returns none at ba9420d7: the Avro parser reads schema files with its own JSON library; this guards a loader that one
+// day does). Any other shape — "validate: …", a JSON codec error under other words, an error with a nil pointer in its
+// tree — is not vouched for, and Argus's fixed sentence is sent.
+func configLoadErr(err error) error {
+	if nilInTree(err) {
+		return err
+	}
+	if strings.HasPrefix(err.Error(), "load config: ") {
+		return ownWordsf("%w", withholdJSON(err))
+	}
+	return err
+}
+
+// outputReadErr classifies get_output's error for the relay (AC-F1). This verb reads the app's own stored bytes, so
+// only argus.ReadOutputFile's three closed sentinels are vouched for — the SENTINEL's text, byte for byte (the control
+// plane matches ErrOutputNotFound's), never anything said around it; any other error is not vouched for, and Argus's
+// fixed sentence is sent.
+func outputReadErr(err error) error {
+	if nilInTree(err) {
+		return err
+	}
+	for _, s := range []error{argus.ErrOutputNotFound, argus.ErrBadOutputRef, argus.ErrOutputTooLarge} {
+		if errors.Is(err, s) {
+			return ownWordsOf(s, err)
+		}
+	}
+	return err
+}
+
+// reportReadErr classifies toolcore.GetReport's error for the relay (AC-F1). Its one known Argus shape is
+// toolcore's own "read report: <file-system error> (run first?)" — a path of ours and the OS's own error (osError) —
+// and only an error that is exactly that is sent as it is. A JSON decode error (over a report that holds the app's
+// answers, which can quote a character or a whole number of it) is withheld, and so is any other shape.
+func reportReadErr(err error) error {
+	if nilInTree(err) {
+		return withhold("read report: "+reportNotRead, err)
+	}
+	if pe, ok := errors.Unwrap(err).(*fs.PathError); ok && osError(pe.Err) && err.Error() == "read report: "+pe.Error()+" (run first?)" {
+		return ownWordsf("%w", err)
+	}
+	if jsonCodecErr(err) != nil {
+		return withhold("read report: "+reportNotDecodable, err)
+	}
+	return withhold("read report: "+reportNotRead, err)
 }
 
 // relayRunScope classifies a selection for the CP materialize/set-hash call, matching the

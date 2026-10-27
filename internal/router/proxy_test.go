@@ -2,215 +2,115 @@ package router
 
 import (
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
 	"github.com/OneDro1d/argus-runner/internal/mcpserver"
+	"github.com/OneDro1d/argus-runner/internal/role"
 )
 
-// The transport half. These tests drive the REAL mcpserver — the same protocol code the in-env and
-// cloud servers use — so the scope filtering under test is the one that will actually run, not a
-// re-implementation of it.
+// The transport half. These tests drive the REAL mcpserver — the same protocol code the in-env and cloud servers use —
+// so the scope filtering under test is the one that will actually run, not a re-implementation of it. Since AC-D70 the
+// router has no static tool and no forwarder: every tool comes per session from the control plane (author) or from each
+// instance's executor (runner), and the stub executors here are the executor's own protocol code (stubexec_test.go).
 
-type fakeFwd struct {
-	lastTarget Target
-	lastTool   string
-	// lastArgs is RECORDED, and that is not a detail. It used to be discarded as `_`, which is
-	// exactly why four separate JOIN defects reached production on 2026-08-09: every test here
-	// asserted that the right TARGET was chosen, and none could see what payload the upstream would
-	// actually receive. A stub that echoes anything answers every question except the one that
-	// matters.
-	lastArgs json.RawMessage
-	err      error
-	// isErr is the UPSTREAM's result.isError — the tool was reached and answered "failed". VR2-13
-	// made the router wrap once, and this lets a case prove that flag survives the hop instead of
-	// being flattened into a success.
-	isErr bool
-}
-
-func (f *fakeFwd) Forward(t Target, tool string, args json.RawMessage) (any, bool, error) {
-	f.lastTarget, f.lastTool, f.lastArgs = t, tool, args
-	if f.err != nil {
-		return nil, false, f.err
-	}
-	return map[string]any{"ok": true, "plane": t.Plane}, f.isErr, nil
-}
-
-func serverFor(t *testing.T, tbl *Table, fwd Forwarder) *mcpserver.Server {
-	t.Helper()
-	srv, err := mcpserver.NewServerWithAuth(Authenticator(tbl), Tools(tbl, fwd)...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return srv
-}
-
-// TS-R1, through the REAL protocol server: a product folder's tools/list must not contain author__*.
-// This is the assertion the whole router exists to make true, and it runs against mcpserver's own
-// visibleTools rather than against the router's opinion of it.
+// TS-R1, through the REAL protocol server: a product folder's tools/list must not contain an author tool.
+// This is the assertion the whole router exists to make true. It runs through a real session (initialize, then
+// tools/list) — VisibleToolsFor reads static tools only and is empty on the router for every hat, so a check through it
+// would pass while testing nothing. The test folder seeing them is the positive control.
 func TestServer_ProductFolderToolsListHasNoAuthorTools(t *testing.T) {
-	tbl := testTable(t)
-	srv := serverFor(t, tbl, &fakeFwd{})
-
-	prodPrin, err := Authenticator(tbl).Authenticate(prodTok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	testPrin, _ := Authenticator(tbl).Authenticate(testTok)
-
-	for _, name := range toolNames(srv, prodPrin) {
-		if strings.HasPrefix(name, "author__") {
+	h := newHarness(t, Options{})
+	h.initialize("p", prodTok)
+	h.initialize("t", testTok)
+	_, prodNames := h.listed("p", prodTok)
+	for _, name := range prodNames {
+		if strings.HasPrefix(name, "author_") { // covers both spellings
 			t.Errorf("the PRODUCT folder's tools/list contains %q — the holdout is broken at the protocol layer", name)
 		}
 	}
-	var sawAuthor int
-	for _, name := range toolNames(srv, testPrin) {
-		if strings.HasPrefix(name, "author__") {
-			sawAuthor++
-		}
+	if got := strings.Join(prodNames, ","); got != runnerNames {
+		t.Errorf("the PRODUCT folder lists %q, want exactly the runner tools its executors list", got)
 	}
-	if sawAuthor != len(AuthorTools) {
-		t.Errorf("the TEST folder sees %d author tools, want %d", sawAuthor, len(AuthorTools))
+	_, testNames := h.listed("t", testTok)
+	if n := len(authorNames(testNames)); n != len(cpTools()) {
+		t.Errorf("the TEST folder sees %d author tools, want the control plane's %d", n, len(cpTools()))
 	}
 }
 
-// toolNames asks the server what a principal may see, using the same path tools/list takes.
-func toolNames(srv *mcpserver.Server, prin mcpserver.Principal) []string {
-	var out []string
-	for _, tl := range srv.VisibleToolsFor(prin.Hat) {
-		out = append(out, tl.Name)
-	}
-	return out
-}
-
-// VR-R4 end to end: the SAME tool, the SAME instance, from two folders — and the credential that
-// leaves the router differs. If these ever converge the product agent starts receiving unredacted
-// reports, which is the failure this whole component exists to prevent.
+// VR-R4 end to end: the SAME tool, the SAME instance, from two folders — and the credential that leaves the router
+// differs. If these ever converge the product agent starts receiving unredacted reports, which is the failure this whole
+// component exists to prevent. The executor here redacts by the token it is given, so the answers show it too.
 func TestProxy_ForwardsThePerHatToken(t *testing.T) {
-	tbl := testTable(t)
-	fwd := &fakeFwd{}
-	args := json.RawMessage(`{"instance_id":"suta"}`)
-
-	pp, _ := Authenticator(tbl).Authenticate(prodTok)
-	if out := proxy(tbl, fwd, "runner__get_report", args, pp); out.IsError {
-		t.Fatalf("product call failed: %+v", out)
-	}
-	prodToken := fwd.lastTarget.Token
-
-	tp, _ := Authenticator(tbl).Authenticate(testTok)
-	if out := proxy(tbl, fwd, "runner__get_report", args, tp); out.IsError {
-		t.Fatalf("test call failed: %+v", out)
-	}
-	testToken := fwd.lastTarget.Token
-
+	h := newHarness(t, Options{})
+	h.initialize("p", prodTok)
+	h.initialize("t", testTok)
+	pRaw := h.call("p", prodTok, 1, "runner_get_report", map[string]any{"instance_id": "suta"})
+	prodToken := h.ex["suta"].lastCall().Bearer
+	tRaw := h.call("t", testTok, 2, "runner_get_report", map[string]any{"instance_id": "suta"})
+	testToken := h.ex["suta"].lastCall().Bearer
 	if prodToken == testToken {
 		t.Fatal("both hats forwarded the SAME upstream token — the product agent would get unredacted reports")
 	}
-	if prodToken != "runner-suta" || testToken != "author-suta" {
+	if prodToken != "Bearer runner-suta" || testToken != "Bearer author-suta" {
 		t.Errorf("product=%q test=%q, want the per-hat tokens", prodToken, testToken)
 	}
+	if strings.Contains(string(pRaw), sentinelExpected) || !strings.Contains(string(tRaw), sentinelExpected) {
+		t.Errorf("redaction: the product report carries the expected value %v, the test report %v",
+			strings.Contains(string(pRaw), sentinelExpected), strings.Contains(string(tRaw), sentinelExpected))
+	}
 }
 
-// Defence in depth: even called directly — bypassing mcpserver's scope filter entirely — the proxy
-// refuses an author tool for a product folder. The two checks derive the hat independently, and if
-// they ever disagree the FOLDER wins.
-func TestProxy_AuthorToolFromAProductFolderIsRefusedEvenBypassingTheFilter(t *testing.T) {
-	tbl := testTable(t)
-	fwd := &fakeFwd{}
-	pp, _ := Authenticator(tbl).Authenticate(prodTok)
-
-	out := proxy(tbl, fwd, "author__read_scenario", json.RawMessage(`{"instance_id":"suta"}`), pp)
+// Defence in depth: even called directly — bypassing mcpserver's scope filter entirely — a runner handler forwards only
+// a runner name the target's executor listed. An author name is never offered by an executor (decision 13), so it is
+// refused, and nothing reaches any executor's tools/call.
+func TestProxy_AnAuthorNameNeverReachesAnExecutorEvenBypassingTheFilter(t *testing.T) {
+	h := newHarness(t, Options{})
+	s := newSessions(h.tbl, Options{})
+	set := s.sessionTools("x", mcpserver.Principal{Hat: role.Product, Subject: prodTok})
+	snap := set.State.(*sessionState).runner
+	out := s.runnerCall("author_read_scenario", snap, nil, json.RawMessage(`{"instance_id":"suta"}`), mcpserver.Principal{Hat: role.Product, Subject: prodTok})
 	if !out.IsError {
-		t.Fatal("a product folder reached an author tool by calling the handler directly")
+		t.Fatal("a product folder reached an author tool by calling a runner handler directly")
 	}
-	if fwd.lastTool != "" {
-		t.Fatalf("the call was FORWARDED (%q) before being refused", fwd.lastTool)
-	}
-}
-
-// Nothing is forwarded for an out-of-folder instance: the refusal happens before the network, so the
-// control plane never sees a call the folder had no business making.
-func TestProxy_OutOfFolderInstanceIsNeverForwarded(t *testing.T) {
-	tbl := testTable(t)
-	fwd := &fakeFwd{}
-	tp, _ := Authenticator(tbl).Authenticate(testTok)
-
-	out := proxy(tbl, fwd, "runner__run", json.RawMessage(`{"instance_id":"sutz"}`), tp)
-	if !out.IsError {
-		t.Fatal("an out-of-folder instance was accepted")
-	}
-	if fwd.lastTool != "" {
-		t.Fatal("the call reached the forwarder before the scope check")
+	if n := h.execToolCalls(); n != 0 {
+		t.Fatalf("%d calls reached an executor", n)
 	}
 }
 
-func TestProxy_JoinedInstanceIDIsNeverForwarded(t *testing.T) {
-	tbl := testTable(t)
-	fwd := &fakeFwd{}
-	tp, _ := Authenticator(tbl).Authenticate(testTok)
-
-	out := proxy(tbl, fwd, "runner__run", json.RawMessage(`{"instance_id":"suta,sutb"}`), tp)
-	if !out.IsError {
-		t.Fatal(`"suta,sutb" was accepted — a half-run would be reported as success`)
-	}
-	if fwd.lastTool != "" {
-		t.Fatal("the joined id reached the forwarder")
-	}
-}
-
-// An author call from a test folder goes to the CLOUD with the user-global token; a runner call goes
-// to the instance's own executor. Two planes, one endpoint for the agent.
+// An author call from a test folder goes to the CLOUD with the machine's author token; a runner call goes to the
+// instance's own executor with the folder's executor token. Two planes, one endpoint for the agent.
 func TestProxy_RoutesTheTwoPlanesDifferently(t *testing.T) {
-	tbl := testTable(t)
-	fwd := &fakeFwd{}
-	tp, _ := Authenticator(tbl).Authenticate(testTok)
-	args := json.RawMessage(`{"instance_id":"suta"}`)
-
-	if out := proxy(tbl, fwd, "author__list_scenarios", args, tp); out.IsError {
-		t.Fatalf("author call failed: %+v", out)
+	h := newHarness(t, Options{})
+	h.initialize("s", testTok)
+	h.call("s", testTok, 1, "author_list_runs", map[string]any{"instance_id": "suta"})
+	if got := h.cp.lastCall(); got.Tool != "author_list_runs" || got.Bearer != "Bearer "+cpTokA {
+		t.Errorf("author call reached the control plane as %+v", got)
 	}
-	if fwd.lastTarget.Plane != "author" || fwd.lastTarget.Token != "odts_user_global" {
-		t.Errorf("author plane target = %+v", fwd.lastTarget)
+	if n := h.execToolCalls(); n != 0 {
+		t.Errorf("the author call reached an executor (%d calls)", n)
 	}
-	if out := proxy(tbl, fwd, "runner__run", args, tp); out.IsError {
-		t.Fatalf("runner call failed: %+v", out)
+	cpCalls := h.cp.count("tools/call")
+	h.call("s", testTok, 2, "runner_run", map[string]any{"instance_id": "suta"})
+	if got := h.ex["suta"].lastCall(); got.Tool != "runner_run" || got.Bearer != "Bearer author-suta" {
+		t.Errorf("runner call reached the executor as %+v", got)
 	}
-	if fwd.lastTarget.Plane != "runner" || fwd.lastTarget.Token != "author-suta" {
-		t.Errorf("runner plane target = %+v", fwd.lastTarget)
-	}
-}
-
-// An upstream that could not be REACHED is not an upstream that answered "no" — the gate distinction,
-// applied to the proxy path. The payload says reached:false so a caller can tell the two apart.
-func TestProxy_UnreachableUpstreamSaysSoRatherThanLookingLikeAnAnswer(t *testing.T) {
-	tbl := testTable(t)
-	fwd := &fakeFwd{err: errors.New("dial tcp 127.0.0.1:8765: connection refused")}
-	tp, _ := Authenticator(tbl).Authenticate(testTok)
-
-	out := proxy(tbl, fwd, "runner__run", json.RawMessage(`{"instance_id":"suta"}`), tp)
-	if !out.IsError {
-		t.Fatal("an unreachable upstream was reported as a successful call")
-	}
-	blob, _ := json.Marshal(out.Payload)
-	s := string(blob)
-	if !strings.Contains(s, "could not reach") || !strings.Contains(s, "connection refused") {
-		t.Errorf("the error must say it could not REACH the upstream and carry the reason; got %s", s)
-	}
-	if !strings.Contains(s, `"reached":false`) {
-		t.Errorf(`the payload must carry reached:false; got %s`, s)
+	if h.cp.count("tools/call") != cpCalls {
+		t.Error("the runner call reached the control plane")
 	}
 }
 
 // A folder torn down mid-session fails the CALL, not the connection — and says why.
 func TestProxy_FolderRemovedMidSessionIsAToolError(t *testing.T) {
-	tbl := testTable(t)
-	fwd := &fakeFwd{}
-	stale := mcpserver.Principal{Hat: "test", Subject: "odtr_a_token_that_no_longer_exists"}
-
-	out := proxy(tbl, fwd, "runner__run", json.RawMessage(`{"instance_id":"suta"}`), stale)
+	h := newHarness(t, Options{})
+	s := newSessions(h.tbl, Options{})
+	set := s.sessionTools("x", mcpserver.Principal{Hat: role.Test, Subject: testTok})
+	stale := mcpserver.Principal{Hat: role.Test, Subject: "odtr_a_token_that_no_longer_exists"}
+	out := s.runnerCall("runner_run", set.State.(*sessionState).runner, nil, json.RawMessage(`{"instance_id":"suta"}`), stale)
 	if !out.IsError {
 		t.Fatal("a stale router token was accepted")
+	}
+	if n := h.execToolCalls(); n != 0 {
+		t.Fatalf("%d calls were forwarded for a folder that is gone", n)
 	}
 }
 
@@ -221,109 +121,21 @@ func TestAuthenticator_RejectsUnknownTokens(t *testing.T) {
 	}
 }
 
-// The router advertises exactly the tools it can route — no more (it would 404 on call) and no less
-// (an agent would think a capability was missing).
-func TestTools_ExposesExactlyTheRoutableSet(t *testing.T) {
-	tbl := testTable(t)
-	got := Tools(tbl, &fakeFwd{})
-	if len(got) != len(RunnerTools)+len(AuthorTools) {
-		t.Fatalf("Tools() = %d, want %d", len(got), len(RunnerTools)+len(AuthorTools))
-	}
-	for _, tl := range got {
-		if tl.InputSchema == nil {
-			t.Errorf("%s has no input schema", tl.Name)
-		}
-		if !known(tl.Name) {
-			t.Errorf("%s is advertised but not routable", tl.Name)
-		}
-	}
-}
-
-// EVERY router tool must carry a PreCheck, and this test exists because its absence was found only by
-// a live end-to-end run — the unit tests all passed without it.
-//
-// mcpserver dispatches runner__run ASYNCHRONOUSLY (DF-06, server.go:383): it takes the run lock, runs
-// the handler in a goroutine and returns a canned {"status":"running"}. The handler's Outcome is
-// DISCARDED. So without a PreCheck the router's scope refusals for runner__run happened in the
-// background where nobody saw them, and the caller was told the run had started.
-//
-// Measured against a live router before the fix:
-//
-//	runner__run{instance_id:"sutz"}      -> "run started in the background"   (out of folder!)
-//	runner__run{instance_id:"suta,sutb"} -> "run started in the background"   (VR-R13!)
-//
-// A half-run reported as success is the exact failure VR-R13 names, so the router's own rule was
-// being defeated by the transport it reuses. Removing a PreCheck re-opens that silently.
-func TestTools_EveryToolHasAPreCheck(t *testing.T) {
-	for _, tl := range Tools(testTable(t), &fakeFwd{}) {
-		if tl.PreCheck == nil {
-			t.Errorf("%s has no PreCheck — an async tool would announce itself before the scope check ran", tl.Name)
-		}
-	}
-}
-
-// And the pre-check must actually REFUSE, not merely exist.
-func TestPreCheck_RefusesBeforeTheHandlerRuns(t *testing.T) {
-	tbl := testTable(t)
-	fwd := &fakeFwd{}
-	tp, _ := Authenticator(tbl).Authenticate(testTok)
-
-	var run *mcpserver.Tool
-	for i, tl := range Tools(tbl, fwd) {
-		if tl.Name == "runner__run" {
-			run = &Tools(tbl, fwd)[i]
-		}
-	}
-	if run == nil {
-		t.Fatal("runner__run is not advertised")
-	}
-	for _, bad := range []string{`{"instance_id":"sutz"}`, `{"instance_id":"suta,sutb"}`, `{}`} {
-		if o := run.PreCheck(json.RawMessage(bad), tp); o == nil {
-			t.Errorf("PreCheck(%s) allowed the call — it would be announced as started", bad)
-		}
-	}
-	if o := run.PreCheck(json.RawMessage(`{"instance_id":"suta"}`), tp); o != nil {
-		t.Errorf("PreCheck refused a legitimate in-scope call: %+v", o)
-	}
-}
-
-// THE GUARD FOR THE BLIND SPOT ITSELF. The router must hand the forwarder the caller's arguments
-// UNCHANGED — every tool, every field. Rewriting for the in-env executor is the FORWARDER's job
-// (localiseInstanceID, tested against a real HTTP server in localise_test.go), and splitting the two
-// is what keeps each one assertable.
-//
-// Before this, `Forward` took `_ json.RawMessage` and no test in this file could observe a payload
-// at all. Four join defects shipped under that gap in a single day.
+// THE GUARD FOR THE BLIND SPOT ITSELF. The executor must receive the caller's arguments — every tool, every field — with
+// only instance_id localised. Four join defects reached production on 2026-08-09 because no test could see what payload
+// the upstream received; the stub executor records it.
 func TestProxy_ForwardsTheCallersArgumentsUnchanged_EveryTool(t *testing.T) {
-	tbl := testTable(t)
-	fwd := &fakeFwd{}
-	tp, err := Authenticator(tbl).Authenticate(testTok)
-	if err != nil {
-		t.Fatal(err)
-	}
-	args := json.RawMessage(`{"instance_id":"suta","marker":"keep-me","n":7}`)
-
-	for _, tool := range append(append([]string{}, RunnerTools...), AuthorTools...) {
+	h := newHarness(t, Options{})
+	h.initialize("s", testTok)
+	for _, tool := range strings.Split(runnerNames, ",") {
 		t.Run(tool, func(t *testing.T) {
-			fwd.lastArgs = nil
-			if out := proxy(tbl, fwd, tool, args, tp); out.IsError {
-				t.Fatalf("%s refused: %+v", tool, out)
+			h.call("s", testTok, 3, tool, json.RawMessage(`{"instance_id":"suta","marker":"keep-me","n":7}`))
+			got := h.ex["suta"].lastCall()
+			if got.Tool != tool {
+				t.Fatalf("the executor received %q", got.Tool)
 			}
-			if len(fwd.lastArgs) == 0 {
-				t.Fatalf("%s: the forwarder received NO arguments", tool)
-			}
-			var got map[string]any
-			if err := json.Unmarshal(fwd.lastArgs, &got); err != nil {
-				t.Fatalf("%s: forwarded arguments are not an object: %v (%s)", tool, err, fwd.lastArgs)
-			}
-			if got["marker"] != "keep-me" || got["n"] != float64(7) {
-				t.Fatalf("%s: the router altered or dropped the caller's arguments: %s", tool, fwd.lastArgs)
-			}
-			// instance_id must reach the FORWARDER unchanged. Localising it to `local` is the
-			// forwarder's job on the runner plane, and doing it here instead would break the author
-			// plane, where the control plane needs the real id.
-			if got["instance_id"] != "suta" {
-				t.Fatalf("%s: instance_id was rewritten before the forwarder saw it: %s", tool, fwd.lastArgs)
+			if want := `{"instance_id":"local","marker":"keep-me","n":7}`; string(got.Args) != want {
+				t.Fatalf("the executor received %s, want %s — every other argument as sent, instance_id localised", got.Args, want)
 			}
 		})
 	}

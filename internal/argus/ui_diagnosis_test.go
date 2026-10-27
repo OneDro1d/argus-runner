@@ -36,7 +36,7 @@ func TestUIScenario_NotEvaluatedKeepsTheCause(t *testing.T) {
 
 	t.Run("the goto failed: the Playwright error is in the row", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			writeReport(t, vendorDir, pwReport) // no assertions.json: the spec threw before writing it
 			return 1, true, ""
 		}
@@ -58,7 +58,7 @@ func TestUIScenario_NotEvaluatedKeepsTheCause(t *testing.T) {
 
 	t.Run("no JSON report: the first stderr line is the cause", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			return 1, true, "Error: Cannot find module '@playwright/test'\n    at Module._resolveFilename"
 		}
 		res := runUIScenario(uiScenarioMD(t, "- dom has .banner"), "tr-139-2", vendor)
@@ -69,7 +69,7 @@ func TestUIScenario_NotEvaluatedKeepsTheCause(t *testing.T) {
 
 	t.Run("nothing recorded: Classify's own observation is kept", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			return 1, true, ""
 		}
 		res := runUIScenario(uiScenarioMD(t, "- dom has .banner"), "tr-139-3", vendor)
@@ -88,7 +88,7 @@ func TestUIScenario_NotEvaluatedKeepsTheCause(t *testing.T) {
 
 	t.Run("a partial outcomes file on a passing spec: nothing to add, no invented cause", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			writeOutcomes(t, vendorDir, []uiOutcomeEntry{{Bullet: "dom has .banner", OK: true}})
 			return 0, true, ""
 		}

@@ -2,6 +2,7 @@ package argus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -21,7 +22,7 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/scenario"
 )
 
-// amqpload_run.go -- the `AMQP Load` run loop (, design §2.D.4) and S9's door in the run
+// amqpload_run.go -- the `AMQP Load` run loop (design §2.D.4) and S9's door in the run
 // path.
 //
 // One JMeter run PER STEP (templates/amqp-load.jmx): the sampler's per-session connections live until the
@@ -289,7 +290,12 @@ func runAMQPLoad(c *config.Config, s *scenario.Scenario, corr, resultsDir string
 		runErr := r.Run("amqp-load", jtl, props, backstop)
 		after := amqpLoadEnvCapture(envNS)
 
-		rows, _ := amqpload.ReadJTL(jtl)
+		rows, rerr := amqpload.ReadJTL(jtl, jtlMemory())
+		if errors.Is(rerr, amqpload.ErrJTLTooLarge) {
+			// a step that wrote more samples than the executor holds is never judged on a prefix.
+			runFailure = "step " + strconv.Itoa(i+1) + ": " + rerr.Error()
+			break
+		}
 		st := amqpload.AggregateStep(rows, amqpload.StepInput{
 			Step: i + 1, Sessions: n, RampSeconds: p.RampSeconds, RatePerSession: p.RatePerSession,
 			Confirm: p.Confirm, ScenarioID: s.ID,

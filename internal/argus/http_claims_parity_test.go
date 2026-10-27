@@ -14,6 +14,9 @@ import (
 func TestHTTPStepClaims_ValidatorAndExecutorAgree(t *testing.T) {
 	claims := []string{
 		"status=200",
+		"status=200/201",       // two codes are refused by BOTH doors, with the same text
+		"status=200 or 201",    //
+		"status=201 and an id", // prose after ONE code stays accepted by both
 		"body has count > 5",
 		"body has count >= ${saved.n}",
 		"body contains ${saved.n}",

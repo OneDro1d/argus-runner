@@ -38,6 +38,10 @@ type Env struct {
 	// CompareTarget (executor release E2) is the declared named connection target a comparison member names: the
 	// run uses it for every check that carries no **Target** of its own. Only a run of mode `compare` reads it.
 	CompareTarget string
+	// Tally, when set, is the run's live counts: the run loop reports each finished check to it, and the
+	// executor's mid-run heartbeat reads it. Nil (a CLI, MCP or direct-tool run, and every test that sets none)
+	// is today's behaviour exactly. Counts only; it holds no id and no per-check outcome.
+	Tally *argus.Tally
 	// ObsInstance is the argus_instance LABEL for telemetry (metrics/logs) + Grafana deep-links; it
 	// falls back to Instance when empty. M3 sets it to the REAL registered instance id even where the
 	// tool identity stays "local" (the single-tenant convention the runner tools validate), so direct +
@@ -124,7 +128,7 @@ type Env struct {
 	// override that skips the catalog when the catalog is available, and it does not apply to a
 	// REFUSED credential (a withdrawn authorisation is not an outage to work around).
 	//
-	// Set from `use_local_scenarios` on runner__run, or --use-local-scenarios on the CLI.
+	// Set from `use_local_scenarios` on runner_run, or --use-local-scenarios on the CLI.
 	UseLocalScenarios bool
 	// AssignedSet says ScenariosDir holds a set the CONTROL PLANE assigned — the federated run
 	// materializes the poll's scenarios there before calling Run. The set came from the catalog, so the
@@ -191,6 +195,8 @@ func redactExpected(rep *report.Report, hat role.Role) {
 				// how many claims did not hold past the list's backstop — also
 				// author-only (how many hidden claims failed is holdout material), zeroed by name.
 				sc.Steps[k].FailedClaimsOmitted = 0
+				// the response body of a status miss is the SUT's own words — author-only.
+				sc.Steps[k].BodyExcerpt = ""
 			}
 			// The scenario-level twin (http, mcp and ui scenarios record their enforced checks on the
 			// scenario, not on a step) carries the same expected values: text nilled, count kept.
@@ -227,6 +233,26 @@ func expectErrors(scenariosDir string) []config.ConfigError {
 		}
 		for _, p := range problems {
 			out = append(out, config.ConfigError{Message: fmt.Sprintf("%s line %d: %s", rel, lineOfBullet(string(text), p.Bullet), p.Message)})
+		}
+	}
+	return out
+}
+
+// signingKeyErrors reports, per discovered chain scenario, every `sign` key reference the config does not declare
+// under check_env, naming file, line and reference. Never a key value.
+func signingKeyErrors(c *config.Config, scenariosDir string) []config.ConfigError {
+	var out []config.ConfigError
+	for _, d := range scenario.DiscoverFiles(scenariosDir) {
+		problems := argus.CheckSigningKeys(d.Scenario, c)
+		if len(problems) == 0 {
+			continue
+		}
+		rel := filepath.ToSlash(d.Path)
+		if r, err := filepath.Rel(scenariosDir, d.Path); err == nil {
+			rel = filepath.ToSlash(r)
+		}
+		for _, p := range problems {
+			out = append(out, config.ConfigError{Message: fmt.Sprintf("%s: %s", rel, p)})
 		}
 	}
 	return out
@@ -283,7 +309,7 @@ func scenarioRuleWarnings(scenariosDir string) []string {
 			if already[v.Message] {
 				continue
 			}
-			out = append(out, fmt.Sprintf("%s line %d: %s. A scenario write (author__write_scenario, the control plane's author_write_scenario) will refuse this file until it is fixed", rel, v.Line, v.Message))
+			out = append(out, fmt.Sprintf("%s line %d: %s. A scenario write (author_write_scenario) will refuse this file until it is fixed", rel, v.Line, v.Message))
 		}
 	}
 	return out
@@ -311,6 +337,7 @@ func nowISO() string { return time.Now().UTC().Format(time.RFC3339) }
 // here touches the network. estimated is the pack's request count (argus.RequestsEstimated).
 func ConfigWarnings(c *config.Config, scenariosDir string, estimated int) []string {
 	warnings := append(c.LogFieldMappingWarnings(), c.BusGuardrailWarnings()...)
+	warnings = append(warnings, c.SharedLokiWarnings()...) // nil unless observability.loki.shared_cluster
 	// AC-D21: a TRIGGER URL naming a host the run will not use (only its path is kept).
 	warnings = append(warnings, c.TriggerHostWarnings(scenariosDir)...)
 	// a base_url path is dropped by the runner (only host:port is used).
@@ -334,7 +361,7 @@ func ValidateConfig(e Env) (any, bool, error) {
 	// item 8a (msgbus tester 2026-09-28): `count` above is a PURE LOCAL DIRECTORY WALK
 	// (scenario.DiscoverFiles(e.ScenariosDir)). On a catalog-driven executor — k8s, where
 	// /scenarios is a per-pod emptyDir (U2, the same trap resolveScenarioDir already refuses a RUN
-	// over) — that walk finds nothing, and a relayed runner__validate_config reported
+	// over) — that walk finds nothing, and a relayed runner_validate_config reported
 	// scenarios_found:0 for a kit that genuinely has scenarios, because it never asked the catalog
 	// at all. Ask ONLY when the local walk found nothing and a catalog is actually wired
 	// (e.SetFetcher, item 7b's wiring) — a non-empty local set still wins outright, matching
@@ -358,6 +385,9 @@ func ValidateConfig(e Env) (any, bool, error) {
 	// VR10-S4-1 (gate-2 F3): the id rule the import applies is applied HERE too, so the validator an
 	// operator runs before the import never passes an id the seed will refuse by name.
 	errs = append(errs, idErrors(e.ScenariosDir)...)
+	// a `sign` block names its key by a check_env NAME; one the config does not declare is refused HERE,
+	// where the config and the scenarios meet (the shape of the block is judged by the scenario validator).
+	errs = append(errs, signingKeyErrors(c, e.ScenariosDir)...)
 	// V30-004 F-6: a Message Flow scenario that asserts CONTENT needs two facts from the SUT's
 	// broker config — the incoming exchange and the key to bind with. It is reported HERE and
 	// nowhere else, because this is the only path that holds both the config and the scenarios:
@@ -498,11 +528,11 @@ func scenarioLayers(scenariosDir string) []string {
 // report, pushes metrics. DF-06/07: a run-level run_id is stamped into the report so
 // get_report can be scoped to THIS run; if runID is "" one is generated. payload:
 // {status, run_id, summary, report_path, correlation_id}.
-// noMatchHint (R3-A) explains the disk-vs-catalog trap: runner__run executes the ON-DISK scenarios/
+// noMatchHint (R3-A) explains the disk-vs-catalog trap: runner_run executes the ON-DISK scenarios/
 // folder, so a selection that matched 0 there is almost always a scenario authored into the CLOUD
 // CATALOG (which the in-env runner cannot see). Used for both the report Note (async get_report) and
 // the synchronous run error, so total=0 is never a silent mystery.
-const noMatchHint = "0 scenarios matched this selection, so nothing ran and nothing was verified. runner__run resolves its set from the on-disk scenarios/ folder when it has one, and otherwise from the cloud catalog. Check the selection first (a scenario id is not a tag, and a layer must be the canonical name); if the scenario genuinely does not exist yet, author or activate it."
+const noMatchHint = "0 scenarios matched this selection, so nothing ran and nothing was verified. runner_run resolves its set from the on-disk scenarios/ folder when it has one, and otherwise from the cloud catalog. Check the selection first (a scenario id is not a tag, and a layer must be the canonical name); if the scenario genuinely does not exist yet, author or activate it."
 
 // unverifiedRunNote is stamped on a report whose scenarios were NOT checked against the catalog
 // (VR-F6). It exists because "local-unverified" in a field is a thing a machine reads, and the
@@ -549,7 +579,8 @@ func Run(e Env, runID, layer, tag, scenarioID string) (any, bool, error) {
 	defer cleanupSet()
 	// Spec 26 (A1, observe only): the sandbox evidence reader, nil unless argus-config declares
 	// observability.openshell. This is the one funnel for the MCP tool, the CLI, reveal and the relay.
-	rr, err := argus.RunAllWithTarget(c, scenariosDir, resultsDir, c.Project.Name, layer, tag, scenarioID, runID, runner, evidenceFor(e, c), e.RunMode, e.CompareTarget)
+	// e.Tally (nil unless the executor wired one) is the live count the heartbeat reads while this runs.
+	rr, err := argus.RunAllWithLogs(c, scenariosDir, resultsDir, c.Project.Name, layer, tag, scenarioID, runID, runner, evidenceFor(e, c), e.RunMode, e.CompareTarget, e.Tally, logsReaderFor(e))
 	if err != nil {
 		return nil, false, fmt.Errorf("run: %w", err)
 	}
@@ -614,7 +645,7 @@ func Run(e Env, runID, layer, tag, scenarioID string) (any, bool, error) {
 	}
 	// D3 (R10): ALL RUNS REPORT UP — a direct in-env run reports its evidence-free tallies to the cloud
 	// ledger under its OWN run_id (no run_request_id), when the serve process is CP-wired (RunReporter set).
-	// The MCP server already backgrounds runner__run, so this push never blocks the tool response; it is
+	// The MCP server already backgrounds runner_run, so this push never blocks the tool response; it is
 	// best-effort (results are local files first, so a failed push loses nothing — UC062).
 	if e.RunReporter != nil {
 		e.RunReporter(rr.Report, runID, runScope(layer, tag, scenarioID), runStartedAt, time.Now().UTC())
@@ -900,9 +931,27 @@ func lokiFor(e Env) *obsquery.Loki {
 		if cfgURL := c.LokiURLConfigured(); cfgURL != "" && sameLokiURL(e.Loki, cfgURL) {
 			l.Credential = c.LokiCredential()
 			l.PushURL = c.LokiPushURLConfigured()
+			// the configured Loki is an environment's SHARED Loki. Same guard as the credential
+			// above (only the executor that reads THAT Loki), and the namespace is the one render-k8s gave this
+			// executor. A missing namespace is NOT a reason to fall back to the own-Loki queries: Shared is set
+			// anyway and every query it builds is then refused by name.
+			if cluster := c.SharedLokiCluster(); cluster != "" {
+				l.Shared = argus.SharedLogSourceFor(c, cluster, os.Getenv("ARGUS_SUT_NAMESPACE"), e.obsInstance())
+			}
 		}
 	}
 	return l
+}
+
+// logsReaderFor is the Loki a chain's `logs` step reads: the SAME client get_tail_logs uses
+// (lokiFor), so the --loki URL, the tenant (T3.3) and the configured-credential rule apply
+// unchanged and a scenario can name none of them. An UNTYPED nil when the executor has no Loki (--obs none renders
+// --loki ""), never a nil *Loki inside the interface, so the step's preflight can say there is none.
+func logsReaderFor(e Env) obsquery.LogsReader {
+	if strings.TrimSpace(e.Loki) == "" {
+		return nil
+	}
+	return lokiFor(e)
 }
 
 // evidenceFor is the spec 26 A1 reader: nil when argus-config declares no observability.openshell
@@ -923,7 +972,7 @@ func evidenceFor(e Env, c *config.Config) obsquery.SandboxEvidence {
 // NOTHING is logged for a run whose scenarios are withheld from the builder (a
 // certification run: final, scheduled, rehearsal, or a mode that is unknown or empty — the #417 rule,
 // Report.ScenariosVisibleToBuilder). The line names the scenario, its correlation id and the coverage,
-// and the executor's stdout is shipped into the Loki that runner__get_tail_logs reads by substring, so
+// and the executor's stdout is shipped into the Loki that runner_get_tail_logs reads by substring, so
 // "tr-<run_id>" would hand a builder what get_report withholds. The author reads it in the report. The
 // caller logs AFTER the run's mode is stamped on the report.
 func logSandboxPolicyGaps(runID string, rep *report.Report) {
@@ -1074,8 +1123,8 @@ func ReadScenario(e Env, id string) (any, error) {
 
 // ValidateScenario — VR-AUTH2/AUTH3. Uncoverable EXPECT → valid:true + warning (DF-DEC-M25-03).
 // VR10-S2-8 / CR-1: an mcp/chain EXPECT bullet the parser cannot classify (or a `matching` regex
-// that does not compile) is an ERROR with its line, not a warning — `author__validate_scenario`
-// and `author__write_scenario` both come through here.
+// that does not compile) is an ERROR with its line, not a warning — `author_validate_scenario`
+// and `author_write_scenario` both come through here.
 func ValidateScenario(body string) (any, bool, error) {
 	s, verrs := ValidateAll(body)
 	warns := scenario.Warnings(body)
@@ -1110,7 +1159,8 @@ func ValidateScenarioWithConfig(body string, c *config.Config) (any, bool, error
 	if err != nil || c == nil {
 		return out, failed, err
 	}
-	schemaErrs := argus.CheckScenarioSchemas(scenario.Parse(body), c)
+	parsed := scenario.Parse(body)
+	schemaErrs := append(argus.CheckScenarioSchemas(parsed, c), argus.CheckSigningKeys(parsed, c)...)
 	if len(schemaErrs) == 0 {
 		return out, failed, nil
 	}
@@ -1128,8 +1178,8 @@ func ValidateScenarioWithConfig(body string, c *config.Config) (any, bool, error
 //
 // ⛔ WHY IT EXISTS. There are three author paths:
 //
-//	toolcore.ValidateScenario   — author__validate_scenario
-//	toolcore.WriteScenario      — author__write_scenario
+//	toolcore.ValidateScenario   — author_validate_scenario
+//	toolcore.WriteScenario      — author_write_scenario
 //	control/cloudtools.go       — the control plane's author_write_scenario
 //
 // and until this round the last two called scenario.Validate ALONE while only the first added
@@ -1195,7 +1245,7 @@ func WriteScenario(scenariosDir string, body []byte, path string) (any, bool, er
 	if err != nil {
 		return nil, false, fmt.Errorf("destination: %w", err)
 	}
-	// VR12-E8 R3 / THE ONE RULE: the SAME validator author__validate_scenario answers with. A write
+	// VR12-E8 R3 / THE ONE RULE: the SAME validator author_validate_scenario answers with. A write
 	// that refused less than validate is the trap this round removes.
 	if _, verrs := ValidateAll(string(body)); len(verrs) > 0 {
 		return map[string]any{"written": false, "valid": false, "errors": verrs}, true, nil
@@ -1280,7 +1330,7 @@ func ProposeScenario(description, targetService, layer string) (any, error) {
 		"```json\n{}\n```\n\n" +
 		"## VERIFY\n" + verify + "\n\n" +
 		// VR12-E1: the draft this tool hands an author must be VALID under the split, or the very
-		// next call — author__validate_scenario — refuses the product's own skeleton. The proposer
+		// next call — author_validate_scenario — refuses the product's own skeleton. The proposer
 		// emits the runnable sub-heading; the author adds `### Non-runnable` when they have something
 		// to say about what the test proves.
 		"## EXPECT\n### Runnable\n" + expect + "\n\n" +
@@ -1340,7 +1390,7 @@ func ProposeMoneyGuardScenario(description, targetService string) (any, error) {
 		"`body contains <x>` anywhere in the answer, or `body has <field> containing <x>` on a\nfield of a JSON answer.)\n\n" +
 		"## EXPECT\n### Runnable\n- status=200\n\n" +
 		"## TIMEOUT\n30s\n\n" +
-		"## CLEANUP\nN/A — this instance is declared money_handling (T5.4/): generation " +
+		"## CLEANUP\nN/A — this instance is declared money_handling (T5.4): generation " +
 		"offers only a GET against a read-only probe/health/metrics path, which creates nothing to clean up.\n"
 	needs := []string{
 		"ID (" + id + " is a placeholder — set the real domain prefix + number)",
@@ -1351,7 +1401,7 @@ func ProposeMoneyGuardScenario(description, targetService string) (any, error) {
 	}
 	return map[string]any{
 		"drafts": []map[string]any{{"scenario": draft, "needs_user_review": needs}},
-		"note": "skeleton-only initializer (DF-16), GET-ONLY (T5.4/): this instance is " +
+		"note": "skeleton-only initializer (DF-16), GET-ONLY (T5.4): this instance is " +
 			"declared money_handling, so only a read-only probe/health/metrics scaffold is offered. Fill " +
 			"the real probe path from the SUT source/config, then validate + write.",
 	}, nil

@@ -47,6 +47,8 @@ const (
 	rsnSet     = "set"
 	rsnSeed    = "seed"
 	rsnErrored = "errored"
+	// rsnNotApplicable: the check was not executed because a precondition it depends on is absent.
+	rsnNotApplicable = "not_applicable"
 )
 
 type cls struct {
@@ -199,6 +201,9 @@ func (c *calc) classify(r *Run, ck *Check) cls {
 	switch {
 	case !has:
 		out.kind = clsUnrec
+		return out
+	case o == OutcomeNotApplicable:
+		out.kind, out.reason = clsCNR, rsnNotApplicable
 		return out
 	case o != OutcomePassed && o != OutcomeFailed && o != OutcomeDegraded:
 		out.kind, out.reason = clsCNR, rsnErrored
@@ -646,6 +651,8 @@ func cnrSentence(s groupStats, total int) string {
 		return "Could not run: the run was of a different set than the comparison."
 	case s.reasons[rsnRun] > 0:
 		return "Could not run: the run failed before it ran the checks."
+	case s.cnr > 0 && s.reasons[rsnNotApplicable] == s.cnr:
+		return "Not applicable: a precondition this check depends on is absent in this environment, so it was not executed."
 	}
 	return fmt.Sprintf("Could not run in %d of %d runs: the check errored.", s.cnr, total)
 }

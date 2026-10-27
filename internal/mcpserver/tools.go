@@ -13,38 +13,38 @@ const defaultWindow = "10m"
 // Argument descriptions shared by more than one tool (VR10-S1-9: what it is · required or optional ·
 // an example shape · what happens when omitted — written for an agent that has never seen Argus).
 const (
-	correlationArg = "The correlation id of one scenario execution, shaped tr-<run_id>-<SCENARIO>-<hash> (example: \"tr-20260902T134305716-ORDE-017-3f9a1c\"); read it from runner__get_report. Optional in the schema but needed for an answer: omitted, there is no id to match and nothing comes back."
+	correlationArg = "The correlation id of one scenario execution, shaped tr-<run_id>-<SCENARIO>-<hash> (example: \"tr-20260902T134305716-ORDE-017-3f9a1c\"); read it from runner_get_report. Optional in the schema but needed for an answer: omitted, there is no id to match and nothing comes back."
 	windowArg      = "Optional. How far back to look, as a duration (example: \"10m\" or \"15m\"). Omitted: 10m. The window is a +/- band ANCHORED to the run when the correlation_id belongs to the last run (so a small window still finds an older run), else relative to now."
 )
 
-// DefaultTools returns the 6 in-env tools — the runner__* namespace ONLY (M3 fix-plan C1).
-// The in-env server is RUNNER-ONLY: authoring is a cloud-plane capability now (the author__*
+// DefaultTools returns the 6 in-env tools — the runner_* namespace ONLY (M3 fix-plan C1).
+// The in-env server is RUNNER-ONLY: authoring is a cloud-plane capability now (the author_*
 // tools live on the CP MCP server, control.CloudTools) — the doc ruling locks in-env = 6 runner
-// and "authoring → cloud registry, not disk". The 6 author__* tools this function used to expose
+// and "authoring → cloud registry, not disk". The 6 author tools this function used to expose
 // were the M2.5 single-plane leftover; TestDefaultTools_InEnvRunnerOnly asserts their absence.
 // Each tool is a thin handler over internal/toolcore so the MCP path and the CLI produce
-// byte-identical data (VR-H1, one core). runner__get_failure_context (the build-exit 7th runner
-// tool) was REMOVED in round FX4: the holdout reads via runner__get_report; triage is multi-call
+// byte-identical data (VR-H1, one core). runner_get_failure_context (the build-exit 7th runner
+// tool) was REMOVED in round FX4: the holdout reads via runner_get_report; triage is multi-call
 // (get_sagas + get_tail_logs + get_dashboard_url). holdout_test.go asserts its absence.
 // The Env supplies per-instance config; tool args (always carrying instance_id) override the
 // scenario-specific bits.
 func DefaultTools(env toolcore.Env) []Tool {
 	tools := []Tool{
 		// --- runner namespace (both hats; output role-redacted) — the ONLY in-env namespace ---
-		{Name: "runner__validate_config", Namespace: NSRunner, InputSchema: schema(map[string]string{}),
+		{Name: "runner_validate_config", Namespace: NSRunner, InputSchema: schema(map[string]string{}),
 			Description: "Validate THIS instance's config against its scenarios. Single-tenant: the server owns its one config, so pass ONLY instance_id — never a config path, and don't hunt for an argus-config.yaml; any other argument is refused (VR10-S1).",
 			Handler: func(a json.RawMessage, _ Principal) Outcome {
 				p, _, err := toolcore.ValidateConfig(env)
 				return opOutcome(p, err)
 			}},
-		{Name: "runner__run", Namespace: NSRunner, Async: true, InputSchema: schema(map[string]string{
+		{Name: "runner_run", Namespace: NSRunner, Async: true, InputSchema: schema(map[string]string{
 			"scenario_ref": "Optional. Run exactly one scenario, by its id (example: \"ORDE-017\"). Omitted: no single-scenario filter.",
 			"tag":          "Optional. Run only the scenarios carrying this tag (example: \"smoke\"). Omitted: no tag filter. Given together with layer, both must match.",
 			"layer":        "Optional. Run only the scenarios whose canonical layer is this one (example: \"HTTP Ingestion\"). Omitted: no layer filter.",
 			// VR-F6: PLAN B, and only that. It changes nothing while the control plane is reachable.
 			"use_local_scenarios": "Optional, PLAN B only. Pass \"true\" ONLY after the control plane proved unreachable: run the scenarios on local disk anyway, accepting they were NOT verified against the catalog and may be stale. Omitted (the default): while the control plane is reachable this changes nothing; when it is unreachable the run refuses and waits instead.",
 		}),
-			Description: "Run scenarios ASYNC (real argus/JMeter): returns {status:running, run_id} immediately - poll runner__get_report{run_id}. Selects a SUBSET by tag and/or layer (AND-applied). Syncs the set from the control-plane catalog first; if the CP is unreachable it REFUSES and offers use_local_scenarios rather than silently running what is on disk. Never pass run_id: the server mints it and returns it.",
+			Description: "Run scenarios ASYNC (real argus/JMeter): returns {status:running, run_id} immediately - poll runner_get_report{run_id}. Selects a SUBSET by tag and/or layer (AND-applied). Syncs the set from the control-plane catalog first; if the CP is unreachable it REFUSES and offers use_local_scenarios rather than silently running what is on disk. Never pass run_id: the server mints it and returns it.",
 			Handler: func(a json.RawMessage, _ Principal) Outcome {
 				// DF-06: the server dispatch runs this handler in the background (holding the run
 				// lock) and injects run_id; Run stamps it into the report. (Synchronous fallback
@@ -56,31 +56,31 @@ func DefaultTools(env toolcore.Env) []Tool {
 				p, _, err := toolcore.Run(renv, argStr(a, "run_id"), argStr(a, "layer"), argStr(a, "tag"), argStr(a, "scenario_ref"))
 				return opOutcome(p, err)
 			}},
-		{Name: "runner__get_report", Namespace: NSRunner, InputSchema: schema(map[string]string{"run_id": "Optional. The run to report on, as returned by runner__run (example: \"20260902T134305716\"). Omitted: the last run on this instance. The report always covers the whole run — find your scenario inside it; there is no per-scenario filter."}),
+		{Name: "runner_get_report", Namespace: NSRunner, InputSchema: schema(map[string]string{"run_id": "Optional. The run to report on, as returned by runner_run (example: \"20260902T134305716\"). Omitted: the last run on this instance. The report always covers the whole run — find your scenario inside it; there is no per-scenario filter."}),
 			Description: "The report.json model for one WHOLE run, scoped to run_id when given (else the last run); product hat: expected values stripped. Find your scenario inside it — a per-scenario filter is not an argument.",
 			Handler: func(a json.RawMessage, pr Principal) Outcome {
 				p, _, err := toolcore.GetReport(env, pr.Hat, argStr(a, "run_id")) // DF-07
 				return opOutcome(p, err)
 			}},
-		{Name: "runner__get_sagas", Namespace: NSRunner, InputSchema: schema(map[string]string{"correlation_id": correlationArg, "window": windowArg}),
+		{Name: "runner_get_sagas", Namespace: NSRunner, InputSchema: schema(map[string]string{"correlation_id": correlationArg, "window": windowArg}),
 			Description: "The saga timeline (what/why/by-whom) for a correlation id, from Loki.",
 			Handler: func(a json.RawMessage, _ Principal) Outcome {
 				p, err := toolcore.GetSagas(env, argStr(a, "correlation_id"), windowOf(a))
 				return opOutcome(p, err)
 			}},
-		{Name: "runner__get_tail_logs", Namespace: NSRunner, InputSchema: schema(map[string]string{"correlation_id": correlationArg, "window": windowArg}),
+		{Name: "runner_get_tail_logs", Namespace: NSRunner, InputSchema: schema(map[string]string{"correlation_id": correlationArg, "window": windowArg}),
 			Description: "Windowed, correlation-scoped log lines (== CLI tail-logs).",
 			Handler: func(a json.RawMessage, _ Principal) Outcome {
 				p, err := toolcore.TailLogs(env, argStr(a, "correlation_id"), windowOf(a))
 				return opOutcome(p, err)
 			}},
-		{Name: "runner__get_dashboard_url", Namespace: NSRunner, InputSchema: schema(map[string]string{"correlation_id": "Optional. Deep-link the dashboard to this correlation id, shaped tr-<run_id>-<SCENARIO>-<hash> (example: \"tr-20260902T134305716-ORDE-017-3f9a1c\"). Omitted: the general dashboard."}),
+		{Name: "runner_get_dashboard_url", Namespace: NSRunner, InputSchema: schema(map[string]string{"correlation_id": "Optional. Deep-link the dashboard to this correlation id, shaped tr-<run_id>-<SCENARIO>-<hash> (example: \"tr-20260902T134305716-ORDE-017-3f9a1c\"). Omitted: the general dashboard."}),
 			Description: "Grafana links: dashboard_url (scoped to correlation_id when given, else general) + overview_url (always the general dashboard). The URL is templated, not a check the run exists.",
 			Handler: func(a json.RawMessage, _ Principal) Outcome {
 				return Ok(toolcore.GetDashboardURL(env, argStr(a, "correlation_id")))
 			}},
-		// NOTE (C1): the 6 author__* tools were REMOVED from the in-env server. Authoring is a
-		// cloud-plane capability — see control.CloudTools (author__propose/validate/write/list/read/
+		// NOTE (C1): the 6 author tools were REMOVED from the in-env server. Authoring is a
+		// cloud-plane capability — see control.CloudTools (author_propose/validate/write/list/read/
 		// delete + request_run + get_run_status + get_executor_status). The in-env plane never writes
 		// scenarios to disk anymore (doc ruling: authoring → cloud registry, not disk).
 	}
@@ -88,6 +88,10 @@ func DefaultTools(env toolcore.Env) []Tool {
 	// and a non-matching id is REJECTED (never silently serve the local instance's data). Both planes
 	// enforce this; the cloud plane does so via resolveWorkspace.
 	for i := range tools {
+		// AC-D70 (design #678 A4, B5): the names have ONE underscore now; the old two-underscore name still dispatches to
+		// the same tool for one release, hidden from tools/list — a local router that has not been updated, and an agent
+		// folder wired straight to this executor, still call runner__X.
+		tools[i].Aliases = []string{legacyRunnerName(tools[i].Name)}
 		inner := tools[i].Handler
 		// The check itself, side-effect free, so it can ALSO run as a PreCheck before an async
 		// tool takes the run lock / CP fence (see Tool.PreCheck). Sharing one closure keeps the
@@ -114,6 +118,11 @@ func DefaultTools(env toolcore.Env) []Tool {
 	}
 	return tools
 }
+
+// legacyRunnerName is the old spelling of a runner tool's name (runner_run -> runner__run): the hidden alias kept for one
+// release (design #678 B8). It is the only place the old spelling is written — control's legacyBuilderName is the same
+// rule for the control plane's own builder tools (AC-D68).
+func legacyRunnerName(name string) string { return strings.Replace(name, "runner_", "runner__", 1) }
 
 // opOutcome maps a toolcore result to an MCP outcome: an operational error is the
 // tool-error plane (result.isError:true + a structured error payload); otherwise success.

@@ -11,7 +11,7 @@ import "fmt"
 // ⛔ IT IS LEFT UNWIRED ON PURPOSE. "Unique" has THREE incompatible meanings and the product owner
 // has not chosen, so picking one here would silently decide what the word means:
 //
-//	author__write_scenario on the CONTROL plane, against the `scenarios` registry
+//	author_write_scenario on the CONTROL plane, against the `scenarios` registry
 //	    ⇒ scope is PER INSTANCE — that is the key WriteScenario already carries
 //	    (InstanceID, WorkspaceID; internal/control/cloudtools.go).
 //	toolcore.WriteScenario's disk twin, against scenariosDir

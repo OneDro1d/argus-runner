@@ -15,23 +15,23 @@ func httpScenario(method, url string, cleanup Cleanup) *Scenario {
 var naCleanup = Cleanup{Blocks: []CleanupBlock{{Form: CleanupNA}}}
 
 func TestMoneyGuard_AllowsWhatTheLiveMoneyKitsRun(t *testing.T) {
-	// Every one of these is a TRIGGER the live shop-dev and shop-uni-arb kits run hourly today
-	// (two recorded runs, read
+	// Every one of these has the shape of a TRIGGER a live money-handling kit runs hourly
+	// (modelled on two recorded runs,
 	// 2026-09-24). Turning the guard on must not refuse a single one.
 	for _, u := range []string{
-		"https://shop-dev.example/api/v1/strategies",
-		"https://shop-dev.example/kyc/health",
-		"https://shop-dev.example/api/v1/user/withdrawal-pin",
-		"https://shop-dev.example/api/v1/trading/config?strategy_pair_id=not-a-uuid",
-		"https://shop-dev.example/api/v1/trading/config",
+		"https://shop-dev.example/api/v1/products",
+		"https://shop-dev.example/auth/health",
+		"https://shop-dev.example/api/v1/user/withdrawal-settings",
+		"https://shop-dev.example/api/v1/pay/config?account_id=not-a-uuid",
+		"https://shop-dev.example/api/v1/pay/config",
 		"https://shop-dev.example/ready",
-		"https://shop-dev.example/internal/custody/address-health",
+		"https://shop-dev.example/internal/vault/health",
 		"https://shop-dev.example/api/v1/user/transactions",
-		"https://shop-dev.example/api/admin/holdings",
-		"https://shop-dev.example/api/v1/portfolio-token-contracts",
+		"https://shop-dev.example/api/admin/accounts",
+		"https://shop-dev.example/api/v1/catalog-items",
 		"https://shop-dev.example/api/v1/user/balances",
-		"http://arb-engine.shop-uni-arb.svc.cluster.local:9090/metrics",
-		"http://control-plane.shop-uni-arb.svc.cluster.local:80/readyz",
+		"http://main-engine.shop-main.svc.cluster.local:9090/metrics",
+		"http://control-plane.shop-main.svc.cluster.local:80/readyz",
 	} {
 		if v := MoneyGuardViolations(httpScenario("GET", u, naCleanup), nil); len(v) != 0 {
 			t.Errorf("GET %s was refused: %v — a read the live kit relies on", u, v)
@@ -45,13 +45,13 @@ func TestMoneyGuard_RefusesAnythingButARead(t *testing.T) {
 		s    *Scenario
 		want string
 	}{
-		{"POST", httpScenario("POST", "https://x.example/api/v1/strategies", naCleanup), "is POST"},
-		{"PUT", httpScenario("PUT", "https://x.example/api/v1/trading/config", naCleanup), "is PUT"},
+		{"POST", httpScenario("POST", "https://x.example/api/v1/products", naCleanup), "is POST"},
+		{"PUT", httpScenario("PUT", "https://x.example/api/v1/pay/config", naCleanup), "is PUT"},
 		{"DELETE", httpScenario("DELETE", "https://x.example/api/v1/user", naCleanup), "is DELETE"},
 		// The JMeter path turns an absent method into POST (argus.DeriveProps) — silence is a write.
 		{"no method", httpScenario("", "https://x.example/health", naCleanup), "runs as POST"},
 		{"GET on orders", httpScenario("GET", "https://x.example/api/v1/orders", naCleanup), `"orders" path`},
-		{"GET on a quote", httpScenario("GET", "https://x.example/api/v1/quote?pair=OPS", naCleanup), `"quote" path`},
+		{"GET on a quote", httpScenario("GET", "https://x.example/api/v1/quote?pair=ABC", naCleanup), `"quote" path`},
 		{"GET on swap-intent", httpScenario("GET", "https://x.example/swap-intent/1", naCleanup), `"swap" path`},
 		{"GET on rebalance", httpScenario("GET", "https://x.example/admin/rebalance", naCleanup), `"rebalance" path`},
 		{"GET on claims", httpScenario("GET", "https://x.example/rewards/claims", naCleanup), `"claims" path`},
@@ -94,15 +94,15 @@ func TestMoneyGuard_AllowsAnAllGETChain(t *testing.T) {
 
 func TestMoneyVerbInPath_WordBoundaries(t *testing.T) {
 	for url, want := range map[string]string{
-		"https://x/api/v1/orders":              "orders",
-		"https://x/api/v1/order/1":             "order",
-		"https://x/quote":                      "quote",
-		"https://x/api?op=swap":                "swap",
-		"https://x/api/rebalancing-status":     "rebalancing",
-		"https://x/border/health":              "", // "border" is not "order"
-		"https://x/api/unquoted-names":         "", // "unquoted" is not "quote"
-		"https://x/api/v1/trading/config":      "",
-		"https://x/api/v1/user/withdrawal-pin": "",
+		"https://x/api/v1/orders":                   "orders",
+		"https://x/api/v1/order/1":                  "order",
+		"https://x/quote":                           "quote",
+		"https://x/api?op=swap":                     "swap",
+		"https://x/api/rebalancing-status":          "rebalancing",
+		"https://x/border/health":                   "", // "border" is not "order"
+		"https://x/api/unquoted-names":              "", // "unquoted" is not "quote"
+		"https://x/api/v1/pay/config":               "",
+		"https://x/api/v1/user/withdrawal-settings": "",
 	} {
 		if got := MoneyVerbInPath(url); got != want {
 			t.Errorf("MoneyVerbInPath(%q) = %q, want %q", url, got, want)

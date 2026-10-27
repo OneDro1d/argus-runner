@@ -12,7 +12,7 @@ import (
 // PreflightRun answers, BEFORE a run starts, whether the run would execute anything at all.
 // It returns nil when there is something to run, and a refusal explaining why not otherwise.
 //
-// Why this exists as a separate, synchronous check: runner__run is ASYNC. It mints a run_id,
+// Why this exists as a separate, synchronous check: runner_run is ASYNC. It mints a run_id,
 // backgrounds the work and returns immediately, so an agent that asks for a run which can only
 // ever execute nothing still gets a run_id back and has to infer the problem from a later
 // report showing total:0. The owner's requirement is that the agent SAY the run cannot be run,

@@ -17,7 +17,7 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/obsquery"
 )
 
-// #419 (, reported by Talos, Bartek's agent) — saga-presence judges PARSED FIELDS OF
+// #419 (reported by a tester's agent) — saga-presence judges PARSED FIELDS OF
 // ONE LINE, with the SUT's DECLARED names.
 //
 // It used to pass on `body.contains("control_action")` over the WHOLE Loki response, after finding
@@ -189,7 +189,6 @@ func groovyClasspath(t *testing.T) string {
 // returns the verdict. lines == nil with unreachable=true points the script at a closed port.
 func runVerify(t *testing.T, props map[string]string, lines []string, unreachable bool) verdict {
 	t.Helper()
-	cp := groovyClasspath(t)
 	url := "http://127.0.0.1:1"
 	if !unreachable {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -207,6 +206,14 @@ func runVerify(t *testing.T, props map[string]string, lines []string, unreachabl
 		defer srv.Close()
 		url = srv.URL
 	}
+	return execVerifyScript(t, props, url)
+}
+
+// execVerifyScript runs the template's verify-saga script, EXACTLY as extracted, against a Loki at url.
+// props' loki.* entries (other than loki.url) override the one-attempt/no-wait defaults below.
+func execVerifyScript(t *testing.T, props map[string]string, url string) verdict {
+	t.Helper()
+	cp := groovyClasspath(t)
 	pp := map[string]string{
 		"loki.url": url, "correlation.id": sagaCID, "loki.expected_saga": "control_action",
 		"loki.poll_attempts": "1", "loki.settle_ms": "0", "loki.poll_interval_ms": "0",

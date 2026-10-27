@@ -185,16 +185,27 @@ def isSagaStep = { Map m ->
 def excl = "loki|promtail|grafana|prometheus|pushgateway|jmeter"
 def lq = { String s -> '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"' }
 // The line filters only NARROW the query; the verdict comes from the parsed fields above.
-def logql = '{service=~".+",service!~"' + excl + '"} |= ' + lq(corr) + ' |= ' + lq(step)
+// loki.selector is set ONLY for an environment's SHARED Loki (observability.loki.shared_cluster):
+// there the stream selector is {cluster, namespace, container!~excl} instead of the per-instance service label,
+// which a shared promtail does not stamp. Absent (every instance with its own Loki) = the query below, unchanged.
+def streamSel = (props.get("loki.selector") ?: "").toString()
+if (streamSel.isEmpty()) { streamSel = '{service=~".+",service!~"' + excl + '"}' }
+def logql = streamSel + ' |= ' + lq(corr) + ' |= ' + lq(step)
 
-long endNs = System.currentTimeMillis() * 1000000L
-long startNs = endNs - (15L * 60L * 1000000000L)
+// the window's START is anchored here, at the trigger (now - 15 min), and never moves. Its
+// END is NOT computed here: it used to be fixed at this line and then reused after settle + every
+// sleep(interval), so a saga line Loki stamped even 0.7 s after this point lay outside EVERY attempt's
+// window and the check reported "saga not found" (a false FAIL) however long it waited. The END is "now",
+// recomputed on each attempt immediately before that attempt's query (internal/chain/logsstep.go does the
+// same: settle once, then at := now() per read).
+long startNs = System.currentTimeMillis() * 1000000L - (15L * 60L * 1000000000L)
 
 boolean found = false
 Throwable lastErr = null
 if (settleMs &gt; 0) { sleep(settleMs) } // initial settle for the stdout-&gt;promtail-&gt;Loki hop
 for (int i = 0; i &lt; attempts &amp;&amp; !found; i++) {
   try {
+    long endNs = System.currentTimeMillis() * 1000000L // now, per attempt, right before the query
     String q = URLEncoder.encode(logql, "UTF-8")
     String u = base + "/loki/api/v1/query_range?limit=300&amp;direction=backward&amp;start=" + startNs + "&amp;end=" + endNs + "&amp;query=" + q
     HttpURLConnection conn = (HttpURLConnection) new URL(u).openConnection()

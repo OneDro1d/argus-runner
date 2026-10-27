@@ -39,7 +39,7 @@ const IngestionURLToken = "${INGESTION_URL}"
 // internal/argus. argus aliases this type rather than keeping a second copy — two decoders of one
 // wire format is how a validator ends up policing a shape the runner does not run.
 type ChainStep struct {
-	Type string `json:"type"` // "mcp" | "ui" | "http" | "amqp"
+	Type string `json:"type"` // "mcp" | "ui" | "http" | "amqp" | "fault" | "db" | "logs" | "bus" (ChainStepTypes)
 	Name string `json:"name"`
 	// mcp step:
 	Transport string `json:"transport"`
@@ -58,7 +58,11 @@ type ChainStep struct {
 	// exists). A claim has one home.
 	// Save declares what this step publishes for LATER steps: variable name -> path into this
 	// step's response (chain/capture.go). A later step references it as ${saved.<var>} in its args.
-	// A value is a JSON dot-path string, or {"regex": "<one capture group>"} for a text body (SaveSpec).
+	// A value is a JSON dot-path string (a scalar, saved as text), {"regex": "<one capture group>"} for a text
+	// body, or {"json": "<path>"}, which saves the value at the path AS JSON (an object, an
+	// array, a string with its quotes, a number with every digit, true/false/null; `$` is the whole response).
+	// A JSON-saved variable is spliced RAW, and only into a later http `body` or mcp `args`: it is refused in a
+	// url, a header and any claim (SavedJSONProblems), and one variable has one kind (SaveSpec).
 	Save map[string]SaveSpec `json:"save"`
 	// ui step:
 	Spec   string `json:"spec"`
@@ -120,6 +124,9 @@ type ChainStep struct {
 	Envelope     *ChainEnvelope `json:"envelope"`
 	Wait         string         `json:"wait"`
 	Force        bool           `json:"force"`
+	// Decode (consume only): "gzip" gunzips the delivered body before a schema or a
+	// body claim reads it. A delivery that says content-encoding: gzip is gunzipped without it.
+	Decode string `json:"decode"`
 	// Schema + Record (ARGUS-DESIGN-GENERIC-SCHEMA-MESSAGES-2026-09-28) are the generic,
 	// app-declared alternative to Envelope: a publish carries exactly one of `envelope`, `body` or
 	// `schema`+`record`; a consume's `schema` is optional and, when present, decodes the delivered
@@ -132,6 +139,54 @@ type ChainStep struct {
 	// amqpStepSpec's second door (chain_scenario.go), not in the struct.
 	Schema string          `json:"schema"`
 	Record json.RawMessage `json:"record"`
+	// fault step - break a connection or a deployment during the run. Op (shared with the
+	// amqp step) is stop | start | scale | wait_ready | delay | drop | truncate | restore. Deployment and
+	// Link are NAMES under argus-config.yaml's top-level fault_allowed_targets, never a namespace or a URL.
+	// Pointers, so "absent" and "0" are told apart (faultstep.go refuses what does not fit the op).
+	Deployment string `json:"deployment"`
+	Link       string `json:"link"`
+	Replicas   *int   `json:"replicas"`
+	Timeout    string `json:"timeout"` // fault wait_ready: Go duration, default 120s, max 600s; db: default 5s, max 30s
+	LatencyMs  *int   `json:"latency_ms"`
+	JitterMs   *int   `json:"jitter_ms"`
+	Bytes      *int   `json:"bytes"`
+	// db step - ONE read-only SELECT against a PostgreSQL target, its rows judged by `body …`
+	// claims on {"row_count": N, "rows": [...]}. Query is the SQL (${correlation_id}/${cid}/${cid8} only; a
+	// saved value goes through Params, never into the text). Params is the raw JSON array of strings sent as
+	// bind parameters $1..$n, decoded by DBStepParams so a non-string element is refused BY NAME. Target (shared
+	// with the mcp step) names targets.database_targets.<name>; absent = targets.database. Timeout (shared with
+	// the fault step) is the statement timeout and the client deadline. MaxRows bounds the rows read.
+	Query   string          `json:"query"`
+	Params  json.RawMessage `json:"params"`
+	MaxRows *int            `json:"max_rows"`
+	// logs step - COUNT the lines of the executor's own Loki, judged by `body …` claims on
+	// {"count": N, "lines": [...]}. Scope is "correlation" (lines carrying this scenario's correlation id) or
+	// "source" (the streams Labels select). Labels is the raw JSON object of label name -> literal value, decoded
+	// by LogsStepLabels so a non-string value is refused BY NAME. Contains is a literal line filter (the only
+	// field that takes ${cid}/${correlation_id}/${saved.<var>}); Matching is an RE2 line filter. Window (how far
+	// back, default: one minute before the chain started, max 1h) and Settle (the wait before the FIRST query,
+	// default 2s, max 60s) are Go durations. A scenario cannot name a URL: the Loki is the executor's own.
+	Scope    string          `json:"scope"`
+	Labels   json.RawMessage `json:"labels"`
+	Contains string          `json:"contains"`
+	Matching string          `json:"matching"`
+	Window   string          `json:"window"`
+	Settle   string          `json:"settle"`
+	// bus step - an AMQP subscription armed BEFORE the chain's first step and judged where it stands,
+	// by `body …` claims on {"count","correlated","seen",…,"messages":[…]}. The binding is Stream (a name declared under
+	// the broker target's `streams`) or Exchange + RoutingKey (shared with the amqp step); Target (shared) names
+	// targets.message_broker_targets.<name>; Wait (shared with the amqp consume, but 1s..60s here) is how long it watches.
+	// Where is the raw JSON object of body path -> string or array of strings (any-of), decoded by BusStepWhere.
+	Stream string          `json:"stream"`
+	Where  json.RawMessage `json:"where"`
+	// mcp step, answers a gateway wraps: Extract names the part of the answer the claims and `save`
+	// read; Unavailable names an answer that means "could not check"; Poll (shared) re-sends the call, which Idempotent
+	// must allow. An executor older than 0.3.70 refuses a check that reads the extracted document (`body extracted …`).
+	Extract     *MCPExtract     `json:"extract"`
+	Unavailable *MCPUnavailable `json:"unavailable"`
+	Idempotent  bool            `json:"idempotent"`
+	// Sign: per-call Ed25519 signing of this mcp step's request. See mcpsign.go.
+	Sign *MCPSign `json:"sign"`
 }
 
 // HeaderValues decodes headers's raw per-value JSON as strings — the shared shape an amqp `publish`

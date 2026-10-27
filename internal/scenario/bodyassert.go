@@ -1,6 +1,7 @@
 package scenario
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -17,7 +18,7 @@ import (
 //   internal/control/cloudtools.go:251   -> scenario.Validate ONLY
 //
 // Two of the three call scenario.Validate ALONE. A rule added to argus.ExpectProblems is therefore
-// REPORTED by author__validate_scenario and SILENTLY BYPASSED by author__write_scenario and by the
+// REPORTED by author_validate_scenario and SILENTLY BYPASSED by author_write_scenario and by the
 // control plane's write — an author is told their scenario is invalid and can save it anyway. That
 // trap is named in V29-017's own blind audit and in the V31 solution-architect record, and putting
 // the grammar here is what makes it structurally impossible rather than a thing to remember.
@@ -65,7 +66,28 @@ const (
 	BodyGTE = mcp.BodyGTEOp
 	BodyLT  = mcp.BodyLTOp
 	BodyLTE = mcp.BodyLTEOp
+	// Numeric equality, tolerance, the negatives, absence. Judged in Go only.
+	BodyEQ          = mcp.BodyEQOp
+	BodyWithin      = mcp.BodyWithinOp
+	BodyNotContains = mcp.BodyNotContainsOp
+	BodyNotMatches  = mcp.BodyNotMatchesOp
+	BodyNotEquals   = mcp.BodyNotEqualsOp
+	BodyAbsent      = mcp.BodyAbsentOp
 )
+
+// IsNewClaimForm reports whether a parsed claim is one of the forms (`==`, `within`, a
+// negative, `has no`, `every`) — the forms a plain (JMeter-run) scenario refuses at authoring and an
+// executor older than the forms cannot judge.
+func IsNewClaimForm(a BodyAssert) bool {
+	if a.Every != "" {
+		return true
+	}
+	switch a.Op {
+	case BodyEQ, BodyWithin, BodyNotContains, BodyNotMatches, BodyNotEquals, BodyAbsent:
+		return true
+	}
+	return false
+}
 
 var (
 	// `body has <field> [containing|matching|equals <value>]`. The field pattern permits dots and
@@ -81,7 +103,26 @@ var (
 	// Anything that OPENS with the word "body" is claiming to be a body assertion, so if neither
 	// form above accepts it, it is an error rather than prose. This is what makes R3 total.
 	bodyClaimRe = regexp.MustCompile(`(?i)^\s*body\b`)
+
+	// . `body extracted <form>` — the same forms, about the document an mcp step's `extract` cut out.
+	bodyExtractedRe = regexp.MustCompile(`(?i)^\s*body\s+extracted\b\s*(.*?)\s*$`)
+
+	// . `body has no <field>` — absence.
+	bodyHasNoRe = regexp.MustCompile(`(?i)^\s*body\s+has\s+no\s+([a-zA-Z0-9_.\-]+)\s*$`)
+	// `body has <field> not containing|matching|equals <value>` — the field-scoped negatives.
+	bodyHasNotRe = regexp.MustCompile(`(?i)^\s*body\s+has\s+([a-zA-Z0-9_.\-]+)\s+not\s+(containing|matching|equals)\s+(.+?)\s*$`)
+	// `body has <field> not <anything else>` — attempting a negative with a word the grammar lacks, refused by name.
+	bodyHasNotAttemptRe = regexp.MustCompile(`(?i)^\s*body\s+has\s+([a-zA-Z0-9_.\-]+)\s+not\b\s*(.*?)\s*$`)
+	// `body not contains|containing|matching|matches <value>` — the whole-body negatives.
+	bodyWholeNotRe = regexp.MustCompile(`(?i)^\s*body\s+not\s+(contains|containing|matching|matches)\s+(.+?)\s*$`)
+	// `body has <field> within <tol> of <reference>` — permissive after `within`, so a malformed one is refused by name.
+	bodyWithinAttemptRe = regexp.MustCompile(`(?i)^\s*body\s+has\s+([a-zA-Z0-9_.\-]+)\s+within\b\s*(.*?)\s*$`)
+	bodyWithinRestRe    = regexp.MustCompile(`(?i)^(\S+)\s+of\s+(\S+)$`)
+	// `body every <array-path> has <rest>` — the rest is any field form; `$` is the whole answer.
+	bodyEveryRe = regexp.MustCompile(`(?i)^\s*body\s+every\s+(\$|[a-zA-Z0-9_.\-]+)\s+has\s+(.+?)\s*$`)
 )
+
+var errNotPlainNumber = errors.New("not a plain number")
 
 // numericOpFor maps a comparison TOKEN to its BodyAssert op. ok=false for anything that is not one
 // of the four this grammar supports (`==`, `=>`, `=<` are common typos for `=`/`>=`/`<=`, caught
@@ -96,6 +137,8 @@ func numericOpFor(tok string) (string, bool) {
 		return BodyLT, true
 	case "<=":
 		return BodyLTE, true
+	case "==":
+		return BodyEQ, true // numeric equality (it was refused by name before)
 	}
 	return "", false
 }
@@ -106,12 +149,145 @@ func numericOpFor(tok string) (string, bool) {
 // on the author path turns those into hard validation errors; a caller on the run path reports them
 // through tier 3. Neither may discard them.
 func ParseBodyAsserts(bullets []string) ([]BodyAssert, []error) {
+	return parseBodyAsserts(bullets, false)
+}
+
+// ParseMCPStepBodyAsserts is ParseBodyAsserts for the claims of a chain `mcp` step: it also reads
+// `body extracted <form>`, the claim about the document the step's `extract` cut out. Every
+// other engine calls ParseBodyAsserts, which refuses that spelling by name.
+func ParseMCPStepBodyAsserts(bullets []string) ([]BodyAssert, []error) {
+	return parseBodyAsserts(bullets, true)
+}
+
+// ClaimIsExtracted reports whether a bullet is written `body extracted …`.
+func ClaimIsExtracted(bullet string) bool {
+	return !baseGrammarOnly && bodyExtractedRe.MatchString(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(bullet), "-")))
+}
+
+// baseGrammarOnly (test hook) turns off exactly what added to this parser: the `body extracted`
+// spelling. With it on, the parser accepts what the grammar at commit 2dec4e02 accepted, which is how
+// TestExtractedSpelling_TheBaseGrammarRefusesEveryForm shows that an older executor refuses the chain.
+var baseGrammarOnly bool
+
+func parseBodyAsserts(bullets []string, allowExtracted bool) ([]BodyAssert, []error) {
 	var out []BodyAssert
 	var errs []error
 	for _, raw := range bullets {
 		clause := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "-"))
 		if !bodyClaimRe.MatchString(clause) {
 			continue // not claiming to be a body assertion at all — somebody else's bullet
+		}
+		// `body extracted <form>`: <form> is parsed by this same function as `body <form>`, so every
+		// form, its refusals and its compilable-regex check apply unchanged, then each claim is marked as one about the
+		// extracted document. The word after `body` is none of the words any other form opens with (has, every, not,
+		// contains, containing, matching, matches, equals), so this never takes a claim that belonged to one of them.
+		if m := bodyExtractedRe.FindStringSubmatch(clause); m != nil && !baseGrammarOnly {
+			if !allowExtracted {
+				errs = append(errs, fmt.Errorf("EXPECT bullet %q is a claim about the document an mcp step's `extract` cut out; "+
+					"only a chain `mcp` step that declares `extract` has one", clause))
+				continue
+			}
+			inner, ierrs := parseBodyAsserts([]string{"body " + m[1]}, false)
+			if len(ierrs) > 0 {
+				errs = append(errs, fmt.Errorf("EXPECT bullet %q (the part after `body extracted`): %v", clause, ierrs[0]))
+				continue
+			}
+			for i := range inner {
+				inner[i].Extracted = true
+			}
+			out = append(out, inner...)
+			continue
+		}
+		// `body every <array-path> has <rest>`: <rest> is parsed by this same
+		// function as `body has <rest>` (so every field form, its refusals and its compilable-regex
+		// check apply unchanged), then pinned to each element of the array.
+		if m := bodyEveryRe.FindStringSubmatch(clause); m != nil {
+			inner, ierrs := parseBodyAsserts([]string{"body has " + m[2]}, false)
+			if len(ierrs) > 0 {
+				errs = append(errs, fmt.Errorf("EXPECT bullet %q (the part after `every %s`): %v", clause, m[1], ierrs[0]))
+				continue
+			}
+			if len(inner) != 1 || inner[0].Every != "" {
+				errs = append(errs, fmt.Errorf("EXPECT bullet %q: `body every <array-path> has <field> …` takes exactly one field claim "+
+					"after `has`", clause))
+				continue
+			}
+			inner[0].Every = m[1]
+			out = append(out, inner[0])
+			continue
+		}
+		if m := bodyHasNoRe.FindStringSubmatch(clause); m != nil {
+			out = append(out, BodyAssert{Field: m[1], Op: BodyAbsent})
+			continue
+		}
+		if m := bodyHasNotRe.FindStringSubmatch(clause); m != nil {
+			field, op, val := m[1], strings.ToLower(m[2]), unquote(m[3])
+			switch op {
+			case "containing":
+				out = append(out, BodyAssert{Field: field, Op: BodyNotContains, Value: val})
+			case "matching":
+				if err := compilable(val, clause); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				out = append(out, BodyAssert{Field: field, Op: BodyNotMatches, Value: val})
+			default:
+				out = append(out, BodyAssert{Field: field, Op: BodyNotEquals, Value: val})
+			}
+			continue
+		}
+		if m := bodyHasNotAttemptRe.FindStringSubmatch(clause); m != nil && !bodyHasRe.MatchString(clause) {
+			switch strings.ToLower(m[2]) {
+			case "containing", "matching", "equals":
+				errs = append(errs, fmt.Errorf("EXPECT bullet %q matches no known form: `not %s` needs a value after it "+
+					"(`body has %s not %s <value>`)", clause, strings.ToLower(m[2]), m[1], strings.ToLower(m[2])))
+				continue
+			}
+			errs = append(errs, fmt.Errorf("EXPECT bullet %q declares a negative field claim with %q after `not`, which this "+
+				"grammar does not support — write `body has %s not containing <value>`, `not matching <regex>` or `not equals <value>`",
+				clause, m[2], m[1]))
+			continue
+		}
+		if m := bodyWholeNotRe.FindStringSubmatch(clause); m != nil {
+			op, val := strings.ToLower(m[1]), unquote(m[2])
+			if op == "matching" || op == "matches" {
+				if err := compilable(val, clause); err != nil {
+					errs = append(errs, err)
+					continue
+				}
+				out = append(out, BodyAssert{Op: BodyNotMatches, Value: val})
+			} else {
+				out = append(out, BodyAssert{Op: BodyNotContains, Value: val})
+			}
+			continue
+		}
+		if m := bodyWithinAttemptRe.FindStringSubmatch(clause); m != nil {
+			field := m[1]
+			rest := bodyWithinRestRe.FindStringSubmatch(m[2])
+			if rest == nil {
+				errs = append(errs, fmt.Errorf("EXPECT bullet %q declares a tolerance claim that is not `body has <field> within "+
+					"<tolerance> of <number>` — the tolerance is a non-negative number (`0.5`) or a percentage (`2%%`), and the "+
+					"reference a number or one whole `${saved.<var>}`", clause))
+				continue
+			}
+			tol, ref := rest[1], unquote(rest[2])
+			if strings.HasPrefix(tol, "-") {
+				errs = append(errs, fmt.Errorf("EXPECT bullet %q declares the tolerance %q, which is negative — a tolerance is a "+
+					"non-negative number (`0.5`) or a percentage (`2%%`)", clause, tol))
+				continue
+			}
+			if !mcp.ValidTolerance(tol) {
+				errs = append(errs, fmt.Errorf("EXPECT bullet %q declares the tolerance %q, which is not a number — write a "+
+					"non-negative number (`0.5`) or a number followed by `%%` (`2%%`, relative to the reference)", clause, tol))
+				continue
+			}
+			if _, whole := SavedRefWhole(ref); !whole && !mcp.ExactNumber(ref) {
+				errs = append(errs, fmt.Errorf("EXPECT bullet %q declares a tolerance claim against %q, which is not a number — the "+
+					"reference must be a plain number (e.g. `100` or `-3.5`) or, in a chain, one whole `${saved.<var>}`", clause, ref))
+				continue
+			}
+			out = append(out, BodyAssert{Field: field, Op: BodyWithin, Value: ref, Tol: tol})
+			continue
 		}
 		if m := bodyHasRe.FindStringSubmatch(clause); m != nil {
 			field, op, val := m[1], strings.ToLower(m[2]), unquote(m[3])
@@ -158,7 +334,7 @@ func ParseBodyAsserts(bullets []string) ([]BodyAssert, []error) {
 			op, opOK := numericOpFor(opTok)
 			if !opOK {
 				errs = append(errs, fmt.Errorf("EXPECT bullet %q declares a numeric body comparison with the "+
-					"operator %q, which this grammar does not support — use one of `>`, `>=`, `<`, `<=`",
+					"operator %q, which this grammar does not support — use one of `>`, `>=`, `<`, `<=`, `==`",
 					clause, opTok))
 				continue
 			}
@@ -166,7 +342,13 @@ func ParseBodyAsserts(bullets []string) ([]BodyAssert, []error) {
 			// from the chain's capture store when the step runs (chain.bindBodyAsserts). The
 			// placeholder is kept AS WRITTEN in Value.
 			if _, whole := SavedRefWhole(val); !whole {
-				if _, perr := strconv.ParseFloat(val, 64); perr != nil {
+				// `==` compares exactly (mcp.ExactNumber: a plain decimal), so it refuses what ParseFloat
+				// would read as a number but is not one (`inf`, `nan`, hex).
+				_, perr := strconv.ParseFloat(val, 64)
+				if op == BodyEQ && !mcp.ExactNumber(val) {
+					perr = errNotPlainNumber
+				}
+				if perr != nil {
 					errs = append(errs, fmt.Errorf("EXPECT bullet %q declares a numeric body comparison against %q, "+
 						"which is not a number — the threshold must be a plain number (e.g. `42` or `3.14`) or, in a "+
 						"chain, one whole `${saved.<var>}`",
@@ -181,7 +363,11 @@ func ParseBodyAsserts(bullets []string) ([]BodyAssert, []error) {
 			"write `body contains <value>` to search the whole response, `body equals <value>` for an exact match, "+
 			"`body has <field> containing <value>` / `body has <field> matching <regex>` / `body has <field> "+
 			"equals <value>` to pin it to a field, `body has <field>` to require the field exists, or "+
-			"`body has <field> >|>=|<|<= <number>` for a numeric comparison", clause))
+			"`body has <field> >|>=|<|<=|== <number>` for a numeric comparison, `body has <field> within <tolerance> of "+
+			"<number>` for a tolerance (`0.5` absolute, `2%%` relative), `body not contains <value>` / `body not matching "+
+			"<regex>` and `body has <field> not containing|matching|equals <value>` for the negatives, `body has no "+
+			"<field>` to require the field is absent, or `body every <array-path> has <field> …` (any field form above) "+
+			"to hold it for every element of an array", clause))
 	}
 	return out, errs
 }

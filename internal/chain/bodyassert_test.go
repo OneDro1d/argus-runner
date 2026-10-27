@@ -80,8 +80,10 @@ func TestMCPStep_SavedValueBindsIntoTheBodyAssertion(t *testing.T) {
 	if res.Status != "passed" {
 		t.Fatalf("the answer names the written id — must pass: %s / %+v", res.Status, res.Failure)
 	}
-	if got := strings.Join(res.Steps[1].AssertionsEnforced, ";"); !strings.Contains(got, "srv-generated-42") || strings.Contains(got, "${saved") {
-		t.Errorf("the enforced record must carry the BOUND value, got %q", got)
+	// (AC-D67): the enforced record shows the claim AS WRITTEN and never the saved
+	// value (this test used to pin the bound rendering); the judge above still binds.
+	if got := strings.Join(res.Steps[1].AssertionsEnforced, ";"); strings.Contains(got, "srv-generated-42") || !strings.Contains(got, "${saved.docId}") {
+		t.Errorf("the enforced record must show ${saved.docId}, never the saved value, got %q", got)
 	}
 	res = Run("tr-y", steps(wrongSrv))
 	if res.Status != "failed" || res.Steps[1].Status != "failed" {
@@ -133,8 +135,11 @@ func TestMCPStep_RerunDoesNotLeakTheFirstRunsIdIntoTheAssertion(t *testing.T) {
 	if r2.Status != "passed" {
 		t.Fatalf("run 2 must judge against ITS OWN captured id, not run 1's: %+v", r2.Failure)
 	}
-	if got := strings.Join(r2.Steps[1].AssertionsEnforced, ";"); !strings.Contains(got, "run2-id") || strings.Contains(got, "run1-id") {
-		t.Errorf("run 2's enforced record must carry run 2's id only, got %q", got)
+	// (AC-D67): the enforced record shows the claim AS WRITTEN, so it carries
+	// NEITHER run's id; run 2 passing above is what proves the judge used run 2's own id.
+	if got := strings.Join(r2.Steps[1].AssertionsEnforced, ";"); strings.Contains(got, "run2-id") ||
+		strings.Contains(got, "run1-id") || !strings.Contains(got, "${saved.docId}") {
+		t.Errorf("run 2's enforced record must show ${saved.docId} and no saved id, got %q", got)
 	}
 }
 

@@ -80,9 +80,9 @@ func TestRouterServe_ReloadsItsStateWhileServing(t *testing.T) {
 	if star, ok := call.Args[0].(*ast.StarExpr); !ok || identName(star.X) != "stateDir" {
 		t.Errorf("arg 0 is %s, want *stateDir — the watcher must stat the SAME state file serve loaded", exprString(call.Args[0]))
 	}
-	// arg 1: tbl — the live table the authenticator and the tools hold; a fresh table would reload into nothing
+	// arg 1: tbl — the live table the server holds; a fresh table would reload into nothing
 	if identName(call.Args[1]) != "tbl" {
-		t.Errorf("arg 1 is %s, want tbl — the table router.Authenticator and router.Tools were given", exprString(call.Args[1]))
+		t.Errorf("arg 1 is %s, want tbl — the table router.NewServer was given", exprString(call.Args[1]))
 	}
 	// arg 2: router.ReloadInterval — the declared cadence, not a literal someone can quietly set to an hour
 	if sel, ok := call.Args[2].(*ast.SelectorExpr); !ok || identName(sel.X) != "router" || sel.Sel.Name != "ReloadInterval" {

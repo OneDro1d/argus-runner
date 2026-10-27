@@ -39,6 +39,10 @@ type VerdictTallies struct {
 	NotApplicable int `json:"not_applicable,omitempty"`
 }
 
+// VerdictPayloadTallied is the payload_format tag of a verdict anchored as VerdictTallied; a reveal document
+// carries it so a verifier knows which of the two shapes to rebuild.
+const VerdictPayloadTallied = "argus-verdict/2"
+
 // VerdictTallied is the verdict payload from certificate format v2 on: VerdictV2's four fields PLUS the
 // run's tallies and its finished_at, so a certificate cannot restate either without the chain
 // contradicting it. Field order is the marshalled order. FinishedAt is RFC3339 UTC to the second, "" when

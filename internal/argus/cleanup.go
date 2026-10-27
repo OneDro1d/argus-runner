@@ -1,6 +1,7 @@
 package argus
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -99,6 +100,11 @@ func RunCleanup(c *config.Config, s *scenario.Scenario, corr string, r Runner) [
 		case isTimeout(err):
 			res.Outcome = report.CleanupTimeout
 			res.Observed = "exceeded its " + cleanupTimeout.String() + " budget and was stopped"
+		case errors.Is(err, errCleanupShellRefused):
+			// (#709): exit 2 inside a second is dash refusing the script. Still
+			// failed, still no captured output — only the exit code and duration were read.
+			res.Outcome = report.CleanupFailed
+			res.Observed = "exited with status 2 within a second, which is how the shell refused the script if it has a syntax error (most often bash-only syntax in a block that runs under POSIX sh, not bash); a command in the block that exits 2 looks the same — its output is deliberately not captured; see the run log"
 		default:
 			res.Outcome = report.CleanupFailed
 			// ⛔ NO CAPTURED OUTPUT. The error TEXT from the executor may echo a command line, and a
@@ -106,6 +112,30 @@ func RunCleanup(c *config.Config, s *scenario.Scenario, corr string, r Runner) [
 			res.Observed = "did not complete (its output is deliberately not captured — see the run log)"
 		}
 		out = append(out, res)
+	}
+	return out
+}
+
+// refusedCleanup is what the report holds for a scenario that was refused before firing:
+// every runnable block is recorded as NOT run, with the reason, and an `N/A` block keeps the record
+// RunCleanup gives it. Nothing is executed.
+func refusedCleanup(s *scenario.Scenario) []report.CleanupResult {
+	if s == nil || len(s.Cleanup.Blocks) == 0 {
+		return nil
+	}
+	var out []report.CleanupResult
+	for _, b := range s.Cleanup.Blocks {
+		if b.Form == scenario.CleanupNA {
+			out = append(out, report.CleanupResult{
+				Form: string(b.Form), Outcome: report.CleanupNotRun,
+				Observed: "declared " + firstLine(b.Body),
+			})
+			continue
+		}
+		out = append(out, report.CleanupResult{
+			Form: string(b.Form), Outcome: report.CleanupNotRun,
+			Observed: "the scenario was refused before firing, so this " + string(b.Form) + " cleanup block was NOT executed",
+		})
 	}
 	return out
 }

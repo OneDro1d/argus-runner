@@ -38,6 +38,11 @@ type fakeBroker struct {
 	unbinds       [][3]string
 	deletedExchgs []string
 	closed        int
+	//
+	consumeEncoding string
+	waits           []time.Duration
+	listens         []listenCall
+	binds           [][3]string
 }
 
 func (f *fakeBroker) PublishConfirmed(exchange, routingKey string, body []byte, props amqpengine.Props) amqpengine.Outcome {
@@ -47,11 +52,31 @@ func (f *fakeBroker) PublishConfirmed(exchange, routingKey string, body []byte, 
 	return f.outcome
 }
 
-func (f *fakeBroker) Consume(queue string, _ time.Duration) (amqpengine.Outcome, []byte) {
+func (f *fakeBroker) ConsumeDelivery(queue string, wait time.Duration) (amqpengine.Outcome, amqpengine.Delivery) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.consumes = append(f.consumes, queue)
-	return f.outcome, f.consumeBody
+	f.waits = append(f.waits, wait)
+	return f.outcome, amqpengine.Delivery{Body: f.consumeBody, ContentEncoding: f.consumeEncoding}
+}
+
+func (f *fakeBroker) Listen(queue, exchange, routingKey string, ttl int) amqpengine.Outcome {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listens = append(f.listens, listenCall{queue, exchange, routingKey, ttl})
+	return f.outcome
+}
+
+func (f *fakeBroker) BindQueue(queue, exchange, routingKey string) amqpengine.Outcome {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.binds = append(f.binds, [3]string{queue, exchange, routingKey})
+	return f.outcome
+}
+
+type listenCall struct {
+	queue, exchange, routingKey string
+	ttl                         int
 }
 
 func (f *fakeBroker) DeclareQueue(name string) amqpengine.Outcome {
@@ -107,8 +132,8 @@ func dialerFor(f *fakeBroker) (BrokerDialer, *[]string) {
 func publishSpec() AMQPSpec {
 	return AMQPSpec{
 		Op: "publish", URLEnv: "MSGBUS_ARGUS_TEST_URL",
-		Exchange: "msgbus.inbox", RoutingKey: "inbox.agent.hop",
-		Envelope: &AMQPEnvelope{ToInbox: "agent.hop", FromAgentID: "argus-test", Intent: "ASK", Prompt: "argus-test: hello"},
+		Exchange: "msgbus.inbox", RoutingKey: "inbox.agent.alpha",
+		Envelope: &AMQPEnvelope{ToInbox: "agent.alpha", FromAgentID: "argus-test", Intent: "ASK", Prompt: "argus-test: hello"},
 	}
 }
 
@@ -160,7 +185,7 @@ func TestAMQPStep_AcceptedPublish(t *testing.T) {
 }
 
 func TestAMQPStep_RefusedPublish406(t *testing.T) {
-	out := amqpengine.Outcome{OK: false, Code: 406, Text: "PRECONDITION_FAILED - user_id property set to 'hop' but authenticated user was 'argus-test'"}
+	out := amqpengine.Outcome{OK: false, Code: 406, Text: "PRECONDITION_FAILED - user_id property set to 'alpha' but authenticated user was 'argus-test'"}
 	t.Run("passes `broker refuses with 406`", func(t *testing.T) {
 		sr := runOne(t, publishSpec(), refuses406, &fakeBroker{outcome: out})
 		if sr.Status != "passed" {
@@ -197,14 +222,14 @@ func TestAMQPStep_EnvelopeReachingTheBroker(t *testing.T) {
 		t.Fatalf("want one publish, got %d", len(f.publishes))
 	}
 	p := f.publishes[0]
-	if p.exchange != "msgbus.inbox" || p.routingKey != "inbox.agent.hop" {
+	if p.exchange != "msgbus.inbox" || p.routingKey != "inbox.agent.alpha" {
 		t.Fatalf("exchange/routing key: %q %q", p.exchange, p.routingKey)
 	}
 	m, err := amqpengine.DecodeEnvelope(p.body, p.props.Headers)
 	if err != nil {
 		t.Fatalf("the body must decode as a msgbus envelope: %v", err)
 	}
-	if m.Prompt != "argus-test: hello" || m.ToInbox != "agent.hop" || m.FromAgentID != "argus-test" || m.Intent != envelope.IntentAsk {
+	if m.Prompt != "argus-test: hello" || m.ToInbox != "agent.alpha" || m.FromAgentID != "argus-test" || m.Intent != envelope.IntentAsk {
 		t.Fatalf("envelope fields: %+v", m)
 	}
 	if m.Kind != envelope.KindMessage || m.Source != envelope.SourceMCP || m.OriginTrust != envelope.TrustAgent ||
@@ -246,10 +271,10 @@ func TestAMQPStep_UserIDOnlyWhenGiven(t *testing.T) {
 	}
 	g := &fakeBroker{outcome: amqpengine.Outcome{OK: true}}
 	spec := publishSpec()
-	spec.UserID = "hop"
+	spec.UserID = "alpha"
 	runOne(t, spec, accepts, g)
 	onlyPublish(t, g)
-	if g.publishes[0].props.UserID != "hop" {
+	if g.publishes[0].props.UserID != "alpha" {
 		t.Fatalf("user-id must be set when the step gives one: %q", g.publishes[0].props.UserID)
 	}
 }
@@ -291,8 +316,8 @@ func TestAMQPStep_RawBody(t *testing.T) {
 func TestAMQPStep_OtherOps(t *testing.T) {
 	t.Run("consume", func(t *testing.T) {
 		f := &fakeBroker{outcome: amqpengine.Outcome{Code: 403, Text: "ACCESS_REFUSED"}}
-		sr := runOne(t, AMQPSpec{Op: "consume", URLEnv: "X", Queue: "msgbus.agent.hop", Wait: time.Second}, refuses403, f)
-		if sr.Status != "passed" || len(f.consumes) != 1 || f.consumes[0] != "msgbus.agent.hop" || len(f.publishes) != 0 {
+		sr := runOne(t, AMQPSpec{Op: "consume", URLEnv: "X", Queue: "msgbus.agent.alpha", Wait: time.Second}, refuses403, f)
+		if sr.Status != "passed" || len(f.consumes) != 1 || f.consumes[0] != "msgbus.agent.alpha" || len(f.publishes) != 0 {
 			t.Fatalf("consume: %+v %+v", sr, f)
 		}
 	})
@@ -377,7 +402,7 @@ func TestAMQPStep_QueueIsEmptyClaim(t *testing.T) {
 	want := scenario.AMQPStepWant{Empty: true}
 
 	t.Run("passes on a timeout with no message", func(t *testing.T) {
-		f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, Code: 0, Text: "timed out waiting for a message"}}
+		f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, Code: 0, TimedOut: true, Text: "timed out waiting for a message"}}
 		sr := runOneWant(t, spec, want, f)
 		if sr.Status != "passed" {
 			t.Fatalf("an empty queue must PASS `queue is empty`: %+v", sr)
@@ -404,6 +429,66 @@ func TestAMQPStep_QueueIsEmptyClaim(t *testing.T) {
 		}
 		if !strings.Contains(sr.Observed, "403") || strings.Contains(sr.Observed, "no message arrived") {
 			t.Fatalf("observed must show the REFUSAL, not the empty-queue wording: %q", sr.Observed)
+		}
+	})
+}
+
+// A consume that ended with Code 0 for any reason OTHER than its own wait running out
+// (closed consumer channel, watchdog teardown, a code-less error) is not an empty queue: the step is an
+// `error` carrying its own sentence, and the chain stops there keeping that sentence.
+func TestAMQPStep_QueueIsEmptyNeverPassesWithoutARealTimeout(t *testing.T) {
+	spec := AMQPSpec{Op: "consume", URLEnv: "X", Queue: "q", Wait: time.Second}
+	want := scenario.AMQPStepWant{Empty: true}
+	cases := []struct{ name, text string }{
+		{"consumer channel closed before a message arrived", "consumer channel closed before a message arrived"},
+		{"engine watchdog teardown", "the broker did not answer within 31s; the connection was torn down"},
+		{"code-less connection error", "Exception (504) Reason: \"channel/connection is not open\""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, Code: 0, Text: tc.text}}
+			sr := runOneWant(t, spec, want, f)
+			if sr.Status != report.StatusError {
+				t.Fatalf("Code 0 without a real timeout must be an error, not %q: %+v", sr.Status, sr)
+			}
+			if !strings.HasPrefix(sr.Observed, OwnErrorPrefixEmptyUnjudged) || !strings.Contains(sr.Observed, tc.text) {
+				t.Fatalf("the step must keep its OWN sentence naming what happened: %q", sr.Observed)
+			}
+			if strings.Contains(sr.Observed, "no message arrived") {
+				t.Fatalf("must not use the empty-queue wording: %q", sr.Observed)
+			}
+		})
+	}
+	t.Run("the error does not leak the broker URL", func(t *testing.T) {
+		t.Setenv("X", "amqp://argus:hunter2@broker.example:5672/")
+		f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, Text: "dial amqp://argus:hunter2@broker.example:5672/ failed"}}
+		sr := runOneWant(t, spec, want, f)
+		if sr.Status != report.StatusError || strings.Contains(sr.Observed, "hunter2") {
+			t.Fatalf("status/secret: %+v", sr)
+		}
+	})
+	t.Run("a genuine timeout still passes", func(t *testing.T) {
+		f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, TimedOut: true, Text: "timed out waiting for a message"}}
+		if sr := runOneWant(t, spec, want, f); sr.Status != "passed" {
+			t.Fatalf("a real timeout is an empty queue: %+v", sr)
+		}
+	})
+	t.Run("a message arriving still fails, showing it", func(t *testing.T) {
+		f := &fakeBroker{outcome: amqpengine.Outcome{OK: true}, consumeBody: []byte("surprise-delivery")}
+		sr := runOneWant(t, spec, want, f)
+		if sr.Status != "failed" || !strings.Contains(sr.Observed, "surprise-delivery") {
+			t.Fatalf("a delivered message fails `queue is empty`: %+v", sr)
+		}
+	})
+	t.Run("the chain keeps the step's own sentence and ends in error", func(t *testing.T) {
+		f := &fakeBroker{outcome: amqpengine.Outcome{OK: false, Text: "consumer channel closed before a message arrived"}}
+		dial, _ := dialerFor(f)
+		res := Run("tr-amqp-1", []Step{AMQPStep("take", spec, want, dial)})
+		if res.Status != report.StatusError || len(res.Steps) != 1 {
+			t.Fatalf("chain result: %+v", res)
+		}
+		if res.Steps[0].Status != report.StatusError || !strings.HasPrefix(res.Steps[0].Observed, OwnErrorPrefixEmptyUnjudged) {
+			t.Fatalf("step: %+v", res.Steps[0])
 		}
 	})
 }

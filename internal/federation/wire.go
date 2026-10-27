@@ -54,7 +54,7 @@ type RegisterRequest struct {
 	// RunnerID (AC-17) pairs this executor with a runner id minted through the control plane's author
 	// plane (author_mint_runner_id) or the CLI (`argus runner-id mint`) — the identity a builder outside
 	// the environment presents to reach this executor through the relay. Optional: an executor that
-	// registers with none simply is not reachable by any relayed runner__* call yet. A revoked id, or
+	// registers with none simply is not reachable by any relayed runner_* call yet. A revoked id, or
 	// one minted for a DIFFERENT instance, is refused BY NAME at register — never silently ignored.
 	RunnerID string `json:"runner_id,omitempty"`
 	// MoneyHandling (T5.4 follow-up) mirrors the SUT's own config.MoneyHandling() —
@@ -78,14 +78,14 @@ type RegisterRequest struct {
 	// simply declares no money_writes block reports an EXPLICIT "[]", never nil — see
 	// runner.moneyWritesAllowFor's own doc for why that distinction matters.
 	MoneyWritesAllow json.RawMessage `json:"money_writes_allow,omitempty"`
-	// TestTargets (, UI-6) is the executor's own `test_targets` declaration, JSON-encoded
+	// TestTargets (UI-6) is the executor's own `test_targets` declaration, JSON-encoded
 	// (internal/testtargets). NOT DeclaredTargets above (the SUT's CONNECTION targets). nil means NOT
 	// REPORTED — an executor older than this change, or a config that failed to load — which the control
 	// plane stores as "leave what you have"; an EXPLICIT "[]" is a real report of "none declared" and
 	// overwrites. The same carrier rule as MoneyWritesAllow, and it rides every PollRequest too.
 	// An older control plane has no such field and drops it (no DisallowUnknownFields on the wire).
 	TestTargets json.RawMessage `json:"test_targets,omitempty"`
-	// DashboardLinkTemplate / DashboardLinkLabel (, UI-2) are the executor's own
+	// DashboardLinkTemplate / DashboardLinkLabel (UI-2) are the executor's own
 	// observability.dashboard_link block. THREE-VALUED, so *string: nil = NOT REPORTED (an executor older
 	// than this change, or a config that failed to load) and the control plane leaves what it has; a
 	// pointer to "" = REPORTED NONE (the block was removed from the config) and clears. The same carrier
@@ -478,10 +478,10 @@ type PollResponse struct {
 	Commands []CommandEnvelope `json:"commands,omitempty"`
 }
 
-// CommandEnvelope (AC-17) is one relayed runner__* call, closed to the four verbs the builder
+// CommandEnvelope (AC-17) is one relayed runner_* call, closed to the four verbs the builder
 // namespace publishes: validate_config | run | get_report | get_dashboard_url. Args carries the
 // tool's own arguments (runner_id excluded — the envelope's routing, not the tool's business).
-// Executed through the SAME in-process code the local router's runner__* tools use, never a shell.
+// Executed through the SAME in-process code the local router's runner_* tools use, never a shell.
 type CommandEnvelope struct {
 	CommandID string          `json:"command_id"`
 	Verb      string          `json:"verb"`
@@ -515,13 +515,22 @@ type Tallies struct {
 	// Degraded (AC-11) counts scenarios whose OWN assertions passed while the survival-plane read
 	// showed the SUT in distress — never counted in Passed/Failed, the same reasoning as RateLimited.
 	Degraded int `json:"degraded,omitempty"`
+	// NotApplicable counts scenarios NOT EXECUTED because a precondition they depend on is
+	// absent. Its own bucket: never in Passed, Failed or Errored. Passed + Failed + Errored + Degraded +
+	// NotApplicable == Total. omitempty: a run with no precondition is byte-identical on the wire to before.
+	NotApplicable int `json:"not_applicable,omitempty"`
+	// Planned is how many checks this run selected. Sent on the mid-run HEARTBEAT only (executor 0.3.70 or
+	// newer), so a reader can say "12 of 40" while the run is still going; the FINAL push never carries it
+	// (omitempty, and mapReport does not set it), so a finished run's tallies are byte-identical to before.
+	// A count, like every other field here: it says how many, never which.
+	Planned int `json:"planned,omitempty"`
 }
 
 // ScenarioResult is one scenario's OUTCOME + a generic, redaction-safe summary line. Deliberately no
 // EXPECT value and NO verdict class — verdicts are in-env only (D-FED.4).
 type ScenarioResult struct {
 	ID      string `json:"id"`
-	Outcome string `json:"outcome"` // passed | failed | errored | degraded (AC-11)
+	Outcome string `json:"outcome"` // passed | failed | errored | degraded (AC-11) | not_applicable
 	// Layer is carried so a run row stays readable on its own (F2/UC029). It was always available at
 	// push time — the report is GROUPED by layer — and was simply dropped by the mapper, which left
 	// the web joining it from the live catalog. A scenario deleted after the run then vanished from
@@ -625,7 +634,10 @@ type ResultsPush struct {
 	// run that had none, on an older executor, and on a non-terminal push; the control plane stores it with
 	// COALESCE so a later push without it never erases it. MEASUREMENTS ONLY (sessions, rates, microsecond
 	// quantiles, error counts by class, blocked windows): no threshold, address, credential or message
-	// content crosses, the same locality class as DurationMs and ArtifactMeasurement. An older control plane
+	// content crosses, the same locality class as DurationMs and ArtifactMeasurement. Since AC-F2.2 a load
+	// error crosses as its word and count and a broker pause as its word and times (report.LoadStepWithoutTexts,
+	// applied by runner.loadRampWire and by the outbox); an executor older than that still sends their texts
+	// (error_reasons[].reason, blocked[].reason). An older control plane
 	// has no such field and drops it (no DisallowUnknownFields on the wire).
 	LoadRamp json.RawMessage `json:"load_ramp,omitempty"`
 	// ArtifactDigest (AC-6, echoing AC-3's RunAssignment.ArtifactDigest) is the artifact this run was

@@ -11,7 +11,7 @@ package argus
 //	vhost configure: ^$                                     (deny-all)
 //	vhost write:     ^(msgbus\.inbox|msgbus\.presence)$
 //	vhost read:      ^(msgbus\.agent\.argus-test|msgbus\.presence\.stream)$
-//	topic write on msgbus.inbox: ^inbox\.agent\.hop$
+//	topic write on msgbus.inbox: ^inbox\.agent\.alpha$
 //	topic read on msgbus.inbox:  ^$
 //
 // Skipped unless ARGUS_TEST_AMQP_URL (the restricted user's URL) is set; ARGUS_TEST_AMQP_ADMIN_URL
@@ -34,16 +34,16 @@ import (
 )
 
 // amqpIntegrationFixture is the chain scenario the integration test runs: amqpengine's four refusal
-// cases (spoofed user_id 406, routing key inbox.all 403, consume msgbus.agent.hop 403, declare
+// cases (spoofed user_id 406, routing key inbox.all 403, consume msgbus.agent.alpha 403, declare
 // queue 403) and one allowed publish (accepted), in one chain.
 func amqpIntegrationFixture() string {
-	env := `"envelope":{"to_inbox":"agent.hop","from_agent_id":"argus-test","intent":"INFORM","prompt":"argus-test AC-D18b: ${correlation_id}"}`
+	env := `"envelope":{"to_inbox":"agent.alpha","from_agent_id":"argus-test","intent":"INFORM","prompt":"argus-test AC-D18b: ${correlation_id}"}`
 	trig := `{"steps":[
-		{"type":"amqp","name":"spoof","op":"publish","url_env":"ARGUS_TEST_AMQP_URL","exchange":"msgbus.inbox","routing_key":"inbox.agent.hop","user_id":"someone-else",` + env + `},
+		{"type":"amqp","name":"spoof","op":"publish","url_env":"ARGUS_TEST_AMQP_URL","exchange":"msgbus.inbox","routing_key":"inbox.agent.alpha","user_id":"someone-else",` + env + `},
 		{"type":"amqp","name":"all","op":"publish","url_env":"ARGUS_TEST_AMQP_URL","exchange":"msgbus.inbox","routing_key":"inbox.all","user_id":"argus-test",` + env + `},
-		{"type":"amqp","name":"steal","op":"consume","url_env":"ARGUS_TEST_AMQP_URL","queue":"msgbus.agent.hop","wait":"5s"},
+		{"type":"amqp","name":"steal","op":"consume","url_env":"ARGUS_TEST_AMQP_URL","queue":"msgbus.agent.alpha","wait":"5s"},
 		{"type":"amqp","name":"declare","op":"declare_queue","url_env":"ARGUS_TEST_AMQP_URL","queue":"msgbus.agent.spoof-probe-ac-d18b"},
-		{"type":"amqp","name":"send","op":"publish","url_env":"ARGUS_TEST_AMQP_URL","exchange":"msgbus.inbox","routing_key":"inbox.agent.hop",` + env + `}
+		{"type":"amqp","name":"send","op":"publish","url_env":"ARGUS_TEST_AMQP_URL","exchange":"msgbus.inbox","routing_key":"inbox.agent.alpha",` + env + `}
 	]}`
 	expect := "### Runnable\n" +
 		"- step spoof: broker refuses with 406\n" +
@@ -73,8 +73,8 @@ func TestAMQPChain_Integration(t *testing.T) {
 	}
 	const (
 		exchange = "msgbus.inbox"
-		hopQueue = "msgbus.agent.hop"
-		allowed  = "inbox.agent.hop"
+		hopQueue = "msgbus.agent.alpha"
+		allowed  = "inbox.agent.alpha"
 	)
 
 	adminConn, err := amqp.Dial(adminURL)

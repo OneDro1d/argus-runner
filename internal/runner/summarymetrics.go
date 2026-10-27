@@ -3,6 +3,8 @@ package runner
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,11 +12,13 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/OneDro1d/argus-runner/internal/config"
@@ -26,7 +30,13 @@ import (
 // The executor reads a DECLARED source (config.SummaryMetrics: a Prometheus API or a /metrics text
 // endpoint) on its own clock and reports ONLY a handful of named numbers on its poll. The raw time series
 // are read here, reduced to one number each, and dropped: nothing else of the source's body ever leaves
-// this function. An unreadable source is reported as unreadable (Value nil + a scrubbed reason), never as 0.
+// this function. An unreadable source is reported as unreadable (Value nil + a reason), never as 0.
+//
+// AC-F1.1 (#694): the reason is Argus's own sentence, the HTTP status number Argus measured and
+// words from fixed lists (promErrorTypes, promResultTypes, the seven network words of report.LoadErrorKinds) —
+// never the source's own text and never Go's network error text. Every error here is built with ownWordsf or
+// withhold (ownwords.go, AC-F1's rule); one nobody vouched for is sent as summaryReadingNotOwnWords. The full
+// text goes only to this executor's own log (SummaryTicker.Cycle).
 //
 // Bounds: at most federation.SummaryMaxReadings readings, at most one read per `every` (>= 1 minute),
 // each read bounded by summaryReadTimeout, each body by summaryBodyMax.
@@ -42,8 +52,15 @@ const (
 // ReadSummary reads every declared reading once (at most SummaryMaxReadings, in declared order). Never
 // panics, never returns an error: a reading that cannot be read is returned with Value nil and Error set.
 func ReadSummary(ctx context.Context, hc *http.Client, sm *config.SummaryMetrics, now time.Time) []federation.SummaryReading {
+	out, _ := readSummary(ctx, hc, sm, now)
+	return out
+}
+
+// readSummary is ReadSummary plus, for each reading, the text for this executor's own log: the full detail of why it
+// could not be read ("" for a reading that was read). Only the readings leave; the details never do.
+func readSummary(ctx context.Context, hc *http.Client, sm *config.SummaryMetrics, now time.Time) ([]federation.SummaryReading, []string) {
 	if sm == nil {
-		return nil
+		return nil, nil
 	}
 	if hc == nil {
 		hc = &http.Client{}
@@ -55,6 +72,7 @@ func ReadSummary(ctx context.Context, hc *http.Client, sm *config.SummaryMetrics
 	secrets := []string{sm.Source.Credential}
 	every := int(sm.EveryDuration() / time.Second)
 	out := make([]federation.SummaryReading, 0, len(decls))
+	details := make([]string, 0, len(decls))
 	for _, d := range decls {
 		r := federation.SummaryReading{
 			Name: d.Name, Target: d.Target, Unit: d.Unit, ComfortableLimit: d.ComfortableLimit,
@@ -69,80 +87,239 @@ func ReadSummary(ctx context.Context, hc *http.Client, sm *config.SummaryMetrics
 		case config.SummarySourceMetricsEndpoint:
 			v, err = readMetricsText(rctx, hc, sm.Source, d.Query)
 		default:
-			err = fmt.Errorf("unknown source type %q", sm.Source.Type)
+			err = ownWordsf("unknown source type %q", sm.Source.Type) // the operator's own config
 		}
 		cancel()
+		detail := ""
 		if err != nil {
-			r.Error = federation.ScrubReadingError(err.Error(), secrets...)
-			if r.Error == "" {
-				r.Error = "unreadable"
-			}
+			r.Error, detail = summaryErrorTexts(err, secrets)
 		} else {
 			r.Value = &v
 		}
 		out = append(out, r)
+		details = append(details, detail)
 	}
-	return out
+	return out, details
 }
 
-// sourceGet performs the GET for either source type and returns the (bounded) body. Every error it
-// returns is already free of the URL: transport errors are reduced to their cause, and the caller scrubs
-// once more before anything is sent or logged.
+// summaryReadingNotOwnWords is sent for an error no code in this file vouched for (fail-closed, as AC-F1's rule).
+const summaryReadingNotOwnWords = "the reading failed; its details are in the executor's log"
+
+// summaryErrorTexts is THE rule for SummaryReading.Error: what is sent (the error's own words — Argus's — or the
+// fixed sentence, scrubbed and cut to federation.SummaryErrorMax as before) and what this executor logs (the full
+// text, with only the configured credential removed and every C0 control character or DEL made a space).
+//
+// The sent words are scrubbed WITHOUT the credential: they are Argus's own text, so the credential cannot be in them,
+// and replacing a credential part that happens to be a word of Argus's sentence ("metrics", "refused", "data") would
+// only tell the control plane that part — and break a word of the fixed lists.
+func summaryErrorTexts(err error, secrets []string) (words, local string) {
+	words = summaryReadingNotOwnWords
+	if w, ok := wireWords(err); ok {
+		words = w
+	}
+	words = federation.ScrubReadingError(words)
+	if words == "" {
+		words = summaryReadingNotOwnWords
+	}
+	return words, summaryLogText(localDetail(err), secrets)
+}
+
+// summaryLogMax is the most of one reading's log text kept (characters). The text is the source's own message and Go's
+// error text in full; the bound is there against a flood (Go quotes a malformed header line, and allows 10 MiB of
+// them; not measured as a real case). Above it the head and the tail are kept — a stack trace's root cause is at its end.
+const summaryLogMax = 16384
+
+// summaryLogText makes the full text safe for one log line: the configured credential becomes <redacted> — as written,
+// as it appears inside a quoted text, and in the Basic form this executor sent (a source can echo its Authorization
+// header) — and so does each of its ':' parts of 3 bytes or more (the rule ScrubReadingError applies); then a text over
+// summaryLogMax is cut in its middle, and a C0 control character (below U+0020) or DEL becomes a space.
+func summaryLogText(s string, secrets []string) string {
+	for _, sec := range secrets {
+		if sec == "" {
+			continue
+		}
+		user, pass, _ := strings.Cut(sec, ":") // exactly as sourceGet sends it: SetBasicAuth(user, pass)
+		s = strings.ReplaceAll(s, base64.StdEncoding.EncodeToString([]byte(user+":"+pass)), "<redacted>")
+		for _, part := range append([]string{sec}, strings.Split(sec, ":")...) {
+			if len(part) >= 3 {
+				s = strings.ReplaceAll(s, part, "<redacted>")
+				if q := strconv.Quote(part); q[1:len(q)-1] != part {
+					s = strings.ReplaceAll(s, q[1:len(q)-1], "<redacted>")
+				}
+			}
+		}
+	}
+	if r := []rune(s); len(r) > summaryLogMax {
+		s = string(r[:summaryLogMax/2]) + fmt.Sprintf(" … (%d characters cut) … ", len(r)-summaryLogMax) +
+			string(r[len(r)-summaryLogMax/2:])
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// The fixed lists. Only these words of a source's answer may leave the environment.
+var (
+	// promErrorTypes are the error types Prometheus itself defines (web/api/v1/api.go, errorType); any other word an
+	// answer gives is dropped.
+	promErrorTypes = map[string]bool{"timeout": true, "canceled": true, "execution": true, "bad_data": true,
+		"internal": true, "unavailable": true, "not_found": true, "not_acceptable": true}
+	// promResultTypes are Prometheus's four result types (promql/parser ValueType).
+	promResultTypes = map[string]bool{"matrix": true, "vector": true, "scalar": true, "string": true}
+)
+
+// answerError is ways A and B: Argus's sentence, then the answer's error type only when it is on promErrorTypes. When the
+// answer carried anything else of its own (an error text, an error type off the list), the sentence says the message
+// is in the log, and only the log gets it.
+func answerError(sentence string, errorType, message json.RawMessage) error {
+	typ, typIsString := jsonText(errorType)
+	msg, _ := jsonText(message)
+	listed := typIsString && promErrorTypes[typ]
+	words := sentence
+	if listed {
+		words += " (" + typ + ")"
+	}
+	// withheld: an error text, or an error type that is not on the list (a word off it, or a value that is no string)
+	if msg == "" && (typ == "" || listed) {
+		return ownWordsf("%s", words)
+	}
+	return withhold(words+"; its own message is in the executor's log",
+		fmt.Errorf("the source's own message: errorType %s, error %s", sourceTextForLog(errorType), sourceTextForLog(message)))
+}
+
+// jsonText returns a JSON value's text: a string's value (and true), or any other value as written; "" for none or null.
+func jsonText(raw json.RawMessage) (string, bool) {
+	t := strings.TrimSpace(string(raw))
+	if t == "" || t == "null" {
+		return "", false
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s, true
+	}
+	return t, false
+}
+
+// sourceTextForLog quotes one JSON value of the source's answer for the local log (quoteForLog).
+func sourceTextForLog(raw json.RawMessage) string {
+	s, _ := jsonText(raw)
+	return quoteForLog(s)
+}
+
+// quoteForLog quotes a text of the source's for the local log, whole: quoted, so a line break or a control character in
+// it cannot start a second log line (summaryLogText bounds the whole line).
+func quoteForLog(s string) string {
+	return strconv.Quote(s)
+}
+
+// promErrorFields pulls Prometheus's own {"errorType","error"} out of an answer, as raw JSON values (nil when absent or
+// when the body is not a JSON object).
+func promErrorFields(body []byte) (errorType, message json.RawMessage) {
+	var e struct {
+		ErrorType json.RawMessage `json:"errorType"`
+		Error     json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(body, &e) != nil {
+		return nil, nil
+	}
+	return e.ErrorType, e.Error
+}
+
+// sourceGet performs the GET for either source type and returns the (bounded) body. Every error it returns is Argus's
+// own words (ownwords.go): a status the source answered is sent as its number and, from the answer, only a Prometheus
+// error type on the list (way A); a transport failure as one network word (way D, transportError). The source's own
+// message and Go's error text are withheld — they reach only this executor's log.
 func sourceGet(ctx context.Context, hc *http.Client, src config.SummarySource, u string, q url.Values) ([]byte, error) {
 	if q != nil {
 		u += "?" + q.Encode()
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, errors.New("the declared source url is not usable")
+		return nil, ownWordsf("the declared source url is not usable")
 	}
 	if cred := src.Credential; cred != "" {
 		user, pass, _ := strings.Cut(cred, ":")
 		req.SetBasicAuth(user, pass)
 	}
 	req.Header.Set("Accept", "application/json, text/plain;q=0.9")
-	resp, err := hc.Do(req)
+	tr := &readTrace{base: hc.Transport}
+	if tr.base == nil {
+		tr.base = http.DefaultTransport
+	}
+	traced := *hc // the caller's client, with the same transport seen through readTrace
+	traced.Transport = tr
+	resp, err := traced.Do(req)
 	if err != nil {
-		return nil, transportError(err)
+		s := tr.signals()
+		// a non-nil answer with an error: the client refused to follow a redirect (CheckRedirect), its body closed
+		s.redirectRefused = resp != nil
+		return nil, transportError("could not reach the source", err, s)
 	}
 	defer resp.Body.Close()
 	body, rerr := io.ReadAll(io.LimitReader(resp.Body, summaryBodyMax))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("source answered HTTP %d%s", resp.StatusCode, promErrorHint(body))
+		errorType, message := promErrorFields(body)
+		return nil, answerError(fmt.Sprintf("the source answered HTTP %d", resp.StatusCode), errorType, message)
 	}
 	if rerr != nil {
-		return nil, transportError(rerr)
+		return nil, transportError("could not read the source's answer", rerr, readSignals{answered: true})
 	}
 	return body, nil
 }
 
-// transportError reduces a client error to its cause without the request URL (net/http wraps every error
-// as `Get "<url>": <cause>`).
-func transportError(err error) error {
+// readSignals is what the LAST request of one read saw, beside its error — they choose the network word where Go's
+// error has no type that says it (summarymetrics_neterr.go).
+type readSignals struct {
+	answered        bool // the first byte of the source's answer arrived: a failure after it is the answer's
+	tlsFailed       bool // a TLS handshake failed (httptrace TLSHandshakeDone with an error)
+	redirectRefused bool // the client refused to follow a redirect
+}
+
+// readTrace is the read's transport seen through httptrace. A redirect makes several requests, each through RoundTrip,
+// and each starts a new record: the signals are those of the last request, not of an earlier hop.
+type readTrace struct {
+	base                http.RoundTripper
+	answered, tlsFailed atomic.Bool
+}
+
+func (t *readTrace) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.answered.Store(false)
+	t.tlsFailed.Store(false)
+	ctx := httptrace.WithClientTrace(r.Context(), &httptrace.ClientTrace{
+		GotFirstResponseByte: func() { t.answered.Store(true) },
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			if err != nil {
+				t.tlsFailed.Store(true)
+			}
+		},
+	})
+	return t.base.RoundTrip(r.WithContext(ctx))
+}
+
+func (t *readTrace) signals() readSignals {
+	return readSignals{answered: t.answered.Load(), tlsFailed: t.tlsFailed.Load()}
+}
+
+// transportError is way D: a client error becomes Argus's sentence with ONE network word (networkErrorWord), and the
+// error itself — Go's text, which names hosts, addresses and certificates of the environment — is withheld for the
+// local log. A timeout and a cancellation keep their own sentences. net/http wraps every error as `Get "<url>":
+// <cause>`; only the cause is kept, even for the log. s: what the read's last request saw.
+func transportError(sentence string, err error, s readSignals) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
 		err = ue.Err
 	}
 	var ne net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
-		return errors.New("timed out reading the source")
+		return withhold("timed out reading the source", err)
 	}
 	if errors.Is(err, context.Canceled) {
-		return errors.New("read cancelled")
+		return withhold("read cancelled", err)
 	}
-	return fmt.Errorf("could not reach the source: %v", err)
-}
-
-// promErrorHint pulls Prometheus's own {"errorType","error"} out of a non-200 body, if it is one.
-func promErrorHint(body []byte) string {
-	var e struct {
-		ErrorType string `json:"errorType"`
-		Error     string `json:"error"`
-	}
-	if json.Unmarshal(body, &e) == nil && (e.ErrorType != "" || e.Error != "") {
-		return " (" + e.ErrorType + ": " + e.Error + ")"
-	}
-	return ""
+	return withhold(sentence+" ("+networkErrorWord(err, s)+"); the details are in the executor's log", err)
 }
 
 // readPrometheus runs one instant query and returns its single finite sample.
@@ -152,53 +329,59 @@ func readPrometheus(ctx context.Context, hc *http.Client, src config.SummarySour
 		return 0, err
 	}
 	var res struct {
-		Status string `json:"status"`
-		Error  string `json:"error"`
-		Data   struct {
+		Status    string          `json:"status"`
+		ErrorType json.RawMessage `json:"errorType"`
+		Error     json.RawMessage `json:"error"`
+		Data      struct {
 			ResultType string          `json:"resultType"`
 			Result     json.RawMessage `json:"result"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &res); err != nil || res.Status == "" {
-		return 0, errors.New("the source did not answer with a Prometheus query result")
+		return 0, ownWordsf("the source did not answer with a Prometheus query result")
 	}
 	if res.Status != "success" {
-		return 0, fmt.Errorf("the source reported an error: %s", res.Error)
+		return 0, answerError("the source reported an error", res.ErrorType, res.Error) // way B
 	}
 	var pair [2]json.RawMessage
 	switch res.Data.ResultType {
 	case "scalar":
 		if err := json.Unmarshal(res.Data.Result, &pair); err != nil {
-			return 0, errors.New("malformed scalar result")
+			return 0, ownWordsf("malformed scalar result")
 		}
 	case "vector":
 		var vec []struct {
 			Value [2]json.RawMessage `json:"value"`
 		}
 		if err := json.Unmarshal(res.Data.Result, &vec); err != nil {
-			return 0, errors.New("malformed vector result")
+			return 0, ownWordsf("malformed vector result")
 		}
 		switch len(vec) {
 		case 0:
-			return 0, errors.New("the query returned no data")
+			return 0, ownWordsf("the query returned no data")
 		case 1:
 			pair = vec[0].Value
 		default:
-			return 0, fmt.Errorf("the query returned %d series; it must reduce to ONE number (wrap it in sum())", len(vec))
+			return 0, ownWordsf("the query returned %d series; it must reduce to ONE number (wrap it in sum())", len(vec))
 		}
 	default:
-		return 0, fmt.Errorf("the query returned a %q result; it must return one number", res.Data.ResultType)
+		// way C: the answer's result type is quoted only when it is one of Prometheus's four
+		if promResultTypes[res.Data.ResultType] {
+			return 0, ownWordsf("the query returned a %q result; it must return one number", res.Data.ResultType)
+		}
+		return 0, withhold("the query returned a result type Argus does not know; it must return one number",
+			fmt.Errorf("the source's result type: %s", quoteForLog(res.Data.ResultType)))
 	}
 	var s string
 	if err := json.Unmarshal(pair[1], &s); err != nil {
-		return 0, errors.New("malformed sample value")
+		return 0, ownWordsf("malformed sample value")
 	}
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil {
-		return 0, errors.New("the sample value is not a number")
+		return 0, ownWordsf("the sample value is not a number")
 	}
 	if math.IsNaN(v) || math.IsInf(v, 0) {
-		return 0, errors.New("the sample value is not finite")
+		return 0, ownWordsf("the sample value is not finite")
 	}
 	return v, nil
 }
@@ -278,7 +461,7 @@ func readMetricsText(ctx context.Context, hc *http.Client, src config.SummarySou
 	}
 	wantName, wantLabels, trail, ok := parseSeries(strings.TrimSpace(query))
 	if !ok || strings.TrimSpace(trail) != "" {
-		return 0, errors.New("the declared query is not a series name with an optional {label=\"value\"} matcher")
+		return 0, ownWordsf("the declared query is not a series name with an optional {label=\"value\"} matcher")
 	}
 	sc := bufio.NewScanner(strings.NewReader(string(body)))
 	sc.Buffer(make([]byte, 0, 64<<10), summaryLineMax)
@@ -316,19 +499,19 @@ func readMetricsText(ctx context.Context, hc *http.Client, src config.SummarySou
 			continue
 		}
 		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return 0, errors.New("a matching sample is not finite")
+			return 0, ownWordsf("a matching sample is not finite")
 		}
 		sum += v
 		matched++
 	}
 	if sc.Err() != nil {
-		return 0, errors.New("the source body could not be read as metrics text")
+		return 0, ownWordsf("the source body could not be read as metrics text")
 	}
 	if parsed == 0 {
-		return 0, errors.New("the source did not answer with metrics text")
+		return 0, ownWordsf("the source did not answer with metrics text")
 	}
 	if matched == 0 {
-		return 0, errors.New("the series was not found in the source")
+		return 0, ownWordsf("the series was not found in the source")
 	}
 	return sum, nil
 }
@@ -390,10 +573,11 @@ func (t *SummaryTicker) Cycle(ctx context.Context, now time.Time) {
 	t.lastRead = now
 	t.mu.Unlock()
 
-	batch := ReadSummary(ctx, t.hc, sm, now)
-	for _, r := range batch {
+	batch, details := readSummary(ctx, t.hc, sm, now)
+	for i, r := range batch {
 		if r.Value == nil {
-			t.logf("summary_metrics: %s unreadable: %s", r.Name, r.Error) // Error is already scrubbed
+			// the full text, for whoever runs the source: the sent r.Error is only Argus's words (AC-F1.1)
+			t.logf("summary_metrics: %s unreadable: %s", r.Name, details[i])
 		}
 	}
 	t.mu.Lock()

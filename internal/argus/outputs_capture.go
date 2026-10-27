@@ -107,7 +107,15 @@ func (oc *outputCtx) records(s *scenario.Scenario) bool {
 // (obsquery.RedactTokens). Step 1, the saved variables, is applied by the engine that holds them.
 func credentialScrub(c *config.Config) func(string) string {
 	secrets := c.CredentialValues()
-	return func(s string) string { return obsquery.RedactTokens(amqpengine.RedactSecrets(s, secrets...)) }
+	return func(s string) string {
+		// the live Clerk token (and key) is read when the scrub is APPLIED — a token minted
+		// after this closure was built is still removed.
+		all := secrets
+		if c.Sessions != nil {
+			all = append(append([]string(nil), secrets...), c.Sessions.Values()...)
+		}
+		return obsquery.RedactTokens(amqpengine.RedactSecrets(s, all...))
+	}
 }
 
 // floorRank orders the executor releases of compare.KeyFloors. An unknown floor ranks above every known

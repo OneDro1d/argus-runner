@@ -1,7 +1,7 @@
 package runner
 
 // reporter.go — the "ALL RUNS REPORT UP" seam for a DIRECT in-env run (M3 fix plan D3 / R10 / UC062).
-// The MCP runner__run in the serve process runs the on-disk scenarios (toolcore.Run) and, when the serve
+// The MCP runner_run in the serve process runs the on-disk scenarios (toolcore.Run) and, when the serve
 // process is CP-wired, calls Client.ReportUp to push the SAME evidence-free ResultsPush the executor's
 // pickup loop pushes — under the run's OWN run_id with NO run_request_id (a direct run is not enqueued).
 // The evidence (Expected/Observed, sagas, logs) is DROPPED at the mapReport seam; only tallies + generic
@@ -10,7 +10,7 @@ package runner
 // F1 (CP-M3-III-62): the sentence that used to end this comment — "a failed push (e.g. the CP
 // momentarily down) loses nothing and lands on the next reachable CP" — was FALSE, in the same way
 // executor.go's and direct.go's were. Nothing landed it. The Stage III live gate caught it: the
-// cloud-requested path recovered its results after an outage and the MCP runner__run path did NOT,
+// cloud-requested path recovered its results after an outage and the MCP runner_run path did NOT,
 // because this is a THIRD terminal-push seam and only the first two had been given the outbox.
 // It now queues durably before pushing, so the sentence is finally true.
 

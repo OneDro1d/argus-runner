@@ -1,6 +1,6 @@
 package httpload
 
-// cgroup.go -- the executor's OWN CPU throttling around a step (, GitHub #615).
+// cgroup.go -- the executor's OWN CPU throttling around a step (GitHub #615).
 //
 // A closed-model HTTP load generator that is CFS-throttled serves fewer requests than the target could: the
 // "limit" it reads is the executor's. The reading is the cgroup's cpu.stat counters `nr_periods` and

@@ -53,7 +53,7 @@ type Instance struct {
 	// cluster's convention. Used on every non-local tier — see obsPodMonitor. "none" renders no
 	// PodMonitor, for a cluster without the Prometheus Operator.
 	PromOperatorLabel string
-	RunnerToken       string // gates ONLY the local runner__* MCP surface
+	RunnerToken       string // gates ONLY the local runner_* MCP surface
 	AuthorToken       string
 	// EnrollmentToken (S1, CP-M3-120 + III.3) is the workspace-bound, single-use credential the
 	// executor presents on its FIRST /fed/register when the CP runs with
@@ -81,7 +81,7 @@ type Instance struct {
 	MessageSchemaFiles map[string][]byte
 	Replicas           int // 1 at genesis (identity.key race), then the min-3 axiom
 	// GrafanaPublicURL (UC138), when set, is injected as ARGUS_GRAFANA_PUBLIC_URL so
-	// runner__get_dashboard_url builds a deep link a HUMAN can open for THIS environment. It is plain
+	// runner_get_dashboard_url builds a deep link a HUMAN can open for THIS environment. It is plain
 	// env, not a Secret entry: a public Grafana base is not a credential. Empty renders nothing, so the
 	// compose/k3d manifests are unchanged and keep the localhost default.
 	GrafanaPublicURL string
@@ -129,6 +129,15 @@ type Instance struct {
 	// the Pushgateway's file). Empty takes obsStorageClassFor(tier). These volumes are single-writer
 	// ReadWriteOnce, so the class is NOT the results volume's RWX one — see obsStorageClassFor.
 	ObsStorageClass string
+	// ExecutorMemory is the executor container's memory LIMIT, a Kubernetes quantity such as
+	// "3Gi". Empty renders DefaultExecutorMemoryLimit (1536Mi), byte-identical to every earlier render. The request
+	// stays ExecutorMemoryRequest; a value below it, or not a quantity, is refused by validate.
+	ExecutorMemory string
+	// ExecutorCPU is the executor container's CPU LIMIT: a plain number of CPUs ("2", "1.5",
+	// "0.5") or millicores ("1500m"). Empty renders DefaultExecutorCPULimit ("1"), byte-identical to every earlier
+	// render. The request stays ExecutorCPURequest; a value below it, or not a CPU quantity, is refused by validate.
+	// The instance quota's limits.cpu is sized from it (quotaCPU).
+	ExecutorCPU string
 	// ImagePullSecret names a dockerconfig Secret in the instance namespace the executor uses to
 	// pull the (private) suite image. Empty on the local tiers — they import the image into the
 	// node's containerd store, so there is no registry pull and no secret to reference. On the
@@ -187,6 +196,12 @@ type Instance struct {
 	// otherwise. The instance renders no Loki of its own: promtail pushes here with tenant_id = the
 	// instance id, and the executor reads here with X-Scope-OrgID = the instance id.
 	ObsSharedURL string
+	// ObsSharedLogCluster is config.SharedLokiCluster(): non-empty says observability.loki.url is an
+	// environment's SHARED Loki and the executor reads it with cluster+namespace selectors and query-time parsing.
+	// Only --obs=adopt can carry it (validate() refuses it elsewhere) and it changes NOTHING that is rendered: the
+	// executor's args and env are an adopt instance's, the cluster label rides in the embedded argus-config, and the
+	// namespace is the ARGUS_SUT_NAMESPACE every executor already gets.
+	ObsSharedLogCluster string
 
 	// CollectSUTLogs (render-k8s --collect-sut-logs), default false, gates whether promtail is
 	// rendered AT ALL and, with it, whether the SUT namespace's pod logs are read. The bundled
@@ -198,6 +213,11 @@ type Instance struct {
 	// cmd/argus prints which namespace will be read whenever this is true (render-k8s time, not
 	// apply time), so the decision is said out loud, not left to be discovered in a rendered YAML.
 	CollectSUTLogs bool
+	// SUTLogsVia (render-k8s --sut-logs-via) says HOW the collected logs are read:
+	// "" or "node" = the promtail DaemonSet (hostPath mounts; byte-identical to every render before this
+	// field existed), "api" = a one-replica `argus collect-logs` Deployment that reads the pod logs over
+	// the Kubernetes API (no hostPath, no DaemonSet, nothing cluster-scoped). "api" needs CollectSUTLogs.
+	SUTLogsVia string
 }
 
 // SharedObsNamespace is where the ONE shared Loki lives (T3.3). Never an instance namespace, so no
@@ -332,12 +352,15 @@ func (in *Instance) normalize() {
 	// nodes (800m), and the one-shot pods onboarding/teardown create in this namespace (de-register,
 	// auth-preflight). The executor count used is never below the run-time scale-up (quotaReplicas):
 	// a manifest rendered at 1 replica still gets 6 CPU / 9Gi / 14 pods, because the executor scales
-	// itself to 3 when a run starts.
+	// itself to 3 when a run starts. The memory share per executor is the executor's own limit
+	// (--executor-memory, default 1536Mi): sized at a flat 1536Mi, a 3Gi executor's THIRD replica was
+	// refused by this quota (`exceeded quota: instance-quota, requested: limits.memory=3Gi, used: 6912Mi,
+	// limited: 9Gi`, shop-dev-aks 2026-10-19).
 	if in.CPULimit == "" {
-		in.CPULimit = strconv.Itoa(quotaReplicas(in.Replicas) + 3)
+		in.CPULimit = in.quotaCPU()
 	}
 	if in.MemoryLimit == "" {
-		in.MemoryLimit = strconv.Itoa(quotaReplicas(in.Replicas)*1536+4608) + "Mi"
+		in.MemoryLimit = strconv.Itoa(quotaReplicas(in.Replicas)*in.executorMemoryMi()+4608) + "Mi"
 	}
 	if in.PodLimit == "" {
 		in.PodLimit = strconv.Itoa(quotaReplicas(in.Replicas) + 11)
@@ -415,12 +438,28 @@ func (in Instance) validate() error {
 	if strings.TrimSpace(in.CPURL) == "" {
 		return fmt.Errorf("control-plane URL is required")
 	}
+	if err := ValidateExecutorMemory(in.ExecutorMemory); err != nil {
+		return err
+	}
+	if err := ValidateExecutorCPU(in.ExecutorCPU); err != nil {
+		return err
+	}
+	if !ValidSUTLogsVia(in.SUTLogsVia) {
+		return fmt.Errorf("--sut-logs-via must be node or api (got %q)", in.SUTLogsVia)
+	}
+	if strings.EqualFold(strings.TrimSpace(in.SUTLogsVia), SUTLogsViaAPI) && !in.CollectSUTLogs {
+		return fmt.Errorf("--sut-logs-via api only says HOW logs are collected: it needs --collect-sut-logs")
+	}
 	if strings.TrimSpace(in.ArgusConfig) == "" {
 		return fmt.Errorf("argus-config.yaml content is required — it is embedded verbatim into the instance ConfigMap")
 	}
 	// T3.1/T3.2 (E3): refuse before rendering ANYTHING — same "write nothing before refusing" rule
 	// every other check in this function already follows. normalize() has already turned "" into
 	// "bundled", so this switch only ever sees a real caller value.
+	if strings.TrimSpace(in.ObsSharedLogCluster) != "" && !strings.EqualFold(strings.TrimSpace(in.ObsMode), obsModeAdopt) {
+		return fmt.Errorf("observability.loki.shared_cluster is set (%q): it says observability.loki.url is an environment's shared Loki, "+
+			"which only --obs=adopt reads (got --obs=%s) - run with --obs=adopt, or remove shared_cluster", in.ObsSharedLogCluster, in.ObsMode)
+	}
 	switch strings.ToLower(strings.TrimSpace(in.ObsMode)) {
 	case obsModeBundled, obsModeNone:
 	case obsModeAdopt:
@@ -670,7 +709,7 @@ metadata:
   namespace: %s
 type: Opaque
 stringData:
-  # These gate ONLY the executor's local runner__* MCP surface (what the agent presents
+  # These gate ONLY the executor's local runner_* MCP surface (what the agent presents
   # through the tunnel). Federation register/push use the machine identity, not these.
   ARGUS_RUNNER_TOKEN: %q
   # ARGUS_AUTHOR_TOKEN is the OLD name for this same value; ARGUS_EXECUTOR_SECRET (below) is the
@@ -861,7 +900,7 @@ metadata:
             failureThreshold: 3
           resources:
             requests: {cpu: "150m", memory: "384Mi"}
-            limits:   {cpu: "1", memory: "1536Mi"}     # JMeter (JVM) headroom
+            limits:   {cpu: "%s", memory: "%s"}     # JMeter (JVM) headroom
           volumeMounts:
             - {name: results, mountPath: /results}
             - {name: config, mountPath: /config, readOnly: true}
@@ -890,7 +929,7 @@ metadata:
     argus.onedroid.ai/instance: %s
 spec:
   # S6: ClusterIP ONLY. The executor is never exposed via Ingress/NodePort/LoadBalancer;
-  # the test agent reaches its runner__* MCP surface through connect.sh's kubectl port-forward.
+  # the test agent reaches its runner_* MCP surface through connect.sh's kubectl port-forward.
   type: ClusterIP
   selector:
     app.kubernetes.io/name: argus-executor
@@ -915,6 +954,7 @@ spec:
 		// list) — "" outside export mode, so a non-export render is byte-unchanged.
 		obsCredentialEnvBlock("            ", in.ObsCredentialVarName),
 		obsModeEnvBlock(in),
+		in.executorCPULimit(), in.executorMemoryLimit(),
 		identityMountBlock(in.IdentityKeyB64),
 		messageSchemaConfigVolumeSource(in.MessageSchemaFiles),
 		identityVolumeBlock(in.IdentityKeyB64),
@@ -951,6 +991,16 @@ rules:
     # do — deleting a pod recreates it from the SAME Deployment spec. resourceNames pins this to the
     # executor's OWN Deployment: it can re-image itself and nothing else in the namespace.
     verbs: [get, patch]
+  # (the precondition tier): the built-in NetworkPolicy probes create a throwaway listener and
+  # client pod and a throwaway allow/deny NetworkPolicy IN THIS NAMESPACE, read them back, and delete them. This
+  # is a Role, not a ClusterRole: it grants nothing in the system-under-test namespace and nothing cluster-scoped.
+  # Pods already carry get+delete above; create and list are the additions, and networkpolicies are new.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [create, list]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create, get, list, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -1006,7 +1056,14 @@ metadata:
   name: allow-same-namespace
   namespace: %s
 spec:
-  podSelector: {}
+  # every pod in the namespace EXCEPT a precondition probe's ingress listener (label
+  # argus.onedroid.ai/probe-isolated). NetworkPolicies are additive allow-lists, so a policy admitting every
+  # same-namespace pod would keep the probe's listener reachable whatever deny the probe adds, and the
+  # ingress probe could not tell an enforcing cluster from a bare one. The listener is isolated by
+  # default-deny-ingress alone; the probe opens and closes it with its own explicit policies.
+  podSelector:
+    matchExpressions:
+      - {key: argus.onedroid.ai/probe-isolated, operator: DoesNotExist}
   policyTypes: [Ingress]
   ingress:
     - from:
@@ -1205,7 +1262,7 @@ func webhookEnvBlock(url string) string {
 
 // obsModeEnvBlock renders the executor's ARGUS_OBS_MODE env entry (12-space indent, trailing newline)
 // for `--obs none` ONLY, and "" for every other mode, so every other render is byte-unchanged.
-// the executor's own validate_config (the relayed verb and runner__validate_config)
+// the executor's own validate_config (the relayed verb and runner_validate_config)
 // reads it and then does not require observability.grafana.public_url, exactly as onboarding's did.
 func obsModeEnvBlock(in Instance) string {
 	if !strings.EqualFold(strings.TrimSpace(in.ObsMode), obsModeNone) {
@@ -1759,6 +1816,12 @@ func RenderObs(in Instance, c *config.Config) (string, error) {
 		if !in.CollectSUTLogs {
 			return "", nil
 		}
+		if in.sutLogsViaAPI() {
+			return "# RENDERED by the argus onboarder (internal/k8srender) for instance " + fmt.Sprintf("%q", in.ID) + ". Do not edit by hand.\n" +
+				"# --obs=export, hosted-Loki target, --sut-logs-via api: the pod-log collector ONLY, forwarding to the operator's\n" +
+				"# own hosted Loki (credential from the argus-obs-credential Secret by secretKeyRef, never a literal here).\n" +
+				renderSUTLogsCollector(in, in.Namespace()), nil
+		}
 		return renderExportPromtail(in, c), nil
 	}
 	// T3.3 (E3 shared ingest): no Loki of the instance's own — promtail writes to the environment's
@@ -1897,7 +1960,9 @@ spec:
 	// agent content the tester never opted into shipping into Loki. Appended as a whole, separate
 	// block of independent YAML documents — document order carries no meaning to `kubectl create`,
 	// so this can be added or omitted without touching Loki/pushgateway above.
-	if in.CollectSUTLogs {
+	if in.sutLogsViaAPI() {
+		b.WriteString(renderSUTLogsCollector(in, ns))
+	} else if in.CollectSUTLogs {
 		b.WriteString(renderBundledPromtailBlock(in, c, ns))
 	}
 	// Empty on a managed tier, where the obs plane is not published and needs no carve-out.
@@ -2226,7 +2291,9 @@ spec:
 
 	// promtail is OPT-IN (--collect-sut-logs, default off) — same reasoning as bundled mode
 	// (RenderObs): its only job is reading the SUT namespace's pod logs.
-	if in.CollectSUTLogs {
+	if in.sutLogsViaAPI() {
+		b.WriteString(renderSUTLogsCollector(in, ns))
+	} else if in.CollectSUTLogs {
 		rbacName := "argus-promtail-" + in.ID
 		project := c.ProjectLabel()
 		pushURL := strings.TrimRight(in.ObsSharedURL, "/") + "/loki/api/v1/push"
@@ -2577,6 +2644,14 @@ func sagaMarkerCond(c *config.Config) string {
 // separately grant the executor's ServiceAccount a ClusterRole on `nodes` (get, list) — outside
 // this manifest, and outside any single SUT owner's authority.
 func SUTAccessRoleManifest(in Instance) string {
+	out := sutAccessRoleBase(in)
+	if in.sutLogsViaAPI() {
+		out += sutLogsReadRoleManifest(in) // the SECOND grant, only with --sut-logs-via api
+	}
+	return out
+}
+
+func sutAccessRoleBase(in Instance) string {
 	execNS := in.Namespace()
 	return fmt.Sprintf(`# Apply this in YOUR OWN namespace (%s) to let the Argus executor read your
 # pods/deployments/statefulsets/replicasets for load-run environment capture (P3 #23) AND to let a

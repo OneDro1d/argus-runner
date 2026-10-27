@@ -42,9 +42,10 @@ func (c *hungChannel) QueueDeclare(string, bool, bool, bool, bool, amqp.Table) (
 func (c *hungChannel) ExchangeDeclare(string, string, bool, bool, bool, bool, amqp.Table) error {
 	return nil
 }
-func (c *hungChannel) QueueDelete(string, bool, bool, bool) (int, error)    { return 0, nil }
-func (c *hungChannel) QueueUnbind(string, string, string, amqp.Table) error { return nil }
-func (c *hungChannel) ExchangeDelete(string, bool, bool) error              { return nil }
+func (c *hungChannel) QueueBind(string, string, string, bool, amqp.Table) error { return nil }
+func (c *hungChannel) QueueDelete(string, bool, bool, bool) (int, error)        { return 0, nil }
+func (c *hungChannel) QueueUnbind(string, string, string, amqp.Table) error     { return nil }
+func (c *hungChannel) ExchangeDelete(string, bool, bool) error                  { return nil }
 
 // hungConn is a connection whose Close (and, when hangOpen, Channel) never completes.
 type hungConn struct {
@@ -71,7 +72,8 @@ func (c *hungConn) abort()       { c.aborts.Add(1) }
 func (c *hungConn) NotifyBlocked(r chan amqp.Blocking) chan amqp.Blocking {
 	return c.blocks
 }
-func (c *hungConn) free() { c.once.Do(func() { close(c.release) }) }
+func (c *hungConn) NotifyClose(r chan *amqp.Error) chan *amqp.Error { return r }
+func (c *hungConn) free()                                           { c.once.Do(func() { close(c.release) }) }
 
 // testEngine builds an Engine over c with short waits. rpcTimeout is deliberately LONGER than the
 // bound a test asserts, so an operation that relied on the watchdog instead of the close bound

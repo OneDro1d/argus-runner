@@ -159,7 +159,7 @@ func TestCheckCredential(t *testing.T) {
 		{"bare token expiring in two minutes", env(soon), StatusWarn, "expires in 2m", "unset ARGUS_CP_AUTHOR_TOKEN"},
 		{"session token expiring in two minutes renews", session(soon, true, now.Add(-time.Hour)), StatusOK, "", ""},
 		// A runner-scope token resolves to role.Product, the builder's hat (control/cloudauth.go), not the executor's.
-		{"runner scope in the operator's hands", env(at(10*time.Minute, "runner")), StatusWarn, "a builder presents it to runner__run", "cloud-login"},
+		{"runner scope in the operator's hands", env(at(10*time.Minute, "runner")), StatusWarn, "a builder presents it to runner_run", "cloud-login"},
 		{"unrecognised value", env(Classify("wksp_123")), StatusWarn, "neither", "cloud-login"},
 		{"unreadable JWT is unknown, never ok", env(Classify(enc([]byte(`{"alg":"RS256"}`)) + ".!!!.sig")), StatusUnknown, "could not be read", ""},
 	}
@@ -185,7 +185,7 @@ func TestCheckCredential(t *testing.T) {
 	}
 }
 
-// REPLAY L0929:R4 (tester verify/2026-09-29-doctor-pr326-live/R4-wrong-token.out). A synthetic odts_ value in
+// REPLAY of a recorded incident (a tester's run). A synthetic odts_ value in
 // ARGUS_CP_AUTHOR_TOKEN: argus-dev answered HTTP 401 "invalid credential", and this check still said ok, because
 // the refusal only reached executor-version, whose fix was "re-run argus doctor". The control plane's own
 // answer outranks what the value looks like.
@@ -255,7 +255,7 @@ func TestCheckCredential_RefusedByTheControlPlane(t *testing.T) {
 	}
 }
 
-// REPLAY B:16 (incidents-B-tester.tsv; the tester notes "a tester's \"couldn't approve: invalid_request\"
+// REPLAY B:16 (the incident list; the tester notes "a tester's \"couldn't approve: invalid_request\"
 // (09-22) = a stale/used device code; no login pending, session.json valid 12:09"). The approve page's
 // invalid_request is "unknown, expired, or already-decided user code" (oauth/endpoints.go handleDeviceApprove),
 // and nothing on it says that no sign-in was waiting. A signed-in session must say so.
@@ -343,7 +343,7 @@ func TestCheckLocalHats(t *testing.T) {
 	}
 }
 
-// REPLAY A:96 (tester-upstream-notepad handoffs/2026-09-18-en-7-fixes-pushed-vault-grafana-access.md:23
+// REPLAY A:96 (a tester's notes
 // "`validate-scenario` NOT run here (needs `ARGUS_RUNNER_TOKEN` + `ARGUS_AUTHOR_TOKEN`) = UNVERIFIED"): with
 // nothing set, a scenario change went unvalidated because the hats read as credentials nobody had. The whole
 // recipe has three steps — two distinct strings, then the author one presented; setting the map alone still
@@ -437,8 +437,8 @@ func TestCheckConfig(t *testing.T) {
 	}
 }
 
-// REPLAY: one case per recorded incident this check claims (incidents-{A,B}-*.tsv; tagging in
-// verify/2026-09-28-doctor-incident-tagging, extend:argus-config). A:95 and B:28 (a quote or backslash in a
+// REPLAY: one case per recorded incident this check claims (tagging in
+// a tester's run, extend:argus-config). A:95 and B:28 (a quote or backslash in a
 // ${VAR} emptied a UI payload) are an EXECUTOR fix, #160 in 0.3.37, and are replayed by
 // TestCheckExecutorVersion_Replay. A:90 and B:14 are NOT claimed: the port was a scenario's app_url
 // (WEBUI-001: compose :8090, the AKS service :80), and which port a cluster service exposes is not
@@ -451,12 +451,12 @@ func TestCheckConfig_Replay(t *testing.T) {
 		detail, fix []string
 	}{
 		// The layer error onboarding hid: validate-config ran in a container whose stderr onboard.sh drops on failure.
-		{"A:8", `tester-upstream-notepad handoffs/2026-08-28-laptop-upstream-hub-onboarding.md:97-100 "6/8 validate → should now PASS (the layer fix) … its errors go to the container's stderr, which onboard.sh swallows on failure"`,
+		{"A:8", `a tester's notes "6/8 validate → should now PASS (the layer fix) … its errors go to the container's stderr, which onboard.sh swallows on failure"`,
 			ConfigInput{Path: "product-agent/argus-config.yaml", ProjectName: "hub", Validated: true, ScenariosChecked: 5, ScenariosDir: "test-agent/scenarios",
 				Invalid: []string{`SYN-003: uses layer "HTTP Ingestion" but config has no usable targets.http`}},
 			StatusFail, []string{`SYN-003: uses layer "HTTP Ingestion" but config has no usable targets.http`, "1 of 5"},
 			[]string{"argus validate-config --config product-agent/argus-config.yaml --scenarios test-agent/scenarios"}},
-		{"B:35", `handoffs/2026-09-23-hub-harness-scoped-hop-ask-sent.md:70 "a port-less value makes http fall back to :8080, internal/config/config.go:1159-1161"`,
+		{"B:35", `a tester's notes "a port-less value makes http fall back to :8080, internal/config/config.go:1159-1161"`,
 			ConfigInput{Path: "argus-config.yaml", ProjectName: "hub", Validated: true, ScenariosChecked: 12, ScenariosDir: "scenarios",
 				Portless: []string{"targets.http.base_url"}},
 			StatusWarn, []string{"targets.http.base_url", "no port", ":8080", ":80"}, []string{"targets.http.base_url", ":80"}},
@@ -494,8 +494,8 @@ func TestCheckScenarios(t *testing.T) {
 		{"chosen dir absent", ScenariosInput{Dir: "s"}, StatusFail, "does not exist"},
 		{"no scenario files", ScenariosInput{Dir: "s", Exists: true}, StatusFail, "no scenario files"},
 		// The mistake `run` cannot refuse at flag parsing.
-		{"demo scenarios against another product", ScenariosInput{Dir: def, IsDefault: true, Exists: true, Files: 9, ProjectName: "memstore"}, StatusWarn, `project "memstore"`},
-		{"demo scenarios against the demo", ScenariosInput{Dir: def, IsDefault: true, Exists: true, Files: 9, ProjectName: "order-service"}, StatusOK, ""},
+		{"pilot scenarios against another product", ScenariosInput{Dir: def, IsDefault: true, Exists: true, Files: 9, ProjectName: "memstore"}, StatusWarn, `project "memstore"`},
+		{"pilot scenarios against the pilot", ScenariosInput{Dir: def, IsDefault: true, Exists: true, Files: 9, ProjectName: "order-service"}, StatusOK, ""},
 		{"own scenarios, no config to compare", ScenariosInput{Dir: "s", Exists: true, Files: 12}, StatusOK, "not compared"},
 		{"own scenarios", ScenariosInput{Dir: "s", Exists: true, Files: 12, ProjectName: "hub"}, StatusOK, ""},
 	}
@@ -512,8 +512,8 @@ func TestCheckScenarios(t *testing.T) {
 	}
 }
 
-// REPLAY: one case per recorded incident the import preview claims (verify/2026-09-28-doctor-incident-tagging/tags.tsv,
-// extend:scenarios-dir; source rows in verify/2026-09-25-friction-investigation/incidents-A-upstream-notepad.tsv).
+// REPLAY: one case per recorded incident the import preview claims (a tester's run,
+// extend:scenarios-dir; source rows in a tester's run).
 // The refusals here are what gatherScenarios collects; TestDoctor_ScenariosTheImportWouldRefuseAreNamed (cmd/argus)
 // proves the real rules produce them.
 func TestCheckScenarios_Replay(t *testing.T) {
@@ -532,11 +532,11 @@ func TestCheckScenarios_Replay(t *testing.T) {
 	}{
 		// The 08-28 IDs broke the old uppercase grammar, which VR10-S4-1 widened; the drop was silent because
 		// nothing named the file before the import counted it. An ID today's rule refuses stands in for them.
-		{"A:9", `tester-upstream-notepad handoffs/2026-08-28-laptop-upstream-hub-onboarding.md:106 "a scenario whose ID fails the grammar is dropped SILENTLY; the count is the only signal"`,
+		{"A:9", `a tester's notes "a scenario whose ID fails the grammar is dropped SILENTLY; the count is the only signal"`,
 			ScenariosInput{Dir: "scenarios", Exists: true, Files: 5, ProjectName: "hub", Imported: true, ImportFiles: 5, Version: "0.3.44",
 				Refused: []ScenarioRefusal{{Path: "SYN-MCP-001.md", ID: "syn.mcp.001", Errors: 1, First: `line 4: ID "syn.mcp.001" is not allowed`}}},
 			[]string{"would refuse 1 of 5", "SYN-MCP-001.md", `"syn.mcp.001"`, "is not allowed", "0.3.44"}},
-		{"A:56", `tester-upstream-notepad handoffs/2026-09-14-pass2-done-0331-format-break-argus-pivot.md:22-24 "0.3.31 … does not accept old-format files; all 16 of ours are old-format"`,
+		{"A:56", `a tester's notes "0.3.31 … does not accept old-format files; all 16 of ours are old-format"`,
 			ScenariosInput{Dir: "scenarios-v2", Exists: true, Files: 16, ProjectName: "hub", Imported: true, ImportFiles: 16, Version: "0.3.44",
 				Refused: oldFormat(16)},
 			[]string{"would refuse 16 of 16", "SYN-S0-001.md", "7 errors", "### Runnable", "and 11 more"}},
@@ -609,5 +609,37 @@ func TestClipKeepsCharactersWhole(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "…") || len(got) > 160+len("…") {
 		t.Errorf("clip = %q; want at most 160 bytes, then …", got)
+	}
+}
+
+// A tester's run: argus-config named one target, and the catalogue's
+// chain steps called two more engines by full URL. Nothing probed them: a missing pilot-old would have shown
+// only as 199 red scenarios at run time.
+func TestCheckConfig_UnprobedHosts(t *testing.T) {
+	in := ConfigInput{Path: "argus-config.yaml", ProjectName: "pilot", Validated: true, ScenariosChecked: 364, ScenariosDir: "scenarios",
+		Unprobed: []UnprobedHost{
+			{Addr: "pilot-go.pilot.svc.cluster.local:8080", Scenarios: 17, First: "DM-DIFF-001"},
+			{Addr: "pilot-old.pilot.svc.cluster.local:8080", Scenarios: 199, First: "DM-VOLD-REQ-BASIC-001"},
+		}}
+	c := CheckConfig(in)
+	if c.Status != StatusWarn {
+		t.Fatalf("status = %q, want warn: %+v", c.Status, c)
+	}
+	for _, s := range []string{"216 scenarios", "pilot-old.pilot.svc.cluster.local:8080 (199 scenarios, e.g. DM-VOLD-REQ-BASIC-001)",
+		"pilot-go.pilot.svc.cluster.local:8080 (17", "sut-reachable", "full URL"} {
+		if !strings.Contains(c.Detail, s) {
+			t.Errorf("Detail lacks %q:\n%s", s, c.Detail)
+		}
+	}
+	if !strings.Contains(c.Fix, "targets.http_targets.<name>.base_url") {
+		t.Errorf("Fix does not say how to have the executor probe them:\n%s", c.Fix)
+	}
+	// More than five hosts: the first five by scenario count, then how many more.
+	in.Unprobed = nil
+	for i := 0; i < 7; i++ {
+		in.Unprobed = append(in.Unprobed, UnprobedHost{Addr: fmt.Sprintf("h%d:80", i), Scenarios: 1, First: "S"})
+	}
+	if c := CheckConfig(in); !strings.Contains(c.Detail, "and 2 more") {
+		t.Errorf("seven hosts are not cut to five:\n%s", c.Detail)
 	}
 }

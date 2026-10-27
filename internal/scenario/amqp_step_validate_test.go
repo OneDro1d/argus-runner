@@ -11,8 +11,8 @@ import (
 // envelope/body, and exactly the two `broker …` claim forms.
 
 const amqpPublishEnvelope = `{"steps":[{"type":"amqp","name":"spoof","op":"publish","url_env":"MSGBUS_ARGUS_TEST_URL",` +
-	`"exchange":"msgbus.inbox","routing_key":"inbox.agent.hop","user_id":"hop",` +
-	`"envelope":{"to_inbox":"agent.hop","from_agent_id":"argus-test","intent":"INFORM","prompt":"argus-test: ${correlation_id}"}}]}`
+	`"exchange":"msgbus.inbox","routing_key":"inbox.agent.alpha","user_id":"alpha",` +
+	`"envelope":{"to_inbox":"agent.alpha","from_agent_id":"argus-test","intent":"INFORM","prompt":"argus-test: ${correlation_id}"}}]}`
 
 func amqpMD(trigger, expect string) string { return chainMD(trigger, expect) }
 
@@ -22,14 +22,14 @@ func TestValidate_AMQPStepWellFormedAccepted(t *testing.T) {
 			"### Runnable\n- step spoof: broker refuses with 406\n"},
 		{"publish envelope, broker accepts",
 			`{"steps":[{"type":"amqp","name":"send","op":"publish","url_env":"ARGUS_TEST_AMQP_URL","exchange":"msgbus.inbox",` +
-				`"routing_key":"inbox.agent.hop","envelope":{"to_inbox":"agent.hop","from_agent_id":"argus-test","prompt":"p ${cid}"}}]}`,
+				`"routing_key":"inbox.agent.alpha","envelope":{"to_inbox":"agent.alpha","from_agent_id":"argus-test","prompt":"p ${cid}"}}]}`,
 			"### Runnable\n- step send: broker accepts\n"},
 		{"publish raw body, broker refuses with 403",
 			`{"steps":[{"type":"amqp","name":"all","op":"publish","url_env":"ARGUS_TEST_AMQP_URL","exchange":"msgbus.inbox",` +
 				`"routing_key":"inbox.all","body":"raw probe"}]}`,
 			"### Runnable\n- step all: broker refuses with 403\n"},
 		{"consume, broker refuses with 403",
-			`{"steps":[{"type":"amqp","name":"steal","op":"consume","url_env":"ARGUS_TEST_AMQP_URL","queue":"msgbus.agent.hop","wait":"2s"}]}`,
+			`{"steps":[{"type":"amqp","name":"steal","op":"consume","url_env":"ARGUS_TEST_AMQP_URL","queue":"msgbus.agent.alpha","wait":"2s"}]}`,
 			"### Runnable\n- step steal: broker refuses with 403\n"},
 		{"declare_queue, broker refuses with 403",
 			`{"steps":[{"type":"amqp","name":"dq","op":"declare_queue","url_env":"ARGUS_TEST_AMQP_URL","queue":"msgbus.agent.x"}]}`,
@@ -97,13 +97,13 @@ func TestValidate_AMQPPublishNeedsExactlyOneOfEnvelopeOrBody(t *testing.T) {
 	// ARGUS-DESIGN-GENERIC-SCHEMA-MESSAGES-2026-09-28 (design §2) added a third publish form,
 	// `schema`+`record`, so the refusal now names all three — the substring below is the part of
 	// that message every "wrong number of forms" case still shares.
-	both := strings.Replace(amqpPublishEnvelope, `"user_id":"hop",`, `"user_id":"hop","body":"x",`, 1)
+	both := strings.Replace(amqpPublishEnvelope, `"user_id":"alpha",`, `"user_id":"alpha","body":"x",`, 1)
 	_, errs := Validate(amqpMD(both, "### Runnable\n- step spoof: broker refuses with 406\n"))
 	if !find(errs, "exactly one of `envelope`, `body` or `schema`+`record`") {
 		t.Fatalf("a publish with both envelope and body must be refused; got %v", errs)
 	}
 	neither := `{"steps":[{"type":"amqp","name":"spoof","op":"publish","url_env":"ARGUS_TEST_AMQP_URL",` +
-		`"exchange":"msgbus.inbox","routing_key":"inbox.agent.hop"}]}`
+		`"exchange":"msgbus.inbox","routing_key":"inbox.agent.alpha"}]}`
 	_, errs2 := Validate(amqpMD(neither, "### Runnable\n- step spoof: broker accepts\n"))
 	if !find(errs2, "exactly one of `envelope`, `body` or `schema`+`record`") {
 		t.Fatalf("a publish with neither envelope nor body must be refused; got %v", errs2)
@@ -161,7 +161,7 @@ func TestValidate_AMQPStepEnvelopeShapeRefused(t *testing.T) {
 	if !find(errs, "`envelope.intent`") {
 		t.Fatalf("an intent outside INFORM/ASK/DECISION_REQUEST must be refused; got %v", errs)
 	}
-	noInbox := strings.Replace(amqpPublishEnvelope, `"to_inbox":"agent.hop",`, "", 1)
+	noInbox := strings.Replace(amqpPublishEnvelope, `"to_inbox":"agent.alpha",`, "", 1)
 	_, errs2 := Validate(amqpMD(noInbox, "### Runnable\n- step spoof: broker refuses with 406\n"))
 	if !find(errs2, "`envelope.to_inbox`") {
 		t.Fatalf("an envelope with no to_inbox must be refused; got %v", errs2)
@@ -234,20 +234,20 @@ func TestValidate_AMQPNonConsumeStepRejectsExtendedClaims(t *testing.T) {
 // P3 #24b — publish headers: string values only, and the schema marker is reserved.
 func TestValidate_AMQPPublishHeaders(t *testing.T) {
 	t.Run("string values accepted", func(t *testing.T) {
-		trig := strings.Replace(amqpPublishEnvelope, `"user_id":"hop",`, `"user_id":"hop","headers":{"x-retry-count":"3"},`, 1)
+		trig := strings.Replace(amqpPublishEnvelope, `"user_id":"alpha",`, `"user_id":"alpha","headers":{"x-retry-count":"3"},`, 1)
 		if _, errs := Validate(amqpMD(trig, "### Runnable\n- step spoof: broker refuses with 406\n")); len(errs) != 0 {
 			t.Fatalf("string header values must be accepted: %v", errs)
 		}
 	})
 	t.Run("non-string value refused BY NAME", func(t *testing.T) {
-		trig := strings.Replace(amqpPublishEnvelope, `"user_id":"hop",`, `"user_id":"hop","headers":{"x-retry-count":3},`, 1)
+		trig := strings.Replace(amqpPublishEnvelope, `"user_id":"alpha",`, `"user_id":"alpha","headers":{"x-retry-count":3},`, 1)
 		_, errs := Validate(amqpMD(trig, "### Runnable\n- step spoof: broker refuses with 406\n"))
 		if !find(errs, `header "x-retry-count" must be a string value`) {
 			t.Fatalf("a non-string header value must be refused by the KEY's name; got %v", errs)
 		}
 	})
 	t.Run("the schema marker header is reserved", func(t *testing.T) {
-		trig := strings.Replace(amqpPublishEnvelope, `"user_id":"hop",`, `"user_id":"hop","headers":{"x-envelope-schema":"9"},`, 1)
+		trig := strings.Replace(amqpPublishEnvelope, `"user_id":"alpha",`, `"user_id":"alpha","headers":{"x-envelope-schema":"9"},`, 1)
 		_, errs := Validate(amqpMD(trig, "### Runnable\n- step spoof: broker refuses with 406\n"))
 		if !find(errs, "is reserved") {
 			t.Fatalf("x-envelope-schema must be refused as reserved; got %v", errs)

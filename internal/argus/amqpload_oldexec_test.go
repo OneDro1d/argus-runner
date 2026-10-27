@@ -12,7 +12,7 @@ import (
 
 // ⛔ ENV-GATED, and meant to run in an OLD tree. scripts/amqp-load-old-executor-check.sh copies this file
 // into a git worktree of the pinned release (v0.3.50, an executor that predates the `AMQP Load` layer)
-// and runs it THERE (, design §3.4): an old executor handed a new AMQP Load scenario file
+// and runs it THERE (design §3.4): an old executor handed a new AMQP Load scenario file
 // must fire NOTHING.
 //
 // It uses nothing this change added (RunAll, config.Load and a recording runner), so it compiles in the

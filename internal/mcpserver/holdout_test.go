@@ -47,7 +47,7 @@ func callGetReport(t *testing.T, env toolcore.Env, token string) []byte {
 	}
 	handshake(t, s, "s", token)
 	raw, _ := s.Dispatch("s", token, reqBytes(1, "tools/call", map[string]any{
-		"name":      "runner__get_report",
+		"name":      "runner_get_report",
 		"arguments": map[string]any{"instance_id": "local"},
 	}))
 	return raw
@@ -79,13 +79,13 @@ func TestGetReport_TestHat_HasExpected(t *testing.T) {
 // C1: get_failure_context is removed — it must not appear in the tool set in either hat.
 func TestGetFailureContextToolRemoved(t *testing.T) {
 	for _, tl := range DefaultTools(toolcore.Env{Instance: "local"}) {
-		if tl.Name == "runner__get_failure_context" {
-			t.Fatal("runner__get_failure_context must be removed (M25-FX4 C1)")
+		if tl.Name == "runner_get_failure_context" {
+			t.Fatal("runner_get_failure_context must be removed (M25-FX4 C1)")
 		}
 	}
 }
 
-// C2 (M3 fix plan, R7 addendum): runner__get_sagas is OBSERVED saga data (from Loki), NOT the
+// C2 (M3 fix plan, R7 addendum): runner_get_sagas is OBSERVED saga data (from Loki), NOT the
 // dark-factory holdout — it carries no scenario EXPECT to redact and is visible to BOTH hats identically.
 // This locks that boundary: get_sagas is runner-scope (never author-scope), so the PRODUCT hat is not
 // denied it, and the report's EXPECT never leaks through it (get_sagas reads Loki, never the report).
@@ -95,12 +95,12 @@ func TestGetSagas_ObservedData_NotAuthorScopedNoExpect(t *testing.T) {
 	tools := DefaultTools(env)
 	var sagas *Tool
 	for i := range tools {
-		if tools[i].Name == "runner__get_sagas" {
+		if tools[i].Name == "runner_get_sagas" {
 			sagas = &tools[i]
 		}
 	}
 	if sagas == nil {
-		t.Fatal("runner__get_sagas must be registered")
+		t.Fatal("runner_get_sagas must be registered")
 	}
 	if sagas.Namespace != NSRunner {
 		t.Fatalf("get_sagas namespace = %q, want %q (observed data, NOT the author holdout)", sagas.Namespace, NSRunner)
@@ -111,7 +111,7 @@ func TestGetSagas_ObservedData_NotAuthorScopedNoExpect(t *testing.T) {
 	}
 	handshake(t, s, "p", rtok) // PRODUCT token
 	raw, _ := s.Dispatch("p", rtok, reqBytes(1, "tools/call", map[string]any{
-		"name":      "runner__get_sagas",
+		"name":      "runner_get_sagas",
 		"arguments": map[string]any{"instance_id": "local", "correlation_id": "tr-x"},
 	}))
 	// the product hat must NOT be denied get_sagas (unlike an author tool) — it is observed data.
@@ -125,7 +125,7 @@ func TestGetSagas_ObservedData_NotAuthorScopedNoExpect(t *testing.T) {
 }
 
 // C1 (M3 fix plan, R7): the IN-ENV server is RUNNER-ONLY. It must expose exactly the 6
-// runner__* tools and ZERO author__* tools — authoring is a cloud-plane capability now
+// runner_* tools and ZERO author__* tools — authoring is a cloud-plane capability now
 // (doc ruling: in-env = 6 runner locked; authoring → cloud registry, not disk). An in-env
 // author tool is a scope-boundary breach: it would let the test agent write scenarios to
 // DISK instead of the cloud catalog (the M2.5 leftover this fix removes).
@@ -146,8 +146,8 @@ func TestDefaultTools_InEnvRunnerOnly(t *testing.T) {
 		t.Fatalf("SCOPE: the in-env server must expose ZERO author__ tools (C1); found %d: %v", len(authorNames), authorNames)
 	}
 	want := []string{
-		"runner__validate_config", "runner__run", "runner__get_report",
-		"runner__get_sagas", "runner__get_tail_logs", "runner__get_dashboard_url",
+		"runner_validate_config", "runner_run", "runner_get_report",
+		"runner_get_sagas", "runner_get_tail_logs", "runner_get_dashboard_url",
 	}
 	if len(runnerNames) != len(want) {
 		t.Fatalf("the in-env server must expose exactly %d runner tools, got %d: %v", len(want), len(runnerNames), runnerNames)

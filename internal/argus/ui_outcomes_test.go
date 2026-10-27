@@ -50,7 +50,7 @@ func TestRunUIScenario_ReadsThePerBulletOutcomes(t *testing.T) {
 
 	t.Run("every declared bullet evaluated and ok -> passed, and it says how many", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			// the runner hands the spec the parsed asserts; the spec answers one entry per bullet
 			if len(asserts) != 2 {
 				t.Errorf("the runner must pass the declared asserts to the spec, got %d", len(asserts))
@@ -75,7 +75,7 @@ func TestRunUIScenario_ReadsThePerBulletOutcomes(t *testing.T) {
 
 	t.Run("a bullet that FAILED -> failed, with a reality-only observed", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			writeOutcomes(t, vendorDir, []uiOutcomeEntry{
 				{Bullet: "dom has .total containing 42.00", OK: false, Observed: ".total text is 7.00"},
 			})
@@ -101,7 +101,7 @@ func TestRunUIScenario_ReadsThePerBulletOutcomes(t *testing.T) {
 	// ⛔ U-C — A MISSING ENTRY IS AN EXECUTION ERROR, NEVER A PASS AND NEVER A SUT FAILURE.
 	t.Run("a PARTIAL outcomes file is an execution error", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			writeOutcomes(t, vendorDir, []uiOutcomeEntry{{Bullet: "dom has .banner", OK: true}})
 			return 0, true, ""
 		}
@@ -117,7 +117,7 @@ func TestRunUIScenario_ReadsThePerBulletOutcomes(t *testing.T) {
 
 	t.Run("a MISSING outcomes file is an execution error", func(t *testing.T) {
 		vendor := t.TempDir()
-		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+		uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 			return 0, true, "" // writes nothing
 		}
 		res := runUIScenario(uiScenarioMD(t, "- dom has .banner"), "tr-ui-4", vendor)
@@ -145,7 +145,7 @@ func TestRunUIScenario_ARelativeVendorDirStillReadsWhatTheSpecWrote(t *testing.T
 	if err := os.MkdirAll(vendor, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 		p := outPath
 		if !filepath.IsAbs(p) {
 			p = filepath.Join(vendorDir, p) // Playwright's cwd is cmd.Dir = vendorDir
@@ -181,7 +181,7 @@ func TestRunUIScenario_AStaleOutcomesFileIsNotReadAsThisRun(t *testing.T) {
 	writeOutcomes(t, vendor, []uiOutcomeEntry{
 		{Bullet: "dom has .banner", OK: true, Observed: "from a run that is over"},
 	})
-	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 		return 0, true, "" // this run writes NOTHING
 	}
 	res := runUIScenario(uiScenarioMD(t, "- dom has .banner"), "tr-ui-stale", vendor)
@@ -201,7 +201,7 @@ func TestRunUIScenario_NothingThisRowWritesLandsInTestResults(t *testing.T) {
 	defer func() { uiRun = orig }()
 
 	vendor := t.TempDir()
-	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string) (int, bool, string) {
+	uiRun = func(vendorDir string, specs []string, appURL, corr string, asserts []scenario.UIAssert, outPath string, declaredMs int) (int, bool, string) {
 		writeOutcomes(t, vendorDir, []uiOutcomeEntry{{Bullet: "dom has .banner", OK: true}})
 		// the harness died: only the metadata marker, no per-test artifact
 		rd := filepath.Join(vendorDir, "test-results")

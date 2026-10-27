@@ -81,7 +81,7 @@ func withPollDashboardLink(tmpl, label *string) PollOption {
 }
 
 // dashboardLinkFor loads the SUT's argus-config the same way testTargetsFor does and returns its
-// observability.dashboard_link template and label (, UI-2) -- sent on register and on every
+// observability.dashboard_link template and label (UI-2) -- sent on register and on every
 // poll so the control plane can render a per-run link without the executor being involved again.
 //
 // THREE-VALUED, both pointers together: nil = NOT REPORTED, for the two cases that carry no information
@@ -101,7 +101,7 @@ func dashboardLinkFor(configPath string) (tmpl, label *string) {
 }
 
 // testTargetsFor loads the SUT's argus-config the same way moneyWritesAllowFor does and returns its
-// top-level `test_targets` declaration, JSON-encoded (, UI-6) — sent on register and on
+// top-level `test_targets` declaration, JSON-encoded (UI-6) — sent on register and on
 // every poll so the control plane can show an instance's targets and stamp each run with the ones it
 // tested. The stamp comes from THIS declaration and the run's own selection, never from the SUT.
 //

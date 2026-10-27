@@ -33,6 +33,82 @@ const (
 	AMQPConsumeWaitMax     = 30 * time.Second
 )
 
+// The private queue a `listen` step makes. ONE home for the prefix and the lifetime: the
+// JMeter Message Flow tap (internal/argus/argus.go) uses the same two, so one broker grant on `argus-tap-*`
+// covers both. ListenQueueTTLMillis is x-expires AND x-message-ttl: it is the GUARANTEE the queue goes away;
+// the chain's own delete at its end is the tidy path.
+const (
+	ListenQueuePrefix    = "argus-tap-"
+	ListenQueueTTLMillis = 120000
+	// AMQPListenWaitMax bounds a consume's `wait` on a queue a `listen` step of the SAME chain made. A queue the
+	// chain did not create keeps AMQPConsumeWaitMax.
+	AMQPListenWaitMax = 120 * time.Second
+	// AMQPDecodedMaxBytes caps a gunzipped body (a zip bomb ends the step as `error`).
+	AMQPDecodedMaxBytes = 1 << 20
+)
+
+// ListenQueueName is the name ARGUS gives the queue of the listen step at index (0-based) of the chain run cid.
+// The author never chooses it.
+func ListenQueueName(cid string, index int) string {
+	return fmt.Sprintf("%s%s-%d", ListenQueuePrefix, cid, index)
+}
+
+// savedWholeRefRe matches a string that is exactly one ${saved.<var>}.
+var savedWholeRefRe = regexp.MustCompile(`^` + SavedRefPattern + `$`)
+
+// SavedWholeRef returns var when s is exactly `${saved.<var>}`.
+func SavedWholeRef(s string) (string, bool) {
+	m := savedWholeRefRe.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// ListenSavedVars returns the variables that ONLY amqp `listen` steps of this chain save. A variable any other
+// step also saves is left out: its value could then be a name the SUT answered with, and a queue named by it is
+// not Argus's. This is the ONE place that decides "this queue was made by this chain's listen" - the validator,
+// the run door and the money guard all ask it.
+func ListenSavedVars(steps []ChainStep) map[string]bool {
+	listen, other := map[string]bool{}, map[string]bool{}
+	for _, st := range steps {
+		for name := range st.Save {
+			if st.Type == "amqp" && st.Op == "listen" {
+				listen[name] = true
+			} else {
+				other[name] = true
+			}
+		}
+	}
+	for n := range other {
+		delete(listen, n)
+	}
+	return listen
+}
+
+// listenQueueRef reports whether queue is exactly a ${saved.<var>} that a listen step of the chain produced.
+func listenQueueRef(queue string, steps []ChainStep) bool {
+	v, ok := SavedWholeRef(queue)
+	return ok && ListenSavedVars(steps)[v]
+}
+
+// ListenQueueRef is listenQueueRef for the run door.
+func ListenQueueRef(queue string, steps []ChainStep) bool { return listenQueueRef(queue, steps) }
+
+// listenExchanges are the exchanges the chain's listen steps bind to (a queue_unbind of one needs no declare).
+func listenExchanges(steps []ChainStep) map[string]bool {
+	out := map[string]bool{}
+	for _, st := range steps {
+		if st.Type == "amqp" && st.Op == "listen" && st.Exchange != "" {
+			out[st.Exchange] = true
+		}
+	}
+	return out
+}
+
+// ListenExchanges is listenExchanges for the run door.
+func ListenExchanges(steps []ChainStep) map[string]bool { return listenExchanges(steps) }
+
 // AMQPExchangeKindDefault is the kind a declare_exchange step declares when it names none.
 const AMQPExchangeKindDefault = "topic"
 
@@ -93,8 +169,13 @@ var amqpExchangeKinds = map[string]bool{"direct": true, "fanout": true, "topic":
 var (
 	amqpCommonFields = []string{"type", "name", "op", "url_env"}
 	amqpOpFields     = map[string][]string{
-		"publish":          {"exchange", "routing_key", "user_id", "envelope", "body", "headers", "schema", "record"},
-		"consume":          {"queue", "wait", "schema"},
+		"publish": {"exchange", "routing_key", "user_id", "envelope", "body", "headers", "schema", "record"},
+		"consume": {"queue", "wait", "schema", "decode"},
+		// LISTEN: Argus declares a private, self-expiring queue, binds it to the exchange and
+		// routing key, and answers {"queue": "<name>"}; `save` is allowed on this op only. queue_bind binds a
+		// queue this chain declared (or, with `force`, a foreign one).
+		"listen":           {"exchange", "routing_key", "save"},
+		"queue_bind":       {"queue", "exchange", "routing_key", "force"},
 		"declare_queue":    {"queue"},
 		"declare_exchange": {"exchange", "exchange_kind"},
 		// P3 #24c — the writes a check needs to clean up what it declared. `force` on all three lets
@@ -319,6 +400,7 @@ func amqpStepErrors(steps []ChainStep, raw []map[string]json.RawMessage, claims 
 		}
 	}
 
+	listenEx := listenExchanges(steps)
 	for i, st := range steps {
 		// A `broker …` claim on a step that is not amqp is judged by nothing that understands it.
 		if st.Type != "amqp" {
@@ -471,10 +553,17 @@ func amqpStepErrors(steps []ChainStep, raw []map[string]json.RawMessage, claims 
 					trig("step %q declares `wait` %q, which is not a valid duration (Go syntax: \"5s\")", st.Name, st.Wait)
 				case w <= 0:
 					trig("step %q declares `wait` %s, which must be positive", st.Name, w)
-				case w > AMQPConsumeWaitMax:
-					trig("step %q declares `wait` of %s, which is more than the %s bound on an amqp consume",
-						st.Name, w, AMQPConsumeWaitMax)
+				case w > AMQPListenWaitMax:
+					trig("step %q declares `wait` of %s, which is more than the %s bound on a consume from a listen queue",
+						st.Name, w, AMQPListenWaitMax)
+				case w > AMQPConsumeWaitMax && !listenQueueRef(st.Queue, steps):
+					trig("step %q declares `wait` of %s, which is more than the %s bound on an amqp consume from a queue "+
+						"this chain did not create; only a queue a `listen` step of this chain made (queue \"${saved.<var>}\") may be waited on up to %s",
+						st.Name, w, AMQPConsumeWaitMax, AMQPListenWaitMax)
 				}
+			}
+			if st.Decode != "" && st.Decode != "gzip" {
+				trig("step %q: `decode` %q is not supported — the only value is \"gzip\"", st.Name, st.Decode)
 			}
 			// design §5: `schema` is optional on consume (raw-bytes behaviour is unchanged
 			// without it) — shape-only check here, the same as publish's.
@@ -500,7 +589,7 @@ func amqpStepErrors(steps []ChainStep, raw []map[string]json.RawMessage, claims 
 		case "queue_delete":
 			if strings.TrimSpace(st.Queue) == "" {
 				trig("step %q is an amqp `queue_delete` but declares no `queue`", st.Name)
-			} else if !st.Force && !declaredQueues[st.Queue] {
+			} else if !st.Force && !declaredQueues[st.Queue] && !listenQueueRef(st.Queue, steps) {
 				trig("step %q would delete queue %q, which no `declare_queue` step in this chain declares — "+
 					"a check must not be able to delete a live queue by typo; add a `declare_queue` step for it, "+
 					"or set `force: true` on this step to delete it anyway", st.Name, st.Queue)
@@ -516,14 +605,41 @@ func amqpStepErrors(steps []ChainStep, raw []map[string]json.RawMessage, claims 
 				trig("step %q is an amqp `queue_unbind` but declares no `routing_key`", st.Name)
 			}
 			if !st.Force {
-				if st.Queue != "" && !declaredQueues[st.Queue] {
+				if st.Queue != "" && !declaredQueues[st.Queue] && !listenQueueRef(st.Queue, steps) {
 					trig("step %q would unbind queue %q, which no `declare_queue` step in this chain declares — "+
 						"set `force: true` on this step to unbind it anyway", st.Name, st.Queue)
 				}
-				if st.Exchange != "" && !declaredExchanges[st.Exchange] {
+				if st.Exchange != "" && !declaredExchanges[st.Exchange] && !listenEx[st.Exchange] {
 					trig("step %q would unbind from exchange %q, which no `declare_exchange` step in this chain "+
 						"declares — set `force: true` on this step to unbind it anyway", st.Name, st.Exchange)
 				}
+			}
+		// LISTEN: a private queue Argus names, bound to an exchange and routing key. Both are
+		// required and the default exchange cannot be bound. The answer {"queue": …} is only useful saved.
+		case "listen":
+			if strings.TrimSpace(st.Exchange) == "" {
+				trig("step %q is an amqp `listen` but declares no `exchange` — the default exchange (\"\") cannot be bound to a queue", st.Name)
+			}
+			if strings.TrimSpace(st.RoutingKey) == "" {
+				trig("step %q is an amqp `listen` but declares no `routing_key`", st.Name)
+			}
+			if len(st.Save) == 0 {
+				trig("step %q is an amqp `listen` but saves nothing — the queue's name is made by Argus, so `save` it "+
+					"(\"save\": {\"q\": \"queue\"}) and read it with a consume on \"${saved.q}\"", st.Name)
+			}
+		case "queue_bind":
+			if strings.TrimSpace(st.Queue) == "" {
+				trig("step %q is an amqp `queue_bind` but declares no `queue`", st.Name)
+			} else if !st.Force && !declaredQueues[st.Queue] && !listenQueueRef(st.Queue, steps) {
+				trig("step %q would bind queue %q, which no `declare_queue` step in this chain declares — binding "+
+					"a live queue to another exchange can divert its messages; add a `declare_queue` step for it, or "+
+					"set `force: true` on this step to bind it anyway", st.Name, st.Queue)
+			}
+			if strings.TrimSpace(st.Exchange) == "" {
+				trig("step %q is an amqp `queue_bind` but declares no `exchange` — the default exchange (\"\") cannot be bound to a queue", st.Name)
+			}
+			if strings.TrimSpace(st.RoutingKey) == "" {
+				trig("step %q is an amqp `queue_bind` but declares no `routing_key`", st.Name)
 			}
 		case "exchange_delete":
 			if strings.TrimSpace(st.Exchange) == "" {

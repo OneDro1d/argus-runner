@@ -47,6 +47,7 @@ func scenariosDir(t *testing.T) string {
 
 func runDoctor(t *testing.T, args ...string) (doctor.Report, int, string) {
 	t.Helper()
+	noRouterState(t)
 	var rc int
 	out := captureStdout(t, func() { rc = cmdDoctor(args) })
 	var rep doctor.Report
@@ -86,11 +87,11 @@ func stubInstances(t *testing.T, ws string, rows []doctor.ExecutorStatus, err er
 	return rec
 }
 
-// currentExecutor is an executor with nothing to report: 0.3.44 against a 0.3.44 floor (it carries
-// every fix in doctor's knownFixes, the newest being #308 in 0.3.43).
+// currentExecutor is an executor with nothing to report: 0.3.68 against a 0.3.68 floor (it carries
+// every fix in doctor's knownFixes, the newest being #623 and #633 in 0.3.68).
 func currentExecutor() doctor.ExecutorStatus {
-	return sutReady(doctor.ExecutorStatus{InstanceID: "sut-demo", RunnerVersion: "0.3.44", VersionState: "current",
-		MinSupported: "0.3.0", MinRecommended: "0.3.44", RecommendedImage: "argus-executor@sha256:06dc0675"})
+	return sutReady(doctor.ExecutorStatus{InstanceID: "sut-demo", RunnerVersion: "0.3.68", VersionState: "current",
+		MinSupported: "0.3.0", MinRecommended: "0.3.68", RecommendedImage: "argus-executor@sha256:06dc0675"})
 }
 
 // sutReady gives a row the fresh "ready" SUT reading a current control plane publishes, for the tests
@@ -234,7 +235,7 @@ func TestDoctor_LoggedInMachineWarnsOnlyAboutTheMissingConfig(t *testing.T) {
 	if cred := checkByID(t, rep, "control-plane-credential"); cred.Status != doctor.StatusOK || !strings.Contains(cred.Subject, sess) {
 		t.Errorf("credential check = %+v; want ok, subject naming the session file", cred)
 	}
-	if ev := checkByID(t, rep, "executor-version"); ev.Status != doctor.StatusOK || !strings.Contains(ev.Subject, "sut-demo 0.3.44") {
+	if ev := checkByID(t, rep, "executor-version"); ev.Status != doctor.StatusOK || !strings.Contains(ev.Subject, "sut-demo 0.3.68") {
 		t.Errorf("executor-version = %+v; want ok, naming the executor and its version", ev)
 	}
 	if cpCall.calls != 1 || cpCall.cpURL != cp || cpCall.gotToken != tok {
@@ -385,7 +386,7 @@ func TestDoctor_ExecutorVersionUnreachableIsUnknown(t *testing.T) {
 	}
 }
 
-// REPLAY L0929:R4 (tester verify/2026-09-29-doctor-pr326-live/R4-wrong-token.out), live against argus-dev
+// REPLAY L0929:R4 (a tester's run), live against argus-dev
 // with PR #326's binary: a wrong odts_ value in ARGUS_CP_AUTHOR_TOKEN. The control plane answered 401, and doctor
 // said the credential was ok and that the fix for the executor list was "re-run argus doctor". Re-running changes
 // nothing; the credential is the fault, and the report must say so where the credential is checked.
@@ -460,8 +461,8 @@ func TestDoctor_ExecutorVersionOverHTTPIsReadOnly(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":"a workspace-bound token is required for the web"}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"workspace":"ws-1","instances":[{"instance_id":"sut-demo","runner_version":"0.3.44",` +
-			`"version_state":"current","min_supported_version":"0.3.0","min_recommended_version":"0.3.44","recommended_image":"x@sha256:d12a"}]}`))
+		_, _ = w.Write([]byte(`{"workspace":"ws-1","instances":[{"instance_id":"sut-demo","runner_version":"0.3.68",` +
+			`"version_state":"current","min_supported_version":"0.3.0","min_recommended_version":"0.3.68","recommended_image":"x@sha256:d12a"}]}`))
 	}))
 	defer srv.Close()
 
@@ -475,7 +476,7 @@ func TestDoctor_ExecutorVersionOverHTTPIsReadOnly(t *testing.T) {
 	if gotAuth != "Bearer "+tok {
 		t.Errorf("the session's access token was not the bearer")
 	}
-	if ev := checkByID(t, rep, "executor-version"); ev.Status != doctor.StatusOK || !strings.Contains(ev.Subject, "sut-demo 0.3.44") ||
+	if ev := checkByID(t, rep, "executor-version"); ev.Status != doctor.StatusOK || !strings.Contains(ev.Subject, "sut-demo 0.3.68") ||
 		!strings.Contains(ev.Subject, "workspace ws-1") {
 		t.Errorf("executor-version = %+v; want ok, naming workspace, executor and version", ev)
 	}
@@ -518,8 +519,8 @@ func TestDoctor_ExpiredSessionIsRenewedInMemory(t *testing.T) {
 				_, _ = w.Write([]byte(`{"error":"invalid credential"}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"workspace":"ws-1","instances":[{"instance_id":"sut-demo","runner_version":"0.3.44",` +
-				`"version_state":"current","min_supported_version":"0.3.0","min_recommended_version":"0.3.44"}]}`))
+			_, _ = w.Write([]byte(`{"workspace":"ws-1","instances":[{"instance_id":"sut-demo","runner_version":"0.3.68",` +
+				`"version_state":"current","min_supported_version":"0.3.0","min_recommended_version":"0.3.68"}]}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -641,7 +642,7 @@ func TestDoctor_FailedRenewalIsUnknownWithASignInFix(t *testing.T) {
 	}
 }
 
-// REPLAY L0929:docker (tester verify/2026-09-29-312-fix-check/NOTE.md § Addendum 2). On a Coder
+// REPLAY L0929:docker (a tester's run § Addendum 2). On a Coder
 // workspace with the docker CLI and no daemon, the fix said "with the update block the control plane
 // publishes" — a block that stops at its first `docker pull`. Doctor now asks the daemon, read-only.
 func TestDoctor_NoDockerDaemonSaysTheUpdateBlockCannotRunHere(t *testing.T) {
@@ -725,7 +726,7 @@ func writeTokenFile(t *testing.T, value string) string {
 	return p
 }
 
-// REPLAY B:66 end to end (handoffs/2026-09-25-hub-runner-window-mixup.md:19-20): a Tokens-page author
+// REPLAY B:66 end to end (a tester's notes): a Tokens-page author
 // PAT went out in the wrap meant for the builder. Checked before the hand-off, the file says what it is —
 // and neither prints the value nor presents it to anyone.
 func TestDoctor_TokenFileNamesWhatItHoldsBeforeTheHandOff(t *testing.T) {
@@ -763,8 +764,8 @@ func TestDoctor_TokenFileNamesWhatItHoldsBeforeTheHandOff(t *testing.T) {
 				t.Fatalf("the report echoes part of the token file's value (%q):\n%s", s, out)
 			}
 		}
-		if tf := checkByID(t, rep, "token-file"); tf.Status != doctor.StatusOK || !strings.Contains(tf.Detail, "runner__run accepts it") {
-			t.Errorf("token-file = %+v; want ok, runner__run accepts it", tf)
+		if tf := checkByID(t, rep, "token-file"); tf.Status != doctor.StatusOK || !strings.Contains(tf.Detail, "runner_run accepts it") {
+			t.Errorf("token-file = %+v; want ok, runner_run accepts it", tf)
 		}
 		if cpCall.gotToken != sessTok {
 			t.Errorf("the control plane was presented something other than the session's token: the token file must never leave the machine")
@@ -808,6 +809,7 @@ func TestDoctor_TokenForIsRefusedWithoutAFileOrWithAnUnknownSide(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			var rc int
+			noRouterState(t)
 			captureStdout(t, func() { rc = cmdDoctor(args) })
 			if rc != exitUsage {
 				t.Errorf("exit = %d, want exitUsage (%d)", rc, exitUsage)
@@ -888,7 +890,7 @@ const validScenario = "# Scenario: The cloud MCP returns a clean TOOL error over
 	`{"transport":"streamable-http","tool":"author__get_executor_status","args":{"instance_id":"onedroid-selftest-unknown"},"request_id":"${cid}"}` +
 	"\n```\n\n## EXPECT\n\n### Runnable\n- result.isError == true\n\n## TIMEOUT\n30s\n\n## CLEANUP\nN/A — read-only.\n"
 
-// oldFormatScenario is A:56's pack as it was: tester-upstream-notepad scenarios-v2/SYN-S0-002-liveness.md, lines
+// oldFormatScenario is A:56's pack as it was: a tester's scenario pack, lines
 // 1-23 verbatim (its References section left out), written for executor 0.3.30. 0.3.31 made the format a strict
 // contract and refuses it.
 const oldFormatScenario = "# Scenario: Hub dev answers its liveness probe\n\n" +

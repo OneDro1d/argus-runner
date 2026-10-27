@@ -278,6 +278,17 @@ func TestJudgeBuilderTools(t *testing.T) {
 	}
 }
 
+// AC-D68: the control plane now lists runner_X (one underscore); a runner-only list of the NEW names
+// must pass, or `argus session-init` refuses every builder token against a renamed control plane.
+func TestJudgeBuilderTools_OneUnderscoreNames(t *testing.T) {
+	if err := JudgeBuilderTools([]string{"runner_validate_config", "runner_run", "runner_get_report", "runner_get_dashboard_url", "runner_list_alerts"}); err != nil {
+		t.Errorf("runner_X list refused: %v", err)
+	}
+	if err := JudgeBuilderTools([]string{"runner_run", "author_write_scenario"}); err == nil {
+		t.Error("a builder token that sees an author tool was accepted")
+	}
+}
+
 func TestCountAuthorTools(t *testing.T) {
 	if n := CountAuthorTools([]string{"author_a", "author_b", "runner__run", "other"}); n != 2 {
 		t.Errorf("CountAuthorTools = %d", n)

@@ -57,56 +57,13 @@ func tk(id, phase, what, subject string, st doctor.Status, detail, fix string) d
 func testerChecks(o testerDoctorOpts) []doctor.Check {
 	var checks []doctor.Check
 	add := func(c doctor.Check) { checks = append(checks, c) }
-	const tokenWhat = "is the tester's control-plane token in the env file the session reads?"
-
-	if o.envFile == "" {
-		add(tk("tester-token", "P3", tokenWhat, "no home directory to find ~/.config/argus/tester.env", doctor.StatusFail, "pass --env-file", "argus doctor --tester --env-file <path>"))
-		return append(checks, skippedRest(o)...)
-	}
-	// which app: --app, else the only ARGUS_TESTER_TOKEN_* variable the file defines
-	app := o.app
-	names, nerr := sessioninit.TokenVarNames(o.envFile, "ARGUS_TESTER_TOKEN_")
-	if nerr != nil && !errors.Is(nerr, os.ErrNotExist) {
-		add(tk("tester-token", "P3", tokenWhat, o.envFile, doctor.StatusFail, "could not read it: "+nerr.Error(), ""))
-		return append(checks, skippedRest(o)...)
-	}
-	var varName string
-	switch {
-	case app != "":
-		up, _, err := sessioninit.AppNames(app)
-		if err != nil {
-			add(tk("tester-token", "P3", tokenWhat, "--app "+app, doctor.StatusFail, err.Error(), ""))
-			return append(checks, skippedRest(o)...)
-		}
-		varName = "ARGUS_TESTER_TOKEN_" + up
-	case len(names) == 1:
-		varName = names[0]
-	case len(names) == 0:
-		add(tk("tester-token", "P3", tokenWhat, o.envFile, doctor.StatusFail,
-			"the file defines no ARGUS_TESTER_TOKEN_<APP> variable (or does not exist)", "argus tester init <app>"))
-		return append(checks, skippedRest(o)...)
-	default:
-		add(tk("tester-token", "P3", tokenWhat, o.envFile, doctor.StatusFail,
-			"the file defines "+fmt.Sprint(len(names))+" tester tokens ("+strings.Join(names, ", ")+"): name the app with --app", "argus doctor --tester --app <app>"))
-		return append(checks, skippedRest(o)...)
-	}
-	set, _ := sessioninit.TokenSet(o.envFile, varName)
-	subject := varName + " in " + o.envFile
-	token := ""
-	switch {
-	case !set:
-		add(tk("tester-token", "P3", tokenWhat, subject, doctor.StatusFail, "not set (empty or absent)",
-			"paste your token into "+o.envFile+" after "+varName+"="))
-	case fileModeWide(o.envFile) != "":
-		add(tk("tester-token", "P3", tokenWhat, subject, doctor.StatusFail,
-			"is set, but the file mode is "+fileModeWide(o.envFile)+" — other users on this machine can read it", "chmod 600 "+o.envFile))
-	default:
-		add(tk("tester-token", "P3", tokenWhat, subject, doctor.StatusOK, "is set (yes; the value is never shown)", ""))
-		token, _ = sessioninit.ReadToken(o.envFile, varName)
-	}
+	// A failed token phase leaves token empty: the control-plane phases then SKIP on their own, and the
+	// kubectl phases still run — they need --kubeconfig, not the token (a tester's machine, 2026-10-07: a kubeconfig with
+	// no current-context went unreported because a missing tester.env skipped every phase).
+	token, varName := testerToken(o, add)
 
 	cp := o.cp
-	if cp == "" {
+	if cp == "" && o.envFile != "" {
 		cp, _ = sessioninit.ReadToken(o.envFile, "ARGUS_CP_URL")
 	}
 	if cp == "" {
@@ -231,20 +188,55 @@ func testerChecks(o testerDoctorOpts) []doctor.Check {
 	return checks
 }
 
-func skippedRest(o testerDoctorOpts) []doctor.Check {
-	var out []doctor.Check
-	for _, s := range []struct{ id, phase, what string }{
-		{"tester-tools", "P3", "does tools/list with this token return the author tools?"},
-		{"tester-workspace", "P3", "which workspace does this token belong to?"},
-		{"tester-cluster", "P4", "can kubectl reach the cluster the execution plane runs in?"},
-		{"tester-namespace", "P5", "does the instance's namespace exist?"},
-		{"tester-pullsecrets", "P5", pullSecretsWhat},
-		{"tester-executor", "P5", "is the executor registered and polling?"},
-		{"tester-executor-version", "P5", executorVersionWhat},
-	} {
-		out = append(out, tk(s.id, s.phase, s.what, "-", doctor.StatusSkip, "no token to work with (see tester-token)", ""))
+// testerToken is phase P3's token check: it adds tester-token and returns the token and the variable it
+// was read from, or "" for a token this run cannot use.
+func testerToken(o testerDoctorOpts, add func(doctor.Check)) (token, varName string) {
+	const tokenWhat = "is the tester's control-plane token in the env file the session reads?"
+	if o.envFile == "" {
+		add(tk("tester-token", "P3", tokenWhat, "no home directory to find ~/.config/argus/tester.env", doctor.StatusFail, "pass --env-file", "argus doctor --tester --env-file <path>"))
+		return "", ""
 	}
-	return out
+	// which app: --app, else the only ARGUS_TESTER_TOKEN_* variable the file defines
+	app := o.app
+	names, nerr := sessioninit.TokenVarNames(o.envFile, "ARGUS_TESTER_TOKEN_")
+	if nerr != nil && !errors.Is(nerr, os.ErrNotExist) {
+		add(tk("tester-token", "P3", tokenWhat, o.envFile, doctor.StatusFail, "could not read it: "+nerr.Error(), ""))
+		return "", ""
+	}
+	switch {
+	case app != "":
+		up, _, err := sessioninit.AppNames(app)
+		if err != nil {
+			add(tk("tester-token", "P3", tokenWhat, "--app "+app, doctor.StatusFail, err.Error(), ""))
+			return "", ""
+		}
+		varName = "ARGUS_TESTER_TOKEN_" + up
+	case len(names) == 1:
+		varName = names[0]
+	case len(names) == 0:
+		add(tk("tester-token", "P3", tokenWhat, o.envFile, doctor.StatusFail,
+			"the file defines no ARGUS_TESTER_TOKEN_<APP> variable (or does not exist)", "argus tester init <app>"))
+		return "", ""
+	default:
+		add(tk("tester-token", "P3", tokenWhat, o.envFile, doctor.StatusFail,
+			"the file defines "+fmt.Sprint(len(names))+" tester tokens ("+strings.Join(names, ", ")+"): name the app with --app", "argus doctor --tester --app <app>"))
+		return "", ""
+	}
+	set, _ := sessioninit.TokenSet(o.envFile, varName)
+	subject := varName + " in " + o.envFile
+	switch {
+	case !set:
+		add(tk("tester-token", "P3", tokenWhat, subject, doctor.StatusFail, "not set (empty or absent)",
+			"paste your token into "+o.envFile+" after "+varName+"="))
+	case fileModeWide(o.envFile) != "":
+		add(tk("tester-token", "P3", tokenWhat, subject, doctor.StatusFail,
+			"is set, but the file mode is "+fileModeWide(o.envFile)+" — other users on this machine can read it", "chmod 600 "+o.envFile))
+	default:
+		add(tk("tester-token", "P3", tokenWhat, subject, doctor.StatusOK, "is set (yes; the value is never shown)", ""))
+		token, _ = sessioninit.ReadToken(o.envFile, varName)
+	}
+
+	return token, varName
 }
 
 // testerInstance is the part of a GET /api/instances row the executor check reads.

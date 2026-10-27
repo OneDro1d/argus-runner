@@ -68,15 +68,7 @@ func ReadRunningContainers(ctx context.Context, cl *Client, ns string) ([]Runnin
 	if err := json.Unmarshal(body, &list); err != nil {
 		return nil, "pods response: " + err.Error()
 	}
-	var out []RunningContainer
-	for _, p := range list.Items {
-		if p.Status.Phase != "Running" || p.Metadata.DeletionTimestamp != "" {
-			continue
-		}
-		for _, c := range p.Status.ContainerStatuses {
-			out = append(out, RunningContainer{Pod: p.Metadata.Name, Container: c.Name, ImageID: c.ImageID})
-		}
-	}
+	out := runningFrom(list)
 	if len(out) == 0 {
 		return nil, fmt.Sprintf("no running pod found in namespace %s", ns)
 	}

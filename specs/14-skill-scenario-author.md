@@ -194,7 +194,7 @@ Goldens regenerate when the proposer's prompt template legitimately changes (man
 
 ### Ergonomics test (Phase 1 gating)
 
-A human (a tester/Bartek) drives the skill through 10 free-form requests. If 8+ ship to disk without escalation, the skill is ready. If <8, iterate the skill's prompt structure.
+A human tester drives the skill through 10 free-form requests. If 8+ ship to disk without escalation, the skill is ready. If <8, iterate the skill's prompt structure.
 
 ## Open questions
 

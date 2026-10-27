@@ -137,6 +137,8 @@ func cmdDoctor(args []string) int {
 	credIn.Renewed = exIn.Accepted && exIn.CredentialNote != ""
 	// What --config declares, for sut-reachable: with no targets there is nothing for the executor to probe.
 	exIn.ConfigTargets = cfg.Targets
+	// ...and how many hosts its scenarios dial that the probe behind a "ready" reading never dialled.
+	exIn.UnprobedHosts = len(cfg.Unprobed)
 	checks := []doctor.Check{
 		doctor.CheckCredential(credIn),
 		doctor.CheckLocalHats(doctor.HatsFromValues(os.Getenv("ARGUS_TOKEN"), os.Getenv("ARGUS_RUNNER_TOKEN"), envname.Lookup(envname.ExecutorSecret, envname.ExecutorSecretDeprecated))),
@@ -144,6 +146,8 @@ func cmdDoctor(args []string) int {
 		doctor.CheckScenarios(gatherScenarios(*scenarios, *scenarios == defaultScenariosDir, cfg.ProjectName)),
 		doctor.CheckExecutorVersion(exIn),
 		doctor.CheckSUTReachable(exIn),
+		// Local: the folders' wiring to the router and the port-forwards behind it (a tester's machine, 2026-10-07..09).
+		doctor.CheckRouterWiring(gatherRouter(*instance)),
 	}
 	if *tokenFile != "" {
 		cpForFix := *cp
@@ -416,6 +420,10 @@ func gatherConfig(path, scenarios string, validate bool) doctor.ConfigInput {
 		// the warnings validate-config prints, from the SAME function, so doctor can
 		// never call a config clean that validate-config warns about.
 		in.Warnings = toolcore.ConfigWarnings(c, scenarios, argusrun.RequestsEstimated(scenarios))
+		// a tester's machine, 2026-10-08: hosts chain steps dial by full URL, which the executor's SUT probe never dials.
+		for _, h := range toolcore.UnprobedChainHosts(c, scenarios) {
+			in.Unprobed = append(in.Unprobed, doctor.UnprobedHost{Addr: h.Addr, Scenarios: len(h.Scenarios), First: h.Scenarios[0]})
+		}
 	}
 	return in
 }

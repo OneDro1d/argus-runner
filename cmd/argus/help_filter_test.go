@@ -15,16 +15,15 @@ import (
 // positive as commandFlags is edited). For every OTHER command, none of these may appear in its
 // --help output.
 var foreignSampleFlags = map[string]string{
-	"addr":      "serve",
-	"scope":     "cloud-login",
-	"args":      "mcp-call",
-	"revoke":    "cloud-enroll",
-	"workspace": "cloud-switch-workspace",
-	"from":      "propose-scenario",
-	"replicas":  "render-k8s",
-	"summary":   "cloud-list-workspaces",
-	"path":      "write-scenario",
-	"commit":    "mark-deployment",
+	"addr":     "serve",
+	"scope":    "cloud-login",
+	"args":     "mcp-call",
+	"revoke":   "cloud-enroll",
+	"from":     "propose-scenario",
+	"replicas": "render-k8s",
+	"summary":  "cloud-list-workspaces",
+	"path":     "write-scenario",
+	"commit":   "mark-deployment",
 }
 
 // TestForeignSampleFlags_AreSingleOwner guards the guard: every flag in foreignSampleFlags must

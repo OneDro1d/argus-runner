@@ -11,7 +11,7 @@ import (
 // 2.0's basePath was already applied (TestSwagger2BasePath); the 3.x equivalent was dropped, so a
 // draft for Documenso v2.19.0's runtime spec (servers: [{url: http://localhost:3000/api/v2}]) read
 // `GET ${INGESTION_URL}/document`, a path that does not exist on the app
-// (tester verify/2026-10-01-documenso-native/propose-from-repo.out).
+// (a tester's run).
 func TestOpenAPI3ServersPathPrefixesRoutes(t *testing.T) {
 	cases := []struct {
 		name, servers, want string

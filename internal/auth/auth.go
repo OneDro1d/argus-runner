@@ -5,8 +5,8 @@
 // entry points (the CLI in cmd/argus and the MCP server in internal/mcpserver)
 // so the authorization boundary is enforced once, not duplicated.
 //
-//	ARGUS_RUNNER_TOKEN -> role.Product  (product-agent: runner__* scope only)
-//	ARGUS_EXECUTOR_SECRET, formerly ARGUS_AUTHOR_TOKEN -> role.Test  (test-agent: runner__* + author__* scope)
+//	ARGUS_RUNNER_TOKEN -> role.Product  (product-agent: runner_* scope only)
+//	ARGUS_EXECUTOR_SECRET, formerly ARGUS_AUTHOR_TOKEN -> role.Test  (test-agent: runner_* + author_* scope)
 //
 // It is safety-critical (VR-C8): a wrong answer here hands the holdout (author
 // scope) to the product agent. Fail-closed on no/unknown token; refuse to start

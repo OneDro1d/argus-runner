@@ -577,7 +577,7 @@ func TokenVarNames(path, prefix string) ([]string, error) {
 	return out, nil
 }
 
-// JudgeBuilderTools is the builder verification: a runner-scope token sees ONLY runner__* tools. It fails
+// JudgeBuilderTools is the builder verification: a runner-scope token sees ONLY runner_* tools. It fails
 // on an empty list (a token that sees nothing proves nothing) and on any tool outside the runner
 // namespace, naming what it saw — an author tool means the token carries author scope, which would let the
 // builder read the checks it is being tested against.
@@ -587,7 +587,9 @@ func JudgeBuilderTools(names []string) error {
 	}
 	var foreign []string
 	for _, n := range names {
-		if !strings.HasPrefix(n, "runner__") {
+		// AC-D68: "runner_" admits both runner_X (the control plane since the rename) and the older
+		// plane's runner__X.
+		if !strings.HasPrefix(n, "runner_") {
 			foreign = append(foreign, n)
 		}
 	}

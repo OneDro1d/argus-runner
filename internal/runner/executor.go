@@ -8,6 +8,7 @@ import (
 
 	"github.com/OneDro1d/argus-runner/internal/argus"
 	"github.com/OneDro1d/argus-runner/internal/config"
+	"github.com/OneDro1d/argus-runner/internal/fault"
 	"github.com/OneDro1d/argus-runner/internal/federation"
 	"github.com/OneDro1d/argus-runner/internal/updatecmd"
 )
@@ -22,7 +23,7 @@ type Executor struct {
 	Client *Client
 	Run    RunFunc
 	// Commands (AC-17), when set, executes a relayed builder command envelope through the same
-	// in-process code the local router's runner__* tools use (toolcore) — never a shell. nil = this
+	// in-process code the local router's runner_* tools use (toolcore) — never a shell. nil = this
 	// executor answers every relayed command with an error rather than dropping it silently (a
 	// deployment that never wired NewCommandFunc simply cannot serve the builder relay yet).
 	Commands      CommandFunc
@@ -68,6 +69,10 @@ type Executor struct {
 	// acknowledgement, so a control plane that is down when a run finishes no longer costs the
 	// ledger that run's results. nil → the old behaviour (retry a few times, then lose them).
 	Outbox *Outbox
+	// InFlight, when set, marks the run this executor is in the middle of: written when a run is
+	// picked up, removed once its results are queued or delivered. Loop reports a run it finds marked by a previous
+	// process of the same pod as ended with a reason (reportInterruptedRuns). nil = no markers, the old behaviour.
+	InFlight *InFlight
 	// AfterPush, when set, runs once after a results push the control plane ACCEPTED (never after a
 	// failed attempt, never before): ARGUS-CMP-3's retention of old compare outputs hangs here, so a run
 	// whose results never reached the ledger keeps every directory it could still be asked about.
@@ -88,6 +93,14 @@ type Executor struct {
 	// register: a config edited between polls (money_handling flipped on) must reach the control
 	// plane without a restart. "" → moneyHandlingFor reports nil (not reported), never false.
 	ConfigPath string
+
+	// FaultJournalDir is the undo journal a `fault` chain step writes before it applies
+	// anything (argus.FaultJournalDir of the run's results directory). Loop replays every entry a dead
+	// executor left in it BEFORE the first poll, so a fault is never carried across a restart. "" = no
+	// journal, nothing to replay. FaultKube / FaultToxi default to the in-cluster client and Toxiproxy over HTTP.
+	FaultJournalDir string
+	FaultKube       func() (fault.Kube, error)
+	FaultToxi       func(api string) fault.Toxi
 
 	// sutProbe is built ONCE in defaults() and reused, because the CADENCE lives inside it. A probe
 	// rebuilt per poll would have an empty `last` every time and dial the SUT on every return — the
@@ -153,6 +166,13 @@ func (e *Executor) defaults() {
 // is logged and never interrupts the run (the next tick re-arms; the watchdog cutoff spans several
 // intervals).
 func (e *Executor) startHeartbeat(ctx context.Context, runID, rrID, scope string) (stop func()) {
+	return e.startHeartbeatTally(ctx, runID, rrID, scope, nil)
+}
+
+// startHeartbeatTally is startHeartbeat whose pushes carry the run's counts so far: tally is the one the run
+// loop writes to (the caller hands the same value to the run through withTally). nil sends the old empty
+// heartbeat. The ticker only READS it (a mutex-guarded snapshot), so a slow run never waits on a push.
+func (e *Executor) startHeartbeatTally(ctx context.Context, runID, rrID, scope string, tally *argus.Tally) (stop func()) {
 	if e.Client == nil {
 		return func() {}
 	}
@@ -177,7 +197,7 @@ func (e *Executor) startHeartbeat(ctx context.Context, runID, rrID, scope string
 				return
 			case <-t.C:
 				pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
-				if err := e.Client.PushHeartbeat(pctx, runID, rrID, scope, started); err != nil {
+				if err := e.Client.PushHeartbeatTally(pctx, runID, rrID, scope, started, tally); err != nil {
 					e.log("heartbeat push failed (harmless; next tick re-arms): %v", err)
 				}
 				pcancel()
@@ -193,16 +213,21 @@ func (e *Executor) startHeartbeat(ctx context.Context, runID, rrID, scope string
 func (e *Executor) runCommands(ctx context.Context, cmds []federation.CommandEnvelope) {
 	for _, cmd := range cmds {
 		var result json.RawMessage
-		var errStr string
+		var cmdErr error
 		if e.Commands == nil {
-			errStr = "this executor is not wired to answer relayed commands"
+			cmdErr = errNotWired
 		} else if r, err := e.Commands(ctx, cmd.Verb, cmd.Args); err != nil {
-			errStr = err.Error()
+			cmdErr = err
+			// AC-F1: the control plane gets only Argus's own words for it; when that is not the whole error, the
+			// rest stays here, in this executor's own log.
+			if sent, full := commandErrorText(err), localDetail(err); sent != full {
+				e.log("relayed command %s (%s) failed: %s — the control plane is sent only %q", cmd.CommandID, cmd.Verb, full, sent)
+			}
 		} else {
 			result = r
 		}
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if perr := e.Client.CommandResult(cctx, cmd.CommandID, result, errStr); perr != nil {
+		if perr := e.Client.CommandResult(cctx, cmd.CommandID, result, cmdErr); perr != nil {
 			e.log("relayed command %s (%s) push failed (harmless; the builder's bounded wait expires): %v", cmd.CommandID, cmd.Verb, perr)
 		}
 		cancel()
@@ -213,6 +238,10 @@ func (e *Executor) runCommands(ctx context.Context, cmds []federation.CommandEnv
 // clock or a revoked registration self-heals via retry) — only ctx cancellation stops it.
 func (e *Executor) Loop(ctx context.Context) error {
 	e.defaults()
+	// put back whatever a fault step of a dead executor left broken, BEFORE taking work.
+	e.replayFaults(ctx)
+	// a run a previous process of this pod was in the middle of is reported as ended, with why.
+	e.reportInterruptedRuns(ctx)
 	// UC196: the autoscaler's scale-DOWN reconcile runs in the background (scale-UP is immediate via
 	// MarkActive at run pickup). One goroutine per process. Every replica runs it, which is safe ONLY
 	// because a scale-down consults the shared active lease on the Deployment (AC-D43, issue #207):
@@ -372,8 +401,15 @@ func (e *Executor) Loop(ctx context.Context) error {
 		if resp.Run.RunID == "" {
 			resp.Run.RunID = argus.NewRunID()
 		}
-		stopHB := e.startHeartbeat(ctx, resp.Run.RunID, resp.Run.RunRequestID, resp.Run.Scope)
-		push, rerr := e.Run(ctx, resp.Run)
+		// The run's live counts: the run loop writes them (through the ctx, to toolcore.Env.Tally), the
+		// heartbeat reads them. One per run, so nothing is shared between runs.
+		tally := argus.NewTally()
+		// marked BEFORE the run starts, removed when its results are safe (pushWithRetry).
+		if merr := e.InFlight.Begin(resp.Run.RunID, resp.Run.RunRequestID, resp.Run.Scope, resp.Run.SetHash, time.Now()); merr != nil {
+			e.log("WARNING: could not write the in-flight marker for run %s (%v) — if this process stops mid-run, the control plane will not be told why", resp.Run.RunID, merr)
+		}
+		stopHB := e.startHeartbeatTally(ctx, resp.Run.RunID, resp.Run.RunRequestID, resp.Run.Scope, tally)
+		push, rerr := e.Run(withTally(ctx, tally), resp.Run)
 		stopHB()
 		if e.Autoscale != nil {
 			e.Autoscale.MarkDone(ctx)
@@ -382,7 +418,7 @@ func (e *Executor) Loop(ctx context.Context) error {
 			// The run produced no push — close the request + release the fence NOW with a minimal
 			// terminal 'failed' (results stay local; a silent leak would otherwise hold the lock
 			// until the watchdog cutoff).
-			e.log("run failed: %v (pushing a minimal terminal 'failed' to close the request + release the fence)", rerr)
+			e.log("run failed: %s (pushing a minimal terminal 'failed' to close the request + release the fence)", localDetail(rerr))
 			now := time.Now().UTC()
 			e.pushWithRetry(ctx, federation.ResultsPush{
 				RunID: resp.Run.RunID, RunRequestID: resp.Run.RunRequestID, Scope: resp.Run.Scope,
@@ -396,7 +432,9 @@ func (e *Executor) Loop(ctx context.Context) error {
 				// their argus-config still had the pre-VR-E4 scalar public_url, and rerr said so
 				// precisely — "line 78: this field is now PER-TIER, not a single value. Replace ...".
 				// The control plane clamps the length; it never rejects the push for it.
-				FailureReason: rerr.Error(),
+				//
+				// AC-F1: Argus's own words only, never the app's (ownwords.go). The run error above is logged whole.
+				FailureReason: failureReason(rerr),
 			})
 			continue
 		}
@@ -436,9 +474,13 @@ func (e *Executor) pushWithRetry(ctx context.Context, push federation.ResultsPus
 	// BEFORE the first network call — the ordering is the guarantee.
 	if err := e.Outbox.Put(push); err != nil {
 		e.log("WARNING: could not queue results for run %s durably (%v) — this push is best-effort only", push.RunID, err)
+	} else if e.Outbox.enabled() {
+		// the results are safe on the volume, so the run is no longer "in the middle of" anything.
+		e.endInFlight(push.RunID)
 	}
 	for attempt := 0; attempt <= e.PushRetries; attempt++ {
 		if err := e.Client.Push(ctx, push); err == nil {
+			e.endInFlight(push.RunID) // delivered (also the case with no outbox)
 			e.log("pushed results for run %s (%d/%d passed)", push.RunID, push.Tallies.Passed, push.Tallies.Total)
 			if e.AfterPush != nil {
 				e.AfterPush(push) // ARGUS-CMP-3 retention: only after a push the control plane accepted

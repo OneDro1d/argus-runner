@@ -9,7 +9,7 @@ import (
 
 // DashboardLinkDecl returns the declared observability.dashboard_link template and label, trimmed ("" when
 // not declared). The label is returned as declared: the default ("Open dashboard") is applied where it is
-// shown, never stored. (, UI-2)
+// shown, never stored. (UI-2)
 func (c *Config) DashboardLinkDecl() (template, label string) {
 	return strings.TrimSpace(c.Observability.DashboardLink.Template), strings.TrimSpace(c.Observability.DashboardLink.Label)
 }
