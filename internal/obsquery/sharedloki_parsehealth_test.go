@@ -21,9 +21,9 @@ import (
 
 // The real line shape, measured against the shared Loki (content shortened; no value of a real line is kept).
 const (
-	plainWarn  = `10:06:24.852569 arb-engine WARN: [PollTick] skipping duplicate ack`
-	plainInfo  = `10:06:25.101113 arb-engine INFO: [PollTick] tick complete`
-	plainError = `10:06:26.000001 arb-engine ERROR: [Settle] order rejected`
+	plainWarn  = `10:06:24.852569 main-engine WARN: [PollTick] skipping duplicate ack`
+	plainInfo  = `10:06:25.101113 main-engine INFO: [PollTick] tick complete`
+	plainError = `10:06:26.000001 main-engine ERROR: [Settle] order rejected`
 	// the RE2 expression a plain-text instance declares as observability.loki.log_regex
 	plainRegex = `^(?P<time>\S+) (?P<service>\S+) (?P<level>[A-Z]+): `
 )
@@ -84,7 +84,7 @@ func (s *simShared) metricQueries() []string {
 }
 
 func arbStream(lines ...string) []simStream {
-	return []simStream{{labels: map[string]string{"cluster": "cluster-a", "namespace": "sut-ns", "container": "arb-engine", "pod": "arb-engine-0"}, lines: lines}}
+	return []simStream{{labels: map[string]string{"cluster": "cluster-a", "namespace": "sut-ns", "container": "main-engine", "pod": "main-engine-0"}, lines: lines}}
 }
 
 func plainSource() *SharedLogSource {
@@ -100,7 +100,7 @@ var (
 
 func levelQuery(t *testing.T, src *SharedLogSource, level string) string {
 	t.Helper()
-	q, err := src.SourceLogQL(map[string]string{"service": "arb-engine", "level": level}, "", "")
+	q, err := src.SourceLogQL(map[string]string{"service": "main-engine", "level": level}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestParseHealth_PlainTextLinesAgainstTheJSONFormatIsUnparsed(t *testing.T) 
 	}
 	// the probe is two metric queries over the SAME selector and the window, the parsed one with __error__
 	mq := sim.metricQueries()
-	sel := `{cluster="cluster-a",container="arb-engine",namespace="sut-ns"}`
+	sel := `{cluster="cluster-a",container="main-engine",namespace="sut-ns"}`
 	wantTotal := `sum(count_over_time(` + sel + ` [3600s]))`
 	wantParsed := `sum(count_over_time(` + sel + ` | json level="level" | __error__="" [3600s]))`
 	if !reflect.DeepEqual(mq, []string{wantTotal, wantParsed}) {
@@ -175,16 +175,16 @@ func TestParseHealth_NoProbeWhenItCannotMatter(t *testing.T) {
 	t.Run("a source query with no derived label has no parser stage", func(t *testing.T) {
 		sim := &simShared{streams: arbStream(plainInfo)}
 		l := &Loki{BaseURL: sim.server(t).URL, Shared: shSource()}
-		q, _ := l.SourceQuery(map[string]string{"service": "arb-engine"}, "no-such-text", "")
+		q, _ := l.SourceQuery(map[string]string{"service": "main-engine"}, "no-such-text", "")
 		read := l.ReadLogs(q, pwFrom, pwTo)
 		if read.Err != nil || read.Unparsed != nil || len(sim.metricQueries()) != 0 {
 			t.Fatalf("got %+v, %d metric queries", read, len(sim.metricQueries()))
 		}
 	})
 	t.Run("an own Loki is never probed", func(t *testing.T) {
-		sim := &simShared{streams: []simStream{{labels: map[string]string{"service": "arb-engine", "level": "info"}, lines: []string{plainInfo}}}}
+		sim := &simShared{streams: []simStream{{labels: map[string]string{"service": "main-engine", "level": "info"}, lines: []string{plainInfo}}}}
 		l := &Loki{BaseURL: sim.server(t).URL}
-		q, _ := SourceLogQL(map[string]string{"service": "arb-engine", "level": "error"}, "", "")
+		q, _ := SourceLogQL(map[string]string{"service": "main-engine", "level": "error"}, "", "")
 		read := l.ReadLogs(q, pwFrom, pwTo)
 		if read.Err != nil || read.Unparsed != nil || len(sim.metricQueries()) != 0 {
 			t.Fatalf("got %+v, %d metric queries", read, len(sim.metricQueries()))
@@ -268,7 +268,7 @@ func TestPlainTextRegex_ExtractsLevelAndServiceFromTheRealLineShape(t *testing.T
 			got[n] = m[i]
 		}
 	}
-	if got["level"] != "WARN" || got["service"] != "arb-engine" || got["time"] != "10:06:24.852569" {
+	if got["level"] != "WARN" || got["service"] != "main-engine" || got["time"] != "10:06:24.852569" {
 		t.Fatalf("extracted %v", got)
 	}
 	// and through LogQL: the generated `level=WARN` query selects the line, `| service=` selects it by the extracted group
@@ -277,28 +277,28 @@ func TestPlainTextRegex_ExtractsLevelAndServiceFromTheRealLineShape(t *testing.T
 	if got := simQuery(t, q, streams); !reflect.DeepEqual(got, []string{plainWarn}) {
 		t.Fatalf("level=WARN must select exactly the WARN line, got %v\nquery %s", got, q)
 	}
-	hand := `{cluster="cluster-a",namespace="sut-ns"} | regexp ` + strconv.Quote(plainRegex) + ` | service="arb-engine" | level="WARN"`
+	hand := `{cluster="cluster-a",namespace="sut-ns"} | regexp ` + strconv.Quote(plainRegex) + ` | service="main-engine" | level="WARN"`
 	if got := simQuery(t, hand, streams); !reflect.DeepEqual(got, []string{plainWarn}) {
-		t.Fatalf("extracted service=arb-engine and level=WARN must select the WARN line, got %v", got)
+		t.Fatalf("extracted service=main-engine and level=WARN must select the WARN line, got %v", got)
 	}
 }
 
 // (b) the LogQL generated for a level=error claim, json and plain text.
 func TestPlainTextRegex_GeneratedLogQL(t *testing.T) {
-	js, err := shSource().SourceLogQL(map[string]string{"service": "arb-engine", "level": "error"}, "", "")
+	js, err := shSource().SourceLogQL(map[string]string{"service": "main-engine", "level": "error"}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pt, err := plainSource().SourceLogQL(map[string]string{"service": "arb-engine", "level": "ERROR"}, "", "")
+	pt, err := plainSource().SourceLogQL(map[string]string{"service": "main-engine", "level": "ERROR"}, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("(a) json format:       %s", js)
 	t.Logf("(b) plain-text format: %s", pt)
-	if want := `{cluster="cluster-a",container="arb-engine",namespace="sut-ns"} | json level="level" | level="error"`; js != want {
+	if want := `{cluster="cluster-a",container="main-engine",namespace="sut-ns"} | json level="level" | level="error"`; js != want {
 		t.Errorf("json:\n got %s\nwant %s", js, want)
 	}
-	if want := `{cluster="cluster-a",container="arb-engine",namespace="sut-ns"} | regexp ` + strconv.Quote(plainRegex) + ` | level="ERROR"`; pt != want {
+	if want := `{cluster="cluster-a",container="main-engine",namespace="sut-ns"} | regexp ` + strconv.Quote(plainRegex) + ` | level="ERROR"`; pt != want {
 		t.Errorf("plain text:\n got %s\nwant %s", pt, want)
 	}
 }
@@ -341,8 +341,8 @@ func TestPlainTextRegex_ReadsAndJudgesLevel(t *testing.T) {
 func TestPlainTextRegex_NeverInventsAField(t *testing.T) {
 	src := plainSource() // groups: time, service, level
 	for _, labels := range []map[string]string{
-		{"service": "arb-engine", "correlation_id": shCID},
-		{"service": "arb-engine", "event_type": "saga"},
+		{"service": "main-engine", "correlation_id": shCID},
+		{"service": "main-engine", "event_type": "saga"},
 	} {
 		_, err := src.SourceLogQL(labels, "", "")
 		if err == nil || !strings.Contains(err.Error(), "log_regex has no (?P<") {

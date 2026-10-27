@@ -8,7 +8,7 @@ import (
 
 // #215: an executor whose results volume is not ReadWriteMany must not scale past one replica. The
 // extra pods land on other nodes and sit in ContainerCreating with a Multi-Attach error, measured
-// 2026-09-24 on argus-inst-shop-uni-arb (managed-csi, ReadWriteOnce): run 20260924T131700077 scaled
+// 2026-09-24 on argus-inst-shop-main (managed-csi, ReadWriteOnce): run 20260924T131700077 scaled
 // 1→3 and reported "1/3 replicas READY" for the whole run.
 func TestAC215_ActiveReplicasFollowTheResultsVolume(t *testing.T) {
 	cases := []struct {

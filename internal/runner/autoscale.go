@@ -311,7 +311,7 @@ func (a *Autoscaler) reconcile(ctx context.Context) {
 // scaleReason names WHY a replica count was chosen, from the STATE, never from the count. The count
 // cannot tell: with the #215 cap (or ARGUS_SCALE_ACTIVE) the active and idle floors can be equal, and
 // a count-based label logged a parked executor as "active/min-3" while it ran one replica with no run
-// in flight (argus-inst-shop-uni-arb and -shop-dev, 2026-09-24).
+// in flight (argus-inst-shop-main and -shop-dev, 2026-09-24).
 func scaleReason(active bool, activeN int) string {
 	if active {
 		return fmt.Sprintf("active, floor %d", activeN)

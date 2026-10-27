@@ -11,7 +11,7 @@ import (
 
 // The scale log names WHY a replica count was chosen. It used to pick its label by comparing the count
 // with the active floor, so once the #215 cap made both floors 1, a parked executor logged
-// "scaled to 1 replicas (active/min-3)" — seen live on argus-inst-shop-uni-arb and
+// "scaled to 1 replicas (active/min-3)" — seen live on argus-inst-shop-main and
 // argus-inst-shop-dev, 2026-09-24 16:05Z, with no run in flight. The label must come from the state.
 
 type logRec struct {

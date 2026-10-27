@@ -17,7 +17,7 @@ import (
 //
 // A shared Loki has no ingest-time labels, so `level` / `correlation_id` / `event_type` exist only if the query's
 // parser stage (`| json`, `| logfmt`, `| regexp`) can read the SUT's lines. Measured against the real shared Loki
-// (a hosted AKS cluster, shop-uni-arb): the SUT logs PLAIN TEXT (`10:06:24.852569 arb-engine WARN: [PollTick] ...`), so
+// (a hosted AKS cluster, shop-main): the SUT logs PLAIN TEXT (`10:06:24.852569 main-engine WARN: [PollTick] ...`), so
 // `| json` parsed ZERO of 9,521 lines in an hour. A `labels: {level: error}` claim with `count == 0` then reads zero
 // lines for a reason that has nothing to do with errors - the lines are there (so NoStream does not fire) but none
 // yields a level - and PASSES vacuously.

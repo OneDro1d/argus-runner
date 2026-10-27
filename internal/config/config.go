@@ -215,7 +215,7 @@ type Config struct {
 			// instance: an RE2 expression with NAMED groups, rendered as LogQL `| regexp "<expr>"`. The groups
 			// `level`, `correlation_id` and `saga_marker` are the labels the step claims read (a claim on a label
 			// whose group the expression lacks is refused, never invented); any other group is extracted but unused.
-			// Example for `10:06:24.852569 arb-engine WARN: [PollTick] ...`:
+			// Example for `10:06:24.852569 main-engine WARN: [PollTick] ...`:
 			//   '^(?P<time>\S+) (?P<service>\S+) (?P<level>[A-Z]+): '
 			// ONLY read when shared_cluster is set: the ingest-time pipelines (promtail, collect-logs) parse json|logfmt
 			// and have no regex stage, so it is refused without shared_cluster rather than silently ignored.

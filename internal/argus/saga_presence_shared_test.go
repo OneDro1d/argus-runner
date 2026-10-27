@@ -23,7 +23,7 @@ func sharedSagaConfig(t *testing.T) (c *config.Config, props map[string]string) 
 	cfg := sagaScenario(t)
 	cfg.Observability.Loki.URL = sharedSagaURL
 	cfg.Observability.Loki.SharedCluster = "cluster-a"
-	t.Setenv("ARGUS_SUT_NAMESPACE", "shop-uni-arb")
+	t.Setenv("ARGUS_SUT_NAMESPACE", "shop-main")
 	return cfg, sagaPropsFor(t, cfg)
 }
 
@@ -32,7 +32,7 @@ func TestSagaPresenceProps_SharedLokiSelectsClusterAndNamespaceOnTheConfiguredLo
 	if p["loki.url"] != sharedSagaURL {
 		t.Errorf("loki.url = %q, want the configured shared Loki %q", p["loki.url"], sharedSagaURL)
 	}
-	want := `{cluster="cluster-a",namespace="shop-uni-arb",container!~"` + obsquery.ObsInfraExclusion + `"}`
+	want := `{cluster="cluster-a",namespace="shop-main",container!~"` + obsquery.ObsInfraExclusion + `"}`
 	if p["loki.selector"] != want {
 		t.Errorf("loki.selector = %q\n want %q", p["loki.selector"], want)
 	}
@@ -57,7 +57,7 @@ func TestSagaPresenceProps_SharedLokiWithoutANamespaceIsRefusedNotFallenBack(t *
 
 // 3: an instance with its own Loki - the props are what they were, and no selector prop exists.
 func TestSagaPresenceProps_OwnLokiIsUnchanged(t *testing.T) {
-	t.Setenv("ARGUS_SUT_NAMESPACE", "shop-uni-arb") // set, and must make no difference
+	t.Setenv("ARGUS_SUT_NAMESPACE", "shop-main") // set, and must make no difference
 	p := sagaPropsFor(t, sagaScenario(t))
 	if p["loki.url"] != "http://loki:3100" {
 		t.Errorf("loki.url = %q, want the in-network bundled address", p["loki.url"])
@@ -105,7 +105,7 @@ func TestSagaPresenceTemplate_QueryAsSentToLoki(t *testing.T) {
 		}
 		mu.Lock()
 		defer mu.Unlock()
-		want := `{cluster="cluster-a",namespace="shop-uni-arb",container!~"` + obsquery.ObsInfraExclusion + `"} |= "` + sagaCID + `" |= "control_action"`
+		want := `{cluster="cluster-a",namespace="shop-main",container!~"` + obsquery.ObsInfraExclusion + `"} |= "` + sagaCID + `" |= "control_action"`
 		if len(queries) != 1 || queries[0] != want {
 			t.Fatalf("query sent by the template:\n got %q\nwant %q", queries, want)
 		}

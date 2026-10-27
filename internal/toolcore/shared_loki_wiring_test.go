@@ -23,28 +23,28 @@ const sharedBlock = `observability:
 `
 
 func TestLokiFor_SharedSourceFromConfigAndNamespace(t *testing.T) {
-	t.Setenv("ARGUS_SUT_NAMESPACE", "shop-uni-arb")
+	t.Setenv("ARGUS_SUT_NAMESPACE", "shop-main")
 	e := lokiCredEnv(t, sharedBlock)
 	e.Loki = "http://loki.observability.svc:3100/" // --loki IS the configured url (adopt)
-	e.ObsInstance = "shop-uni-arb"
+	e.ObsInstance = "shop-main"
 	l := lokiFor(e)
 	if l.Shared == nil {
 		t.Fatal("shared_cluster + adopt's --loki must give a shared source")
 	}
 	want := obsquery.SharedLogSource{
-		Cluster: "cluster-a", Namespace: "shop-uni-arb",
-		Constants: map[string]string{"argus_instance": "shop-uni-arb", "project": "t"},
+		Cluster: "cluster-a", Namespace: "shop-main",
+		Constants: map[string]string{"argus_instance": "shop-main", "project": "t"},
 		Format:    "logfmt", LevelField: "lvl", CorrelationField: "request_id", SagaField: "event", SagaMarkers: []string{"tool_dispatch", "ghost_dispatch"},
 	}
 	got := *l.Shared
 	if got.Cluster != want.Cluster || got.Namespace != want.Namespace || got.Format != want.Format || got.LevelField != want.LevelField ||
 		got.CorrelationField != want.CorrelationField || got.SagaField != want.SagaField || strings.Join(got.SagaMarkers, ",") != strings.Join(want.SagaMarkers, ",") ||
-		got.Constants["argus_instance"] != "shop-uni-arb" || got.Constants["project"] != "t" {
+		got.Constants["argus_instance"] != "shop-main" || got.Constants["project"] != "t" {
 		t.Fatalf("shared source:\n got %+v\nwant %+v", got, want)
 	}
 	// get_sagas / tail_logs use it too, so they cannot silently query the service label of a Loki that has none
 	q, err := l.CorrelationQuery("tr-1-S-aaaaaaaa", "", "")
-	if err != nil || !strings.HasPrefix(q, `{cluster="cluster-a",namespace="shop-uni-arb",`) {
+	if err != nil || !strings.HasPrefix(q, `{cluster="cluster-a",namespace="shop-main",`) {
 		t.Fatalf("got %q / %v", q, err)
 	}
 }
@@ -64,7 +64,7 @@ func TestLokiFor_SharedWithoutANamespaceStaysSharedAndBuildsNoQuery(t *testing.T
 
 // the executor reading ANOTHER Loki than the configured one gets no shared source (same guard as the credential)
 func TestLokiFor_NoSharedSourceForAnotherLoki(t *testing.T) {
-	t.Setenv("ARGUS_SUT_NAMESPACE", "shop-uni-arb")
+	t.Setenv("ARGUS_SUT_NAMESPACE", "shop-main")
 	e := lokiCredEnv(t, sharedBlock) // e.Loki = http://loki:3100
 	if lokiFor(e).Shared != nil {
 		t.Fatal("--loki is not the configured shared Loki: no shared source")
@@ -73,7 +73,7 @@ func TestLokiFor_NoSharedSourceForAnotherLoki(t *testing.T) {
 
 // 3: a config without shared_cluster - the common case - has no shared source, namespace or not.
 func TestLokiFor_OwnLokiHasNoSharedSource(t *testing.T) {
-	t.Setenv("ARGUS_SUT_NAMESPACE", "shop-uni-arb")
+	t.Setenv("ARGUS_SUT_NAMESPACE", "shop-main")
 	e := lokiCredEnv(t, "observability:\n  loki:\n    url: http://loki:3100\n")
 	l := lokiFor(e)
 	if l.Shared != nil {

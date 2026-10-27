@@ -15,7 +15,7 @@ func httpScenario(method, url string, cleanup Cleanup) *Scenario {
 var naCleanup = Cleanup{Blocks: []CleanupBlock{{Form: CleanupNA}}}
 
 func TestMoneyGuard_AllowsWhatTheLiveMoneyKitsRun(t *testing.T) {
-	// Every one of these is a TRIGGER the live shop-dev and shop-uni-arb kits run hourly today
+	// Every one of these is a TRIGGER the live shop-dev and shop-main kits run hourly today
 	// (two recorded runs, read
 	// 2026-09-24). Turning the guard on must not refuse a single one.
 	for _, u := range []string{
@@ -30,8 +30,8 @@ func TestMoneyGuard_AllowsWhatTheLiveMoneyKitsRun(t *testing.T) {
 		"https://shop-dev.example/api/admin/holdings",
 		"https://shop-dev.example/api/v1/portfolio-token-contracts",
 		"https://shop-dev.example/api/v1/user/balances",
-		"http://arb-engine.shop-uni-arb.svc.cluster.local:9090/metrics",
-		"http://control-plane.shop-uni-arb.svc.cluster.local:80/readyz",
+		"http://main-engine.shop-main.svc.cluster.local:9090/metrics",
+		"http://control-plane.shop-main.svc.cluster.local:80/readyz",
 	} {
 		if v := MoneyGuardViolations(httpScenario("GET", u, naCleanup), nil); len(v) != 0 {
 			t.Errorf("GET %s was refused: %v — a read the live kit relies on", u, v)

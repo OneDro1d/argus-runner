@@ -25,7 +25,7 @@ func vector(n int) func(w http.ResponseWriter) {
 // `labels: {level: error}` + `count == 0` must not pass on that.
 func TestLogsStep_SharedLokiUnparsedLinesAreNotZeroLines(t *testing.T) {
 	zero := logsClaims(t, "body has count == 0")
-	spec := LogsSpec{Scope: scenario.LogsScopeSource, Labels: map[string]string{"service": "arb-engine", "level": "error"}}
+	spec := LogsSpec{Scope: scenario.LogsScopeSource, Labels: map[string]string{"service": "main-engine", "level": "error"}}
 
 	t.Run("lines exist, none parse: error naming the format and the count, claim not judged", func(t *testing.T) {
 		// the query (empty), the bare-selector probe (a line), the total count, the parsed count
