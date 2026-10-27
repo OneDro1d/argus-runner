@@ -41,7 +41,9 @@ put on chain.
 You need an account on the hosted control plane at `https://argus-dev.onedroid.ai` (create one there: **Sign up**
 with e-mail, Google or Microsoft; it is the evaluation environment, with no promise that data is kept, so keep
 production data out of it), a workspace in it (step 2), and a Kubernetes cluster that can reach both your system
-and the control plane (the runner connects out only; it needs no inbound route). Stuck at any step? `argus doctor`
+and the control plane (the runner connects out only; it needs no inbound route). The steps below install on
+Kubernetes. Argus can also run under Docker Compose with no cluster, but that path needs the onboarding kit,
+which this repository does not ship (see the note after step 5). Stuck at any step? `argus doctor`
 is read-only and prints, for each thing a first run would trip over, the command that fixes it.
 
 1. **Get the runner.**
@@ -107,8 +109,10 @@ argus certificate verify cert.json --rpc <ethereum json-rpc url> [--chains chain
 
 `verify` never contacts the control plane. `--rpc` is your own chain client; `--chains` is your own copy of the
 chains' allowed signers (without it, each anchor is only checked against the signer it declares); `--btc-headers`
-is a block-explorer URL or a local file for OpenTimestamps receipts. Exit code 0 means every anchor read back and
-matched; see `docs/CERTIFICATE.md` for the format and the exact checks.
+is a block-explorer URL or a local file for OpenTimestamps receipts. Exit code 0 means no check mismatched and at
+least one of the run's verdict anchors read back and matched. An anchor that is unreachable or still pending (an
+OpenTimestamps receipt not yet in a block) does not fail it; each anchor's status is printed. See
+`docs/CERTIFICATE.md` for the format and the exact checks.
 
 ## Check a reveal, and replay a revealed scenario
 
