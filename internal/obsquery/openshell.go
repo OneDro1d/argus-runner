@@ -189,7 +189,7 @@ func (o *ocsfLine) downgraded() bool {
 
 // kept: Denied (action_id 2 or action "Denied"), Blocked (disposition), or a finding (class 2004) —
 // spec 26 §4 as corrected by C7; class 0 (EVENT) is kept when it carries a denial. DNS-failure
-// denials are kept in P1, which observes; P2 decides whether they count (, C8).
+// denials are kept in P1, which observes; P2 decides whether they count (C8).
 func (o *ocsfLine) kept() bool {
 	return (o.ActionID != nil && *o.ActionID == 2) ||
 		strings.EqualFold(o.Action, "Denied") ||
@@ -548,7 +548,7 @@ func SandboxPolicyFor(read SandboxRead, sandbox string, w ScenarioWindow, neighb
 		p.Coverage = report.CoverageUnavailable
 		p.CoverageReason = fmt.Sprintf("%d lines matched the sandbox id but are not OCSF JSON (a shorthand source?); A1 reads OCSF JSONL only", unparsed)
 	case attributed == 0:
-		// The liveness rule (, finding A6): Loki answers a selector that matches nothing with
+		// The liveness rule (finding A6): Loki answers a selector that matches nothing with
 		// HTTP 200 and an empty result, so an empty window can never read as "no denials".
 		p.Coverage = report.CoverageUnavailable
 		p.CoverageReason = fmt.Sprintf("no line from sandbox %s between %s and %s: a wrong selector, a wrong sandbox id, a schema downgrade, an idle sandbox or lost lines; Argus cannot tell these apart", sandbox, stamp(w.From), stamp(w.To))

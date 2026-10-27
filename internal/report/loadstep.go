@@ -1,6 +1,6 @@
 package report
 
-// loadstep.go -- the per-step record of an `AMQP Load` ramp (, design DESIGN-AMQP §4.1).
+// loadstep.go -- the per-step record of an `AMQP Load` ramp (design DESIGN-AMQP §4.1).
 //
 // ⛔ THE SHAPE IS FROZEN. PR-E builds the wire column, the ledger store, author_get_run_status and the
 // Pushgateway families AGAINST these field names; renaming or re-typing one breaks a PR that is being

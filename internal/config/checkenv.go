@@ -24,7 +24,7 @@ import (
 //
 // ⚠ DELIVERY, NOT USE. This list decides what onboarding DELIVERS to the executor. It does not restrict
 // what a check may substitute: resolveVars (internal/argus/mcp_scenario.go) fills ANY name set in the
-// executor's environment, declared or not (, OPEN).
+// executor's environment, declared or not (OPEN).
 // ⛔ TOP-LEVEL, never under `targets`, for the reason load_allowed_targets is: `targets` is decoded
 // strictly, so an executor built before this key would refuse it there. A top-level key falls into an
 // older executor's lenient inline map and is IGNORED -- silently, which is why the docs say to upgrade

@@ -1,6 +1,6 @@
 package argus
 
-// cmp11_test.go -- ARGUS-CMP-11 (, -17): the executor half of tolerance values, load numbers and the
+// cmp11_test.go -- ARGUS-CMP-11 (-17): the executor half of tolerance values, load numbers and the
 // target of a comparison member. The REAL run loop (RunAllWithTarget) over real scenario files; the SUT is an httptest
 // server (chain http steps) or a fake JMeter Runner that writes the .jtl and the capture side files (the JMX itself is
 // not run here).

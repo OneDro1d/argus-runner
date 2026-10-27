@@ -282,7 +282,7 @@ type Config struct {
 			PublicURL         TierMap `yaml:"public_url"`
 			DashboardTemplate string  `yaml:"dashboard_template"` // bundled dashboard path (informational) — COMMON, same everywhere
 		} `yaml:"grafana"`
-		// DashboardLink (, UI-2, A'1) is an operator-set link template for ANY tool
+		// DashboardLink (UI-2, A'1) is an operator-set link template for ANY tool
 		// (Grafana, Zabbix, Datadog, an internal page). The control plane renders it per run, so the
 		// link works for every past run the moment it is declared. Lenient on purpose, like everything
 		// under `observability:`: an older executor ignores the key. Validated in full at load time
@@ -347,7 +347,7 @@ type Config struct {
 	// strictly and would refuse a new key there; a top-level key falls into its lenient inline map and
 	// is ignored). Absent / empty / a name not listed = no target allows load: the default.
 	LoadAllowedTargets map[string]LoadAllow `yaml:"load_allowed_targets"`
-	// TestTargets (, UI-6) declares the named slices of ONE instance's checks — e.g. `live`
+	// TestTargets (UI-6) declares the named slices of ONE instance's checks — e.g. `live`
 	// (namespace msgbus) and `lab` (msgbus-lab) — with the scenario prefixes / tags that map a check to
 	// each. TOP-LEVEL, never under the strict `targets:` block (an older executor would refuse the whole
 	// config there); a top-level key is simply ignored by an older executor. NOT the connection
@@ -1139,7 +1139,7 @@ func parseConfig(b []byte, path string) (*Config, error) {
 	if err := c.TestTargets.Validate(); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	// observability.dashboard_link (, UI-2): absolute http(s), no userinfo, no ${VAR}, the
+	// observability.dashboard_link (UI-2): absolute http(s), no userinfo, no ${VAR}, the
 	// six placeholders only, <= 2048 bytes -- load time IS validate time.
 	if err := c.validateDashboardLink(); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)

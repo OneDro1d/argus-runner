@@ -358,7 +358,7 @@ func resolveTierGrafana(e *toolcore.Env) {
 // grafanaResolution is the decision resolveTierGrafana makes, pure so it is testable: the Grafana base
 // for this tier ("" = none: absence, not a lie) and the event to emit, if any.
 //
-// UI-2 (, A'2): an environment that declares observability.dashboard_link.template needs
+// UI-2 (A'2): an environment that declares observability.dashboard_link.template needs
 // no Grafana base -- its links are rendered by the control plane from the template -- so for it the
 // missing base is an {"info"}, not the {"warn": "no dashboard link will be produced"} that is true only
 // of an environment with neither.

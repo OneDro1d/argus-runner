@@ -17,7 +17,7 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/obsquery"
 )
 
-// #419 (, reported by Talos, Bartek's agent) — saga-presence judges PARSED FIELDS OF
+// #419 (reported by a tester's agent) — saga-presence judges PARSED FIELDS OF
 // ONE LINE, with the SUT's DECLARED names.
 //
 // It used to pass on `body.contains("control_action")` over the WHOLE Loki response, after finding

@@ -63,7 +63,7 @@ type Step struct {
 	// a later step's connection dropped. It is recorded as ran-after-failure, never as the named cause.
 	Always bool
 	// RequiresEarlierPass marks a step whose verdict is only meaningful when the SUT demonstrably
-	// answered earlier in the SAME chain (, the `unreachable` claim): it is judged only
+	// answered earlier in the SAME chain (the `unreachable` claim): it is judged only
 	// if an earlier step PASSED, else it is `not-measured` and never fired — a dead cluster must not
 	// pass every negative check.
 	RequiresEarlierPass bool

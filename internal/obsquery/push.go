@@ -163,7 +163,7 @@ func pruneOldGroups(gwURL, instance, currentRun string, retention time.Duration)
 	}
 }
 
-// writeLoadStepFamilies adds the argus_load_step_* families for an AMQP Load run (, design
+// writeLoadStepFamilies adds the argus_load_step_* families for an AMQP Load run (design
 // 4.3): one series per step, labelled like every other family here (argus_instance, project, cluster,
 // scenario_id) plus `step`. Nothing but numbers and two closed label sets leaves: `quantile` (0.5, 0.75,
 // 0.95, 0.99) and `code` (the closed error-class set). NO broker URL, host, user, password or target name

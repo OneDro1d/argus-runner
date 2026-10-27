@@ -308,7 +308,7 @@ type ScenarioResult struct {
 	// windowed-delta comparison, not part of the report contract.
 	LoadWindowStartMs, LoadWindowEndMs int64 `json:"-"`
 
-	// LoadDriver / LoadTarget / LoadSteps (, design §4.1) are an `AMQP Load` ramp's result:
+	// LoadDriver / LoadTarget / LoadSteps (design §4.1) are an `AMQP Load` ramp's result:
 	// "amqp", the NAME of the load target (never its URL), and one record per step. omitempty on all
 	// three keeps every other scenario's bytes -- and therefore its evidence hash -- unchanged.
 	LoadDriver string     `json:"load_driver,omitempty"`
@@ -432,7 +432,7 @@ type LoadStats struct {
 	Errors          []LoadError  `json:"errors,omitempty"`
 	TimelineBucketS int          `json:"timeline_bucket_s,omitempty"`
 	Timeline        []LoadBucket `json:"timeline,omitempty"`
-	// GeneratorCPUThrottledShare / GeneratorNotMeasured (, #615): the executor's own cgroup CPU
+	// GeneratorCPUThrottledShare / GeneratorNotMeasured (#615): the executor's own cgroup CPU
 	// throttling during this run, as on LoadStep. RECORD ONLY here: the plain check's verdict is unchanged.
 	GeneratorCPUThrottledShare *float64 `json:"generator_cpu_throttled_share,omitempty"`
 	GeneratorNotMeasured       bool     `json:"generator_not_measured,omitempty"`

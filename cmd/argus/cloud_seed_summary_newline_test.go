@@ -7,7 +7,7 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/onboard"
 )
 
-// TestPrintSeedSummary_EmitsRealNewlines (, reported by Talos, Bartek's agent, from a
+// TestPrintSeedSummary_EmitsRealNewlines (reported by a tester's agent, from a
 // Windows run): the summary was written with a doubled backslash, so the operator saw a literal
 // backslash-n where the line should end, everything on one line. The older seed tests look for
 // substrings, which a literal backslash-n satisfies.

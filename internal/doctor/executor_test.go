@@ -65,7 +65,7 @@ func TestCheckExecutorVersion_Replay(t *testing.T) {
 			asked(exec0336("sut-demo")), []string{"AC-D27", "unexecuted"}, []string{"0.3.37"}},
 		{"B:38", `the tester notes "The CP RECOMMENDS sha256:d7aff596… = 0.3.32, OLDER than ours"`,
 			asked(exec0336("sut-demo")), []string{"0.3.32", "NEWER", "DOWNGRADE", "d7aff596"}, []string{"do not run", "update block"}},
-		{"B:56", `verify/2026-09-23-hub-tester/ONBOARD-HUB-PIOTR.md:103 (recurrence of B:38)`,
+		{"B:56", `verify/2026-09-23-hub-tester/ONBOARD-HUB.md:103 (recurrence of B:38)`,
 			asked(exec0336("hub-tester")), []string{"0.3.32", "DOWNGRADE"}, []string{"do not run"}},
 		{"B:60", `handoffs/2026-09-24-hub-harness-up-9of12-green.md:42 "Never run the CP's update_command" (recurrence of B:38)`,
 			asked(exec0336("hub-tester")), []string{"0.3.32", "DOWNGRADE"}, []string{"do not run"}},
@@ -211,7 +211,7 @@ func TestCheckExecutorVersion(t *testing.T) {
 			t.Fatalf("got %+v", c)
 		}
 	})
-	// (, reported by Talos from a Windows run): the control plane still
+	// (reported by a tester from a Windows run): the control plane still
 	// gives work to an executor it cannot rank, so doctor must not call that blocking.
 	t.Run("a version nobody can rank is a warning, with the control plane's reason and what to do", func(t *testing.T) {
 		for _, ver := range []string{"0.0.0-src+abc", "0.0.0-dev", "not-a-version", ""} {

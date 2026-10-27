@@ -22,7 +22,7 @@ import (
 	"github.com/OneDro1d/argus-runner/internal/scenario"
 )
 
-// amqpload_run.go -- the `AMQP Load` run loop (, design §2.D.4) and S9's door in the run
+// amqpload_run.go -- the `AMQP Load` run loop (design §2.D.4) and S9's door in the run
 // path.
 //
 // One JMeter run PER STEP (templates/amqp-load.jmx): the sampler's per-session connections live until the

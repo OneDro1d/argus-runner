@@ -32,7 +32,7 @@ var statusDeclRe = regexp.MustCompile(`(?i)^\s*status(2)?\s*[=:]\s*([1-5][0-9][0
 // statusTwoCodesRe finds a declared status (`status=`/`status2=`) whose code is followed — after optional
 // spaces — by `/`, `,`, `|` or the word `or` and then ANOTHER 3-digit code.
 //
-// (Talos acceptance v2, Bartek): statusDeclRe ends in `\b`, which matches before `/`, `,`,
+// (a tester's acceptance run): statusDeclRe ends in `\b`, which matches before `/`, `,`,
 // `|` and a space, so `status=200/201` was read as the declaration `status=200` and the 201 vanished — no
 // error, the run judged 200 alone. This is the shape, and ONLY this shape: `status=201 and the body has an
 // id` or `status=200, the body has an id` carry no second code and keep working. The second code must be a

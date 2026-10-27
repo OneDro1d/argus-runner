@@ -221,7 +221,7 @@ func TestSandboxPolicy_ReadErrorIsUnavailableNeverClean(t *testing.T) {
 	}
 }
 
-// The liveness rule (, finding A6): Loki answers a dead selector with HTTP 200 and nothing.
+// The liveness rule (finding A6): Loki answers a dead selector with HTTP 200 and nothing.
 func TestSandboxPolicy_NoLineIsUnavailable(t *testing.T) {
 	p := SandboxPolicyFor(readOf(), sb, winA, nil)
 	if p.Coverage != report.CoverageUnavailable || !strings.Contains(p.CoverageReason, "no line from sandbox sb-1 between") {

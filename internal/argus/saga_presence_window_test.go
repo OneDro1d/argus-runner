@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// (Talos acceptance v2, Bartek) — THE SAGA-PRESENCE QUERY WINDOW'S END WAS FIXED BEFORE
+// (a tester's acceptance run) — THE SAGA-PRESENCE QUERY WINDOW'S END WAS FIXED BEFORE
 // THE CHECK WAITED.
 //
 // templates/saga-presence.jmx computed `endNs = now` once, THEN slept settle_ms, THEN polled with

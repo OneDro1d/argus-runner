@@ -2,7 +2,7 @@ package main
 
 // cloud_seed_reporting_test.go — VR10-S4-6/7/9 (V28-006): AN IMPORT NEVER DROPS A FILE IN SILENCE.
 //
-// Measured by Bartek on a real onboarding run against Memstore dev, 2026-09-01: 46 of 50 scenarios
+// Measured by a tester on a real onboarding run against Memstore dev, 2026-09-01: 46 of 50 scenarios
 // materialized. Four were refused and the operator was told NOTHING — not the names, not the reason,
 // and not even that fifty had been offered. A missing test cannot fail, so the run went green: the
 // absence of a test looked like the absence of a problem, at the exact moment people trust the tool

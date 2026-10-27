@@ -111,7 +111,7 @@ type Principal struct {
 	Workspace string
 	Subject   string
 	// OwnerWide marks the ONE principal shape that is a builder without a workspace: an owner-wide
-	// builder PAT (, runner scope, workspace NULL). It is set ONLY by the control plane's
+	// builder PAT (runner scope, workspace NULL). It is set ONLY by the control plane's
 	// PAT authenticator (cloudauth.go), and isBuilder additionally needs a Subject with it. It is a marker
 	// rather than "Subject != empty" on purpose: the local router builds Product-hat principals with a
 	// Subject (the router token) and no workspace (router/proxy.go), and an own-OAuth runner token may

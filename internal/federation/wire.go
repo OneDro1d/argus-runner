@@ -78,14 +78,14 @@ type RegisterRequest struct {
 	// simply declares no money_writes block reports an EXPLICIT "[]", never nil — see
 	// runner.moneyWritesAllowFor's own doc for why that distinction matters.
 	MoneyWritesAllow json.RawMessage `json:"money_writes_allow,omitempty"`
-	// TestTargets (, UI-6) is the executor's own `test_targets` declaration, JSON-encoded
+	// TestTargets (UI-6) is the executor's own `test_targets` declaration, JSON-encoded
 	// (internal/testtargets). NOT DeclaredTargets above (the SUT's CONNECTION targets). nil means NOT
 	// REPORTED — an executor older than this change, or a config that failed to load — which the control
 	// plane stores as "leave what you have"; an EXPLICIT "[]" is a real report of "none declared" and
 	// overwrites. The same carrier rule as MoneyWritesAllow, and it rides every PollRequest too.
 	// An older control plane has no such field and drops it (no DisallowUnknownFields on the wire).
 	TestTargets json.RawMessage `json:"test_targets,omitempty"`
-	// DashboardLinkTemplate / DashboardLinkLabel (, UI-2) are the executor's own
+	// DashboardLinkTemplate / DashboardLinkLabel (UI-2) are the executor's own
 	// observability.dashboard_link block. THREE-VALUED, so *string: nil = NOT REPORTED (an executor older
 	// than this change, or a config that failed to load) and the control plane leaves what it has; a
 	// pointer to "" = REPORTED NONE (the block was removed from the config) and clears. The same carrier

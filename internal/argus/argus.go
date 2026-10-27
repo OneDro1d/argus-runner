@@ -1095,7 +1095,7 @@ func runOneScenarioWithLogs(c *config.Config, sf scenarioFile, corr, resultsDir 
 			return *refused
 		}
 
-		// ARGUS-CMP-3 (, design 11.2 item 4) — A `## COMPARE` THIS EXECUTOR CANNOT HONOUR IS
+		// ARGUS-CMP-3 (design 11.2 item 4) — A `## COMPARE` THIS EXECUTOR CANNOT HONOUR IS
 		// NOT RUN, AT THE SAME LAST DOOR. In mode `compare` only: a section with a problem, a key this
 		// executor does not know, or a key from a newer release is `error` "refused before firing", and
 		// nothing is fired. In every other mode the section is inert and the check runs exactly as before.

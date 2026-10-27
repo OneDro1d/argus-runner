@@ -143,11 +143,11 @@ func TestGate2_RenderBlock_WindowsKitPathRendersTheWindowsForm(t *testing.T) {
 	}
 	// POSIX kit dir: no MSYS_NO_PATHCONV, and both spellings are the path as stored.
 	pblock, _ := RenderBlock(Instance{Tier: "managed", InstanceID: "i", Image: "img",
-		KitDir: "/home/bartek/kit", KubeContext: "example-overlay"})
+		KitDir: "/home/tester/kit", KubeContext: "example-overlay"})
 	if strings.Contains(pblock, "MSYS_NO_PATHCONV") {
 		t.Errorf("a POSIX kit dir rendered the Windows form:\n%s", pblock)
 	}
-	if !strings.Contains(pblock, "KIT_U='/home/bartek/kit'") || !strings.Contains(pblock, `bash "$STAGE_U/apply.sh"`) {
+	if !strings.Contains(pblock, "KIT_U='/home/tester/kit'") || !strings.Contains(pblock, `bash "$STAGE_U/apply.sh"`) {
 		t.Errorf("the POSIX form does not run the staged scripts from the path as stored:\n%s", pblock)
 	}
 }

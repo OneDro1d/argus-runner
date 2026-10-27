@@ -5,8 +5,8 @@ own, and the **`argus` command line** a tester uses, including `argus certificat
 who holds a OneDroid Argus certificate check it against the chain without trusting OneDroid.
 
 OneDroid Argus is an end-to-end test and certification service. You describe checks for your system as
-scenario files. The runner executes them next to your system (HTTP, database state, message flow, load, web UI)
-and reports to a control plane. The control plane keeps the registry, signs, and anchors results on a public
+scenario files. The runner executes them next to your system (HTTP, database state, message flow, log lines, load, web UI,
+and faults you allow it to inject: a stopped deployment, a slow or cut connection) and reports to a control plane. The control plane keeps the registry, signs, and anchors results on a public
 chain. **The control plane is a hosted service and is not in this repository.**
 
 Licence: MIT (see `LICENSE`). The AMQP sampler under `jmeter-plugins/amqp` keeps its own Apache-2.0 licence file.
@@ -94,8 +94,9 @@ is read-only and prints, for each thing a first run would trip over, the command
    endpoint, `https://argus-dev.onedroid.ai/mcp`). Use `argus doctor` when a command is refused: it is read-only
    and tells you what the machine would trip over.
 
-Not in this repository: the onboarding kit (`argus up`, `argus init`, `argus update` and the compose/k3d scripts
-they drive) is not shipped here, so those commands will not work from this build. Use the steps above.
+The commands `argus up`, `argus init` and `argus update` are in this build, but the onboarding kit they drive
+(`onboarding/onboard.sh` and the compose and k3d scripts) is not shipped here: `argus init` stops with "no
+onboarding bundle", and `argus up` with "could not find onboarding/onboard.sh". Use the steps above.
 
 ## Verify a certificate
 
@@ -109,6 +110,25 @@ chains' allowed signers (without it, each anchor is only checked against the sig
 is a block-explorer URL or a local file for OpenTimestamps receipts. Exit code 0 means every anchor read back and
 matched; see `docs/CERTIFICATE.md` for the format and the exact checks.
 
+## Check a reveal, and replay a revealed scenario
+
+After a certified run, its author can reveal the sealed scenarios. The reveal document holds every sealed scenario,
+the Merkle proofs that tie each one to the set anchored before the run, and the run's anchors. Whoever the author
+gives it to can check it, and re-run any scenario in it, without a OneDroid account and without contacting OneDroid:
+
+```sh
+argus anchor verify reveal.json --rpc <ethereum json-rpc url> --btc-headers <url-or-file>
+argus replay <scenario id> --reveal reveal.json --against sha256:<digest> --config <your argus-config.yaml>
+```
+
+`anchor verify` recomputes the sealed set's Merkle root and every scenario's inclusion proof, recomputes the evidence
+bundle hash, and reads each anchor back through your own chain client (or checks its OpenTimestamps receipt against
+your own Bitcoin header source). Each check prints VERIFIED, MISMATCH, UNREACHABLE or PENDING; exit 0 needs no
+MISMATCH and at least one verified verdict anchor. `replay` runs one revealed scenario against a deployment you run
+yourself and compares your outcome with the verdict the reveal declares. `--against` must be the artefact digest the
+reveal certified (it is refused otherwise), so you replay the same build. Anchors on a private chain (for example
+`argus-dev-poa`) read as UNREACHABLE from outside: the public check is Base Sepolia and Bitcoin.
+
 ## What is here
 
 | Path | What |
@@ -116,6 +136,7 @@ matched; see `docs/CERTIFICATE.md` for the format and the exact checks.
 | `cmd/argus` | the CLI: scenario and config validation, cloud sign-in and enrollment, `render-k8s`, `doctor`, `certificate`, the runner (`serve --mode runner`) |
 | `internal/runner`, `internal/argus`, `internal/toolcore` | the executor: federation poll loop, scenario execution, results |
 | `internal/certificate`, `internal/chainread` | the certificate format and the read-only chain reader behind `certificate verify` |
+| `internal/reveal` | the reading side of a reveal document: `anchor verify` and `replay` (it assembles nothing and writes no chain) |
 | `templates/` | the JMeter templates the runner drives |
 | `jmeter-plugins/amqp` | the AMQP JMeter sampler (Java) |
 | `testkit/ui` | the Playwright harness for Web UI scenarios |
@@ -124,8 +145,10 @@ matched; see `docs/CERTIFICATE.md` for the format and the exact checks.
 
 ## What is deliberately not here
 
-The control plane and its store, the web UI, anything that signs, writes to a chain or holds a key, reveal
-document assembly and replay, deployment overlays and secrets for any hosted environment, and the onboarding kit.
+The control plane and its store, the web UI, anything that writes to a chain or holds a chain key, reveal document
+assembly (checking a reveal and replaying it ARE here, see above), deployment overlays and secrets for any hosted
+environment, and the onboarding kit. The executor does sign its own requests to the control plane, with its own
+instance key.
 `argus serve --mode control` is refused in this build.
 
 ## Build and test

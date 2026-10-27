@@ -7,7 +7,7 @@ package main
 // then tells the operator to "open the web Scenarios page" to find out what failed — sending them to
 // look for information the script had in hand and discarded.
 //
-// That is the hop the measured defect lives on. Bartek's onboard printed
+// That is the hop the measured defect lives on. The tester's onboard printed
 //
 //	successfully imported scenarios: 46 · failed to import: 4
 //

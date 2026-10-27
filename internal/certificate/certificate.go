@@ -43,22 +43,8 @@ package certificate
 //     verify a v5 certificate with the not_applicable count silently dropped.
 //
 // Format is what NEW certificates declare. FormatV1 and FormatV2 are still accepted on verify: every
-// certificate issued before v3 keeps verifying, as long as it is honest.
-//
-//   - FormatV4 ("argus-certificate/v4"): v3 plus a REQUIRED, non-empty `faults` list - the
-//     faults the run's `fault` chain steps applied to the system under test. It is issued ONLY for a run that
-//     applied at least one; every other run keeps its v3 (or v2) certificate, byte for byte. The list is
-//     covered by the same anchored evidence_bundle_hash (it is part of the measurement record the hash
-//     commits to). An older verifier does not know v4 and refuses it by name.
-//
-//   - FormatV5 ("argus-certificate/v5"): v4's superset for the PRECONDITION TIER. It is issued
-//     ONLY for a run that carries precondition results or at least one not_applicable scenario; every other run
-//     keeps its v1-v4 certificate, byte for byte. It adds a `not_applicable` bucket to the (anchored) tallies, a
-//     `not_applicable` verdict for a run in which every scenario was not applicable, and a `preconditions` list -
-//     each precondition's id, built-in kind, verdict and both controls' observations, executor-attested like the
-//     faults and covered by the same anchored evidence_bundle_hash. `faults` stays allowed (optional). An older
-//     verifier does not know v5 and REFUSES it by name: it must never verify a v5 certificate with the
-//     not_applicable count silently dropped (TestFormat_AnOlderVerifierRefusesV5).
+// certificate issued before v3 keeps verifying, as long as it is honest. An older verifier refuses v5
+// by name (TestFormat_AnOlderVerifierRefusesV5).
 const (
 	Format   = "argus-certificate/v3"
 	FormatV2 = "argus-certificate/v2"

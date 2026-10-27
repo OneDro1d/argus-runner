@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// (Talos acceptance v2, Bartek) — A STATUS CLAIM THAT LISTED TWO CODES KEPT THE FIRST AND
+// (a tester's acceptance run) — A STATUS CLAIM THAT LISTED TWO CODES KEPT THE FIRST AND
 // SAID NOTHING.
 //
 // statusDeclRe ends in `\b`, which matches before `/`, `,`, `|` or a space, so `status=200/201`,

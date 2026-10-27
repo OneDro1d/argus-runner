@@ -18,7 +18,7 @@ import (
 // is attached and never consulted (TestRunAll_SandboxPolicyNeverChangesVerdict). The opt-in verdict
 // (`sandbox-policy-clean`) is spec 26 P2, not this.
 //
-// ONE READ PASS AFTER THE LOOP (, finding A4): each window is [start - pad, end + pad]; the run
+// ONE READ PASS AFTER THE LOOP (finding A4): each window is [start - pad, end + pad]; the run
 // waits once until the last window's end + pad (ingestion settle), then reads every window. Reading
 // after each scenario would cost a pad per scenario.
 
