@@ -148,8 +148,9 @@ layer (HARD #2) is enough to onboard.
 
 12. **Prometheus `/metrics`** (conventionally `:9090`) — OPTIONAL and **NOT part of onboarding**. As of the
     runner-sourced "Test requests sent" rework, **no dashboard panel depends on a SUT `/metrics` endpoint**:
-    the request/error view is runner-owned (the runner ships one Loki request-event per request it FIRED —
-    the "Test requests sent (by outcome)" panel plots their per-bucket count_over_time), so it populates for
+    the request/error view is runner-owned (the runner ships Loki request-events, one per scenario, outcome and
+    second, each carrying the number of requests it FIRED — the "Test requests sent (by outcome)" panel
+    plots the per-bucket sum of those counts), so it populates for
     ANY SUT, including one that exposes no `/metrics`. Prometheus scraping is not wired up by
     `onboarding/onboard.sh` and there is no `observability.prometheus.*` block in `argus-config` — a SUT is
     free to expose `/metrics` for its own operability tooling, but the suite neither discovers nor depends on
@@ -193,6 +194,7 @@ layer (HARD #2) is enough to onboard.
     - **vhost `/` only.** The tap path is `%2F`, and a SUT on a named vhost cannot use content checks yet.
     - A message published as a JSON **list** (GoKit publishes its data list) is read through the object in it
       that carries the run's correlation id.
+
     The negative and DLQ cases (`- no rows`) declare NO tap: they read your queue's depth through the management
     API before and after the trigger, which needs only `read`. — *src: `V32-03-infrastructure.md §1.1`; V30-004
     F-3/F-4/F-6.*
@@ -247,6 +249,54 @@ layer (HARD #2) is enough to onboard.
     plane's own `author_validate_scenario`/`author_write_scenario` can only check the record's SHAPE, never
     against the schema itself, because the app's `argus-config.yaml` lives on the executor, not there.
     — *src: ARGUS-DESIGN-GENERIC-SCHEMA-MESSAGES-2026-09-28.*
+
+19. **A bus the suite may subscribe to, and a declared envelope** — needed only for the chain `bus` step
+   , an AMQP subscription used as evidence next to Loki `logs`: "the event this request provokes
+    is published", "no error-level message was logged for this run". Before the chain's first step fires the
+    executor declares a private queue `argus-tap-<correlation id>-<step index>` (exclusive, auto-delete, and it also
+    expires by itself after 120 s), binds it to the step's exchange and routing key, and counts what arrives. It
+    never consumes from YOUR queues. What that needs from your SUT:
+    - **the broker grant** — the same one as item 16 and the existing `amqp` `listen` step, on the instance's
+      existing broker user (no new user): **`configure` + `write` + `read` on `argus-tap-*`** and **`read` on the
+      exchange** the step binds to, in the vhost the URL names (a bus step is AMQP, not the management API, so a
+      named vhost works; item 16's tap is vhost `/` only). Refused at arming with the broker's code (403 on the
+      grant, 404 on a missing exchange): the scenario is `error` and nothing is fired.
+    - **a declared envelope** on the broker entry the step uses, in `argus-config.yaml`. Argus cannot guess where
+      your messages carry the run's correlation id, so there is NO default — a target without
+      `envelope.correlation` makes every bus step against it an `error`:
+      ```yaml
+      targets:
+        message_broker_targets:
+          sut-bus:
+            type: amqp
+            url: ${SUT_BUS_URL}          # the WHOLE field is one ${NAME}; the value lives only in the exec-tokens Secret
+            vhost: acme-orders         # optional: must be the vhost the URL names (catches a wrong URL)
+            envelope:
+              correlation:               # where the run's id travels; a message is correlated if ANY source holds it
+                - property: correlation_id   # an AMQP basic property
+                - header: x-correlation-id   # a header (name matched case-insensitively)
+                - body: correlation_id       # a dotted path into the JSON body (numeric segments index a list)
+              list_payload: true         # the body is a JSON list (GoKit); each object element is a record
+            streams:                     # named bindings a scenario selects with `stream` (e.g. the platform's log exchange)
+              logs: { exchange: <log exchange>, routing_key: <narrow routing key> }
+      ```
+      A value is correlated when it EQUALS the run's id or starts with `<id>.` (an MCP call's per-call id); never a
+      substring. A body is JSON (gunzipped when `content-encoding: gzip`); Avro bodies are not read yet.
+      Nothing in the block is a credential; the broker `url` stays a `${NAME}` reference and its value is set with
+      `argus secrets set` (restart the executor after).
+    - **Ship order.** `targets:` keys are strict, so an executor older than the bus step REFUSES a config that carries
+      `envelope`, `streams` or `vhost`: upgrade the executor first, then the config. The control plane validates a
+      scenario with the shared parser as soon as it is rebuilt, but it cannot see your `argus-config.yaml`, so the
+      envelope, streams and url checks happen on the executor at preflight. ⚠ Phase 1 has NO control-plane version
+      floor: a set containing a `bus` step enqueued for an older executor is refused there at preflight ("unknown
+      chain step type"); phase 2 adds the floor so the control plane refuses it up front.
+    - **Fail-closed, and why a bare wildcard is refused.** A `bus` step must name a narrow binding (a bare `#` routing
+      key is refused at write time: it would carry other teams' traffic through the executor). It fails closed: a
+      subscription that is lost, a binding wider than the step can judge (20 000 deliveries), or a broker that
+      refuses is `error`, never "nothing arrived"; and an absence claim (`count == 0`) must be paired with
+      `correlated >= 1`, proving the subscription heard this run's traffic at all.
+
+   — *src: `internal/scenario/busstep.go`;.*
 
 ---
 
@@ -321,6 +371,6 @@ plane** — one naming universe across all workspaces — because the name lands
 
 ## Authoritative sources
 - `docs/mcp-server-testability-requirements.md` — the MCP Tier-1/Tier-2 contract.
-- `the design notes`, `M2.5-03-infra-observability.md` — the observability + dashboard model.
-- `the design notes` (VR-*), `02-solution-architect.md`, `03-infrastructure.md` — the design rules.
-- `the design notes` / `DECISIONS-LOG.md` — the `DF-DEC-*` decisions cited above.
+- the design notes (the observability + dashboard model).
+- the design notes (VR-\*): the design rules.
+- the design notes: the `DF-DEC-*` decisions cited above.

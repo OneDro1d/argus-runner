@@ -31,9 +31,20 @@ const AUTH_STATE = path.resolve(__dirname, 'playwright/.auth/clerk-session.json'
 // needs no server at all.
 const onlyLive = process.argv.some(a => a.includes('live')) || process.env.SKIP_WEBSERVER === '1';
 
+// The runner sets these from the scenario's `## TIMEOUT` (argus.uiTimeoutEnv), already
+// raised to at least the constants below. A declared value LENGTHENS a limit and never shortens it, so
+// this applies the floor a second time: a missing, non-numeric or smaller value gives exactly the
+// constant. Action and expect timeouts are not governed by `## TIMEOUT`.
+const TEST_TIMEOUT_MS = 60_000;
+const NAVIGATION_TIMEOUT_MS = 30_000;
+const atLeast = (floor: number, name: string): number => {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) && v > floor ? v : floor;
+};
+
 export default defineConfig({
   testDir: './tests',
-  timeout: 60_000,
+  timeout: atLeast(TEST_TIMEOUT_MS, 'ARGUS_UI_TEST_TIMEOUT_MS'),
   expect: { timeout: 15_000 },
   fullyParallel: false, // live tests mutate real state; keep serial (bounded blast radius)
   forbidOnly: !!process.env.CI,
@@ -52,7 +63,7 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
     actionTimeout: 15_000,
-    navigationTimeout: 30_000,
+    navigationTimeout: atLeast(NAVIGATION_TIMEOUT_MS, 'ARGUS_UI_NAV_TIMEOUT_MS'),
   },
   projects: [
     {

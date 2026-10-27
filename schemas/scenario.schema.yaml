@@ -39,6 +39,8 @@ x-markdown:
     - {name: Layer,  required: true}
     - {name: Tags,   required: true}        # ⭐ now required — it carries the dispatch tag
     - {name: Target, required: false}
+    - {name: Preconditions, required: false}  # `id=kind, ...` built-in kinds only
+    - {name: Depends on,    required: false}  # precondition ids this check needs
   # Exactly ONE of these must appear in `**Tags**` (VR12-M3/M4). Dispatch is by TAG and nothing
   # validated one, so `Tags: chian` silently routed a chain scenario to JMeter — it changed which
   # ENGINE ran the test, in silence.
@@ -79,7 +81,7 @@ properties:
         - "HTTP Load"       # the tenth; the stepped HTTP ramp, its own ## LOAD fields and verdict
     description: "Metadata **Layer**, split on '->' for multi-layer chains. Strings = preflight.py LAYER_TO_CONFIG keys (DF-DEC-005)."
   # VR12-M2: `priority` REMOVED. Parsed, carried into AsParsedMap, surfaced in exactly one place
-  # (author__list_scenarios) and read by nothing that decides anything — no UI, no template, no
+  # (author_list_scenarios) and read by nothing that decides anything — no UI, no template, no
   # dashboard, no runner logic, no filter, no ordering.
   tags:
     type: array
@@ -90,6 +92,21 @@ properties:
     # VR12-S1: AsParsedMap (internal/scenario/parse.go) EMITS `target`, and additionalProperties is false —
     # so every parsed scenario carrying a **Target** violated this schema. Added by VR10-S3, never declared here.
     description: "Metadata **Target** (optional). The NAME of a configured target; its meaning is per-layer (TargetKind)."
+  # AsParsedMap emits both for a scenario that declares them (additionalProperties is false).
+  preconditions:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required: [id, kind]
+      properties:
+        id: { type: string, pattern: "^[a-z0-9][a-z0-9_-]{0,62}$" }
+        kind: { enum: ["networkpolicy.ingress_enforced", "networkpolicy.egress_enforced"] }
+    description: "Metadata **Preconditions** (optional): built-in probes this scenario declares."
+  depends_on:
+    type: array
+    items: { type: string }
+    description: "Metadata **Depends on** (optional): ids from `preconditions`. A dependent check is not executed when one is absent."
   trigger:
     type: object
     additionalProperties: false

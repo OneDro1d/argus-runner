@@ -50,6 +50,22 @@ targets:
       dlq: my-service.dlq               # ← the dead-letter queue (poison/negative tests)
     routing_keys:
       incoming: my-service.created      # ← the routing key your service publishes with (0.3.32: the content tap binds with it; the broker user needs configure+write+read on argus-tap-*, read on the incoming exchange, and a monitoring tag)
+    # Bus step (a chain step of type: bus, an AMQP subscription judged as evidence) — the three keys below are all
+    # commented out: uncomment them only once the executor is upgraded (an older one refuses a config that carries
+    # them). `url` above must then be ONE whole ${VAR}, not a string with the credentials spliced in.
+    # vhost: my-vhost                    # ← optional typo catcher: the vhost the url names (a literal, never a credential)
+    # envelope:                          # ← REQUIRED for a bus step, no default: where the run's correlation id travels
+    #   correlation:                     #   in your messages. Any ONE listed source holding the id correlates a message.
+    #     - property: correlation_id     #   an AMQP property: correlation_id | message_id | type | app_id | reply_to
+    #     - header: x-correlation-id     #   a header name (case-insensitive)
+    #     - body: correlation_id         #   a dotted path into the decoded JSON body
+    #   list_payload: false              #   true when the body is a JSON list and each object element is a record
+    # streams:                           # ← optional named bindings a scenario names with `stream: <name>`
+    #   logs: { exchange: my-platform.logs, routing_key: logs.my-service }   # literals; a routing_key of # is refused
+    # On a money_handling: true instance, a stream-bound bus step also needs a money_writes.allow entry:
+    #   - engine: amqp
+    #     op: listen
+    #     stream: logs
     # AMQP Load (0.3.52+) on a broker listed under the top-level load_allowed_targets: each session queue is
     # <queues.load, default argus-load>-<run>-s<step>-<n>, bound to exchanges.load (default amq.direct, must exist).
     # Grant the load login configure+write+read on those queue names and write+read on that exchange
@@ -210,7 +226,7 @@ observability:
   # spec 26 G2 (not yet measured) decides whether this source may be used as evidence. The shipping
   # path itself is UNPROVEN until spec 26 G1 runs: no real OpenShell line has been read through it yet.
   # Filesystem (Landlock) and seccomp refusals are never logged by OpenShell, so they never appear here.
-  # Ship the stream with NO `service` label: runner__get_tail_logs and get_sagas return any line,
+  # Ship the stream with NO `service` label: runner_get_tail_logs and get_sagas return any line,
   # containing the caller's substring, of a stream that has one (a builder could read a certification
   # run's denials). Give a certification instance its own sandbox.
 

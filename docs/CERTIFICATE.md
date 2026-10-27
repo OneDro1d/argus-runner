@@ -121,6 +121,29 @@ partly-degraded run legitimately has passed+failed+errored below `scenario_count
 
 `issued_at`, `anchoring` and `anchors[].chain_id` describe the document, not the run, and are never anchored.
 
+### Faults and preconditions (v4, v5)
+
+Two newer formats are issued only when a run has something the older ones cannot carry. Every other run
+keeps its v3 (or v2) certificate, byte for byte. Both use the same verdict anchor as v2/v3, and their
+extra lists are covered by the same anchored `evidence_bundle_hash`.
+
+| format | issued for | adds |
+|---|---|---|
+| `argus-certificate/v4` | a run whose `fault` chain steps applied at least one fault to the system under test | a **required**, non-empty `faults` list: the faults applied |
+| `argus-certificate/v5` | a run that carries precondition results, or at least one not_applicable scenario | a `not_applicable` tally (anchored), the verdict `not_applicable` (every scenario was not applicable), and a `preconditions` list: each precondition's id, built-in kind, verdict and both controls' observations. `faults` stays allowed. |
+
+An older `argus` binary does not know v4 or v5 and **refuses them by name**: it never verifies a v5
+certificate with the not_applicable count dropped. Verify with a CLI that reads the format (v5: 0.3.72 or
+later).
+
+On v5, the count rules above also cover `not_applicable`. `passed` means every scenario passed or was not
+applicable, with at least one passed: a run that verified nothing is never a pass. `not_applicable` needs
+every scenario not applicable. A not_applicable tally above zero needs a precondition recorded `absent`
+to explain it. Any other format carrying a not_applicable count or verdict is a `MISMATCH`. `verify`
+prints a `not_applicable:` line saying those scenarios were **not executed**. That the mechanism really
+was absent is the executor's attestation, like the faults and the controls' observations: neither the
+chain nor the control plane observed it. See [`preconditions.md`](preconditions.md).
+
 ### Is anchoring finished? (`anchoring`)
 
 A certificate is issued as soon as ANY certification chain holds the verdict. `anchoring.status` is

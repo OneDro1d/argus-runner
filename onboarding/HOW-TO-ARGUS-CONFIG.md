@@ -46,24 +46,93 @@ not the published host port. (OrderService: `order-api` listens on `8080`, `webh
 
 ## Step 3 — fill the argus-owned targets (only the layers you actually test)
 - **`http.base_url`** — your HTTP edge: `http://<service>:<port>` (required if you have HTTP Ingestion / Error Path / Rate Limiting / Permissions scenarios).
-- **`database`** — for Database State scenarios. Use a **READ-ONLY** credential (the suite must never write). `jdbc_url: jdbc:postgresql://<db-service>:5432/<db>`; write the `password` as a `${VAR}` (see **Secrets & credentials** below). If your table is in a non-public schema, write VERIFY queries fully-qualified (`SELECT … FROM <schema>.<table> WHERE correlation_id = '${correlation_id}'`).
+- **`database`** — for Database State scenarios. Use a **READ-ONLY** credential (the suite must never write). `jdbc_url: jdbc:postgresql://<db-service>:5432/<db>`; write the `password` as a `${VAR}` (see **Secrets & credentials** below). If your table is in a non-public schema, write VERIFY queries fully-qualified (`SELECT … FROM <schema>.<table> WHERE correlation_id = '${correlation_id}'`). A chain **`db` step** (executor 0.3.70, `specs/17-chain-scenarios.md`) reads this same target (or one named under `database_targets` with `"target": "<name>"`) with one read-only `SELECT`; it needs **`jdbc:postgresql://`** (another dialect is refused) and reads only the URL parameters `sslmode`, `ssl`, `currentSchema` and `ApplicationName` (any other is refused by name, never dropped). Argus runs the step in a read-only transaction and refuses a query that could write, but **the real guarantee is the role you give it: make it a READ-ONLY role** (`GRANT SELECT` on the tables the checks read, nothing else). Credentials come from `username`/`password`, never the URL.
 - **`message_broker`** — for Message Flow scenarios: the AMQP `url` (write embedded creds as `${VAR}`) + `management_url` + your `exchanges`/`queues` (incl. the `dlq` for poison/negative tests) + **`routing_keys: {incoming: <key>}`** — the routing key your service publishes with. ⚠ Since 0.3.32 a scenario that asserts what a message CONTAINS reads it through a tap queue bound with that key; without it every such check is refused before it runs (reported `error`, naming `routing_keys.incoming`), and the broker user needs `configure` + `write` + `read` on `argus-tap-*`, `read` on the incoming exchange and a management-capable tag such as `monitoring` (see *What can be a SUT*, SOFT 16).
 - **`external`** — for External Delivery scenarios: a sink that records outbound webhooks; write it as `webhook_base_url: http://<sink-service>:<port>`.
 - **`mcp`** — for MCP-server SUTs: `base_url` as `<service-name>:<port>/mcp` from the runner's vantage; `transport`: `streamable-http` | `http-sse` (declared, never guessed); `auth`: `none` | `bearer` (`bearer_token` as a `${VAR}`).
-- **`auth`** — a valid test bearer token so the suite can call authenticated endpoints, written as a `${VAR}` (see **Secrets & credentials** below).
+- **`auth`** — a valid test bearer token so the suite can call authenticated endpoints, written as a `${VAR}` (see **Secrets & credentials** below). For a SUT behind Clerk use `type: clerk_session` instead, which mints a short-lived session token per run (see **Clerk session auth** below); a named `http_targets.<name>` may carry its own `auth:`.
+- **`money_handling` / `money_writes`** (top level, both optional) — **your switch and your list.** Argus is agnostic about what your
+  system's checks may do. `money_handling: true` tells Argus *"refuse what my `money_writes.allow` does not name"*: with it on and no
+  list, only plain HTTP GETs of paths that name no order/quote/swap/rebalance/claim run, and every MCP tool call, bus op, database
+  step, logs step, fault step, UI drive and runnable CLEANUP is refused — at `validate-config` and again before a run fires anything. The list is
+  yours: an entry per HTTP route (`method` + `path`, optionally `{name}` placeholder segments, `GET` allowed, `spends: true` with
+  `amount_field`/`max_amount`/`max_per_run` to bound a real spend), per bus op (`engine: amqp`, `op`, and the `queue`/`exchange`/`routing_key`
+  that op uses; a chain `bus` step is judged as an `op: listen`, and one bound by `stream` is allowed by `engine: amqp, op: listen,
+  stream: <name>` — see *Bus step* below), per tool (`engine: mcp`, `target`, `tool`), `engine: db` / `engine: logs`, per runnable CLEANUP form
+  (`engine: cleanup`, `form: sql | bash`: it allows whatever a block of that form does), per UI spec (`engine: ui`, `spec: <path>`: it
+  allows whatever that spec does in the browser; the generic read-only one is `tests/live/argus-declared.spec.ts`) and `engine: fault`
+  (`fault_allowed_targets` still bounds what a fault may touch). An executor older than the release that added the last three
+  refuses a config holding them when it loads (the `form` and `spec` keys, and the `engine` value, are unknown to it). An entry allows exactly what it
+  names; an amqp or mcp entry is all-or-nothing (Argus cannot cap a bus publish or a tool call the way `max_amount` caps an HTTP
+  body). A chain `http` step is judged again on the path it resolves to at run time. The one YAML example with every entry kind is
+  in `docs/runbooks/CONTINUOUS-TESTING.md` §0; the schema is `schemas/argus-config.schema.yaml`. A malformed entry is refused when the
+  config loads, by index (`money_writes.allow[3]: …`).
 - **`scenarios`** — `timeout_default`. ⚠ `cleanup_enabled` was REMOVED in 0.3.31 (V29-015): a
   scenario's `## CLEANUP` now always runs, on every path, and there is no switch to turn it off.
   **If your config still carries the key, delete it.** It is *not* refused — strictness covers
   `targets` (VR10-S3), `rate_limit` (VR10-R1), `package` (AC-36), `money_writes`,
-  `message_schemas`, `load_allowed_targets` (AMQP Load; HTTP Load), `test_targets` (UI-6,
-), `observability.openshell` (spec 26) and `observability.pushgateway`
-, not `scenarios` (a top-level list such as `check_env` has no inner keys to be strict
+  `message_schemas`, `load_allowed_targets` (AMQP Load; HTTP Load),
+  `fault_allowed_targets` (fault steps), `precondition_probe` (preconditions),
+  `test_targets` (UI-6), `observability.openshell` (spec 26) and `observability.pushgateway`,
+  not `scenarios` (a top-level list such as `check_env` has no inner keys to be strict
   about; its entries are checked as names) — so it parses and
   reaches nothing, which is exactly the condition this change was made to end. Measured, not
   assumed: `internal/config/cleanup_enabled_leftover_test.go` (the strict members are
   `strictTargetsDoc` in `internal/config/config.go`). Confluence 691699714 says the same.
 
 Omit any layer you don't test — `validate-config` only checks that every layer your scenarios reference has a usable target.
+
+## Bus step: the broker target's `envelope`, `streams` and `vhost`
+
+A chain step of `type: bus` subscribes to a broker for the length of the chain and is judged by `body …` claims on what it
+saw. Three non-secret keys of a `message_broker` target (or of a `message_broker_targets.<name>` entry)
+tell it how to read your broker. All three are per instance, none holds a credential, and `url` stays one whole `${VAR}`
+reference (the step dials with the variable's NAME, so the URL never passes through code).
+
+- **`envelope`** — where the run's correlation id travels in the messages on this broker. **Required for a bus step; there is
+  no default.** `correlation` is an ordered list of sources, each with exactly ONE of `property` (an AMQP property:
+  `correlation_id`, `message_id`, `type`, `app_id` or `reply_to`), `header` (a header name, matched case-insensitively) or `body`
+  (a dotted path into the decoded JSON body). A message counts as correlated when ANY listed source holds the run's id, or a value
+  starting with `<id>.`. `list_payload: true` says the body is a JSON list whose object elements are each a record (GoKit).
+- **`streams`** — named bindings, declared once, so a scenario author does not hard-code them: `<name>: { exchange, routing_key }`.
+  Both are literals (no `${…}`), and a routing key that binds the whole exchange (`#`) is refused. A bus step names one with
+  `stream: <name>`, or writes `exchange` + `routing_key` itself, never both.
+- **`vhost`** — optional, a typo catcher: the vhost your `url` is meant to name. The step refuses to run when it differs from the
+  URL's path (`/` when the path is empty), so an empty-vhost mistake is caught before anything is dialled. It is a literal name,
+  not a credential.
+
+```yaml
+targets:
+  message_broker_targets:
+    sut-bus:
+      type: amqp
+      url: ${SUT_BUS_URL}                  # one whole ${VAR}; the value lives in the instance's secrets, never here
+      vhost: orders                        # optional; must equal the vhost in SUT_BUS_URL's path
+      envelope:
+        correlation:                       # any one source holding the run's id correlates the message
+          - property: correlation_id
+          - header: x-correlation-id
+          - body: correlation_id
+        list_payload: true                 # the body is a JSON list; each object element is a record
+      streams:
+        logs: { exchange: platform.logs, routing_key: logs.orders }
+```
+
+```json
+{"type":"bus","name":"no-errors","target":"sut-bus","stream":"logs","wait":"10s"}
+```
+
+`argus validate-config --scenarios <dir>` cross-checks every bus step against this block: its `target` must name a
+`message_broker` target (the plain `targets.message_broker` when none is named), and its `stream` must be declared in THAT
+target's `streams`. Each mismatch is reported with the scenario file and the step's name.
+
+On a `money_handling: true` instance a bus step needs a `money_writes.allow` entry like any non-http step: an
+`engine: amqp, op: listen, exchange: …, routing_key: …` entry for a step bound by those, or
+`engine: amqp, op: listen, stream: <name>` for a step bound by `stream`. A stream entry is compared to the step's `stream` name
+exactly, never carries `exchange` or `routing_key`, and covers only stream-bound steps (only the executor can resolve a stream
+to a binding, so the entry names the stream itself). **Upgrade the executor first:** the keys under `targets` are strict, and an
+executor from before the bus step refuses a config that carries `envelope`, `streams` or `vhost` (and one from before the
+stream entry refuses `stream:` in `money_writes.allow`).
 
 ## AMQP Load (v0.3.52+): which broker, which names, which permissions
 
@@ -92,7 +161,8 @@ exchange**. A least-privilege load login (one name pattern, say `^perf\..*`) wor
 it, `exchanges.load: perf.x` and `queues.load: perf.argus` in the example. Without them every session is
 refused at setup with `403 ACCESS_REFUSED`, and the run reports `setup_failed` for the step.
 
-When the broker blocks publishers (a memory or disk alarm), the step reads `blocked` with the broker's reason and
+When the broker blocks publishers (a memory or disk alarm), the step reads `blocked` with the pause's word (`memory`,
+`disk` or `other`; the broker's own words stay in the full report, `argus get-report`) and
 the run fails "blocked by broker … at step N", even if the executor then had to stop a JMeter process the block
 kept alive (v0.3.55+; before that the row read as an Argus error). Latencies read about 1 ms higher than
 RabbitMQ PerfTest at low load (p50 ~4 ms vs ~3 ms in the msgbus lab): JMeter thread scheduling and timestamping
@@ -123,8 +193,8 @@ shows "not available on this control plane", not "not measured yet".
 A system with several `test_targets` can mark one that must never be loaded, such as the real message bus, with
 `load_test: never` on its entry (the only accepted value; leave the key out otherwise). It is a guard:
 `validate-config` reports an error for a load check (an AMQP Load check, or any check with a `## LOAD` section)
-that belongs to it, the executor refuses to fire one, and the Capacity page says "<target> is not load tested, by
-declaration." instead of "not measured yet". ⛔ Upgrade the executor to the release that carries this key BEFORE
+that belongs to it, the executor refuses to fire one, and the Capacity page says `<target> is not load tested, by declaration.`
+instead of "not measured yet". ⛔ Upgrade the executor to the release that carries this key BEFORE
 you add it: `test_targets` is strict, and an executor built from `v0.3.59` or earlier refuses the whole config
 with `unknown key "load_test" under test_targets`. Runbook: `docs/runbooks/TEST-TARGETS.md`.
 
@@ -134,6 +204,123 @@ entry). A load run's `environment` then reads `captured: false` with `not applic
 checks is declared outside the cluster`, instead of `forbidden: pods in namespace ...`, which reads like a missing
 permission. Nothing is asked of Kubernetes for such a target. Same upgrade rule as `load_test`: upgrade the
 executor first, because `test_targets` is strict. Runbook: `docs/runbooks/TEST-TARGETS.md`.
+
+## Fault steps: which Deployments and links a check may break
+
+A chain scenario's `fault` step stops/scales a Deployment or adds a Toxiproxy toxic during the run, and the run
+puts it back on every path. It runs only against what the operator lists at the top level (never under
+`targets:`); absent or empty means no fault step runs:
+
+```yaml
+fault_allowed_targets:
+  deployments:
+    trades: {namespace: calm-demo}       # the Deployment's own name -> its namespace
+  links:
+    mcp-to-trades: {toxiproxy_api: "http://toxiproxy.calm-demo:8474", proxy: trades}
+```
+
+A namespace or address with `prod`, `production`, `prd` or `shared` as a segment is refused when the config loads
+(the refusal names the entry, never the address). The executor's ServiceAccount needs `deployments/scale`
+get+patch and `deployments` get on the listed names, and a link needs a Toxiproxy in the connection's path:
+manifests, the Role and a worked scenario are in `docs/fault-steps.md`; the step reference is in
+`specs/17-chain-scenarios.md`. **Upgrade the executor first**: an older executor ignores the top-level key and
+fails a `fault` step as an unknown step type.
+
+## Clerk session auth: `type: clerk_session`
+
+A SUT behind Clerk accepts a session JWT that lives about 60 seconds, so a static `bearer_token` in a Secret
+is stale before the first scenario ends. With `type: clerk_session` the executor mints one itself from
+Clerk's Backend API and sends it exactly where the static bearer goes (`Authorization: Bearer <token>` on
+every plain-HTTP scenario). The config holds only the **names** of two environment variables; their values
+come from the Secret `exec-tokens` (`argus secrets set --key CLERK_SECRET_KEY …`), never from the file.
+
+```yaml
+targets:
+  http:
+    base_url: http://api.sut-lab.svc:8080
+  auth:                                    # the default for every plain-HTTP scenario
+    type: clerk_session
+    secret_key_env: CLERK_SECRET_KEY       # NAME of the env var holding the Clerk SECRET key (sk_…)
+    user_id_env: CLERK_TEST_USER_ID        # NAME of the env var holding the Clerk user id (user_…)
+    jwt_template: argus-test               # optional: a Clerk JWT template (longer-lived, custom claims)
+    api_url: https://api.clerk.com         # optional (this is the default); point it at a mock in tests
+    # allow_clerk_session_on_prod: true    # optional, default false: see "Production" below
+  http_targets:
+    admin:
+      base_url: http://admin.sut-lab.svc:8080
+      auth:                                # a named target's own auth wins for scenarios that select it
+        type: clerk_session
+        secret_key_env: CLERK_SECRET_KEY
+        user_id_env: CLERK_ADMIN_USER_ID
+```
+
+(Every value above is a placeholder. `bearer_token` and `clerk_session` are two answers to one header: a block
+takes one. A named target may also carry `auth: {type: bearer, bearer_token: ${VAR}}`. `auth:` on the plain
+`targets.http` slot is refused: its credentials are `targets.auth`.)
+
+- **Use a dedicated test user** for `user_id_env`, created for Argus. Never an operator's own account:
+  a minted session is a real login as that user.
+- **What is minted, and when.** At the first scenario that needs it, once per run per identity: `POST
+  /v1/sessions {"user_id": …}`, then `POST /v1/sessions/{id}/tokens` (`…/tokens/{jwt_template}` when set),
+  both with `Authorization: Bearer <secret key>`. Before each scenario the executor re-checks the token and
+  re-mints it (same session) when less than 15 seconds or a quarter of its life is left; one refresh runs at
+  a time. An HTTP Load ramp re-checks before each step. At run end, also after an error or a cancel, the session
+  is revoked with a short bound; a revoke failure is logged (no secret) and does not change the verdict.
+- **Limits.** The check is per scenario (per step in a ramp), not per request inside one JMeter plan: a scenario
+  or load step that runs longer than the token lives would send an expired token. Use a `jwt_template` with
+  a longer lifetime for those. A killed executor cannot revoke; the session ends on Clerk's own timer. Chain
+  steps do not send the default auth (they never did): a request that must carry the session identity is a
+  plain-HTTP scenario.
+- **Your own `Authorization` wins.** A scenario whose TRIGGER sets `Authorization:` (a different token, or an
+  empty line to send none, for a permission check) keeps it, and then no session is minted for that scenario.
+- **Production.** A minted session logs in as a real user, so `validate-config` and a run refuse `clerk_session`
+  on an instance that looks like production: a delimited `prod`, `production`, `prd` or `shared` segment in an
+  `http` base_url the block covers (`targets.auth` covers all of them; a named target's `auth:` only its own),
+  or a Clerk key that starts `sk_live_`. The refusal names `allow_clerk_session_on_prod`; setting it to `true`
+  next to the type is the explicit opt-in. The default is `false`.
+- **When it fails.** A refused session create or token mint (`clerk_session: could not create a session: HTTP
+  401`, `… could not mint a session token: HTTP 404`) is reported as **`error`** on every affected scenario, never
+  `failed`, and nothing is sent to the SUT. The message holds a stage and a status, never a key or a token.
+  `validate-config` also refuses a missing `secret_key_env` / `user_id_env`, a value written where a name belongs,
+  and an unset variable (by name).
+- **Never printed.** The secret key and the token appear in no log, report field, relay field or file in the
+  results directory; the startup log names the variables, not their values.
+- **Older executors.** The new keys sit inside the strict `targets` node: an executor older than this release
+  refuses the config by name when it loads. Upgrade the executor first.
+
+## Preconditions: a check that needs a mechanism the environment may not have
+
+A check can only fail on the system's merits if the mechanism it relies on exists. A NetworkPolicy check on a cluster
+that does not enforce NetworkPolicy would end `failed` for a reason that is about the cluster. Say so in the check's
+`## Metadata` and Argus asks the cluster first:
+
+```
+- **Preconditions**: np-in=networkpolicy.ingress_enforced, np-out=networkpolicy.egress_enforced
+- **Depends on**: np-in
+```
+
+`Preconditions` declares ids and a BUILT-IN kind (`networkpolicy.ingress_enforced`, `networkpolicy.egress_enforced`;
+the list is closed, no probe code is ever supplied); `Depends on` names the ones this check needs, and each must be
+declared in the same file. Both lines are part of the check, so they are sealed with the set. A check that depends
+on a precondition the probe finds **absent** is not run: it ends `not_applicable`, with both controls' observations.
+If the probe itself is **broken** the check ends `errored`. Full reference: `docs/preconditions.md`.
+
+The probe runs in the executor's own namespace and needs nothing from you: `argus render-k8s` puts the rights in the
+executor's Role, and the image and bounds have defaults. To change them (all keys optional, top level, never under
+`targets:`; a mistyped key is refused by name):
+
+```yaml
+precondition_probe:
+  image: registry.example.com/mirror/busybox@sha256:<digest>   # optional; default = busybox:1.36.1 pinned by digest. Needs busybox `nc`; the executor namespace must be able to pull it. Pin by digest.
+  ready_timeout: 90s
+  connect_timeout: 2s
+  attempts: 4
+  settle: 5s                # pause after a policy changes, for the policy engine to program it
+```
+
+**Upgrade the executor first, and re-render its manifests**: an older executor ignores `Depends on` and runs the
+check, and an executor Role rendered before this release lacks the pods/networkpolicies rights, so every
+precondition ends `broken` with a `forbidden` reason (never `absent`).
 
 ## HTTP Load (v0.3.66+): a stepped HTTP ramp, the same gate
 
@@ -277,7 +464,7 @@ rate_limit:
     retry_once: true            # re-fire a throttled scenario once after the pause (default true)
 ```
 
-An unknown key under `rate_limit`, `signature` or `pause` is refused at load, by name. `runner__validate_config` reports
+An unknown key under `rate_limit`, `signature` or `pause` is refused at load, by name. `runner_validate_config` reports
 `requests_estimated` for the pack and warns when it would exceed your limit — information only; the run still starts.
 When a run hits the pause cap it stops pausing and says so: split the pack by layer or tag.
 
@@ -525,12 +712,14 @@ event, no count, no coverage word. The author reads the whole block on every run
 `get_report` and the results push carry none of it. It leaves the executor only in
 `argus.build_record` on a build run (written to the hub's Memstore, in the product-hat shape), and
 whole in the author's `author_get_report` answer (relay verb `get_full_report`, which the control
-plane keeps in `relay_commands`). What leaves is the block as described under the kept events above:
+plane keeps in `relay_commands`). `author_get_report` needs a Full author token. With a Limited token it
+is refused and nothing is relayed: use `author_get_report_limited` for the run's report without the app's
+answers, or `argus get-report` inside the environment for the full report. What leaves is the block as described under the kept events above:
 credentials are removed by shape only (#448), so on a build run a secret that does not look like a
 token reaches the builder's report and `argus.build_record` as OpenShell logged it.
 
 This covers what Argus hands out. The raw OCSF lines sit in the same Loki that
-`runner__get_tail_logs` and `runner__get_sagas` read. Those two take only a whole correlation id of
+`runner_get_tail_logs` and `runner_get_sagas` read. Those two take only a whole correlation id of
 the shape Argus mints (`tr-<run_id>-<scenario_id>-<8 hex>`) and refuse a fragment, and an OCSF line
 carries no correlation id, so a builder cannot reach a certification run's denials through them by
 searching for the sandbox id or `Denied` (before #449 they accepted a fragment, and that was the route). Still
@@ -587,7 +776,7 @@ variable in the SUT's own `.env`, `correlation_field: request_id`, `saga_event_f
 - ❌ forgetting `deploy.compose_project`/`network` → your logs never reach the dashboards, and the runner/JMeter
   can't join your SUT (the obs stack can't find a SUT it wasn't told about).
 - ❌ a VERIFY query without the schema when your table isn't in `public`.
-- ❌ a prose-only Database State VERIFY (no ```sql block) → rejected at validation (it would verify nothing).
+- ❌ a prose-only Database State VERIFY (no fenced `sql` code block) → rejected at validation (it would verify nothing).
 
 ## SUT compatibility: one SUT namespace, one Argus executor (UC007)
 
@@ -607,7 +796,9 @@ is MUTUAL, so adding a second watcher corrupts the instance that was already run
 
 If the conflicting instance is stale (a teardown that did not finish), tear it down and re-run:
 
-    bash onboarding/teardown.sh --instance-id <conflicting-instance> --tier <tier> [--kube-context <ctx>] [--control-plane <url>]
+```bash
+bash onboarding/teardown.sh --instance-id <conflicting-instance> --tier <tier> [--kube-context <ctx>] [--control-plane <url>]
+```
 
 Note this applies to k3d exactly as it does to a managed cluster — both render the same glob. On the
 compose tier it does not arise, because each compose instance brings up its own copy of the SUT.
