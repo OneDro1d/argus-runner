@@ -16,6 +16,7 @@ package main
 // is the judgment that produced the subset above; whoever curates it next will be as sure as the last
 // curator was. The door (docs/DEPLOY-ARGUS.md) is where the six-command path is named — not here.
 var usageCommands = []string{
+	"anchor",
 	"builder",
 	"calm",
 	"capabilities",
@@ -57,6 +58,7 @@ var usageCommands = []string{
 	"render-k8s",
 	"render-obs",
 	"render-obs-shared", // T3.3: the environment's ONE shared Loki (namespace argus-obs)
+	"replay",
 	"router",
 	"run",
 	"run-direct",

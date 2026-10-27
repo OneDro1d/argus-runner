@@ -22,6 +22,11 @@ func ownsArgv(cmd string) bool {
 	switch cmd {
 	case "init", "router", "mcpjson", "update", "upgrade":
 		return true
+	// `replay` declares its OWN --config (a name the common flagset also declares) and `anchor` its own
+	// `verify` subcommand + flags — neither reads commonFlags, so the partition can only break them,
+	// exactly like the commands above.
+	case "replay", "anchor":
+		return true
 	// T6.3: `certificate get` declares its OWN --instance-id/--control-plane/--token (all three also
 	// common-flagset names) and `certificate verify` its own --chains/--rpc; neither reads commonFlags.
 	case "certificate":

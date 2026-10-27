@@ -849,8 +849,19 @@ func dispatch(args []string) int {
 		return cmdProposeFromRepo(cf)
 	}
 
-	// `certificate verify` is a third party's own verb (PRE-AUTH, never calls the control plane);
-	// `certificate get` carries its own author session token, same as `runner-id` below.
+	// `replay` and `anchor verify` are a THIRD PARTY's own verbs: the caller holds no OneDroid Argus
+	// token (replay runs against an environment they deployed themselves; verify never calls the
+	// control plane at all), so both are PRE-AUTH like package-check.
+	if cmd == "replay" {
+		return cmdReplay(subArgs)
+	}
+	if cmd == "anchor" {
+		return cmdAnchor(subArgs)
+	}
+
+	// `certificate verify` is a third party's own verb, same as `anchor verify` above (PRE-AUTH, never
+	// calls the control plane); `certificate get` carries its own author session token, same as
+	// `runner-id` below.
 	if cmd == "certificate" {
 		return cmdCertificate(subArgs)
 	}
