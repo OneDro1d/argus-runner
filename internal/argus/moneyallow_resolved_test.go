@@ -213,7 +213,7 @@ func TestRunDoor_PlainTriggerGETEntryAllowsAnOrderPath(t *testing.T) {
 
 const allowedConsumeTrigger = `{"steps":[{"type":"amqp","name":"read","op":"consume","url_env":"MSGBUS_ARGUS_TEST_URL","queue":"reply.inbox","wait":"1s"}]}`
 const unlistedPublishTrigger = `{"steps":[{"type":"amqp","name":"send","op":"publish","url_env":"MSGBUS_ARGUS_TEST_URL",` +
-	`"exchange":"msgbus.inbox","routing_key":"inbox.agent.hop","body":"hello"}]}`
+	`"exchange":"msgbus.inbox","routing_key":"inbox.agent.alpha","body":"hello"}]}`
 
 func amqpAllowConfig() *config.Config {
 	q := "reply.inbox"

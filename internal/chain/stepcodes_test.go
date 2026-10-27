@@ -338,7 +338,7 @@ func TestStepCodes_HTTP_MoneyPathRefusalsRecordNothing(t *testing.T) {
 		t.Fatalf("setup: a resolved order path is refused: %+v", resolved)
 	}
 	assertNoCodes(t, "resolved-path refusal", resolved)
-	spend := HTTPStep("spend", "POST", srv.URL+"/order", nil, `{"source_amount": 999}`, 200, nil, nil, nil, false,
+	spend := HTTPStep("spend", "POST", srv.URL+"/order", nil, `{"pay_amount": 999}`, 200, nil, nil, nil, false,
 		orderAllow(), &scenario.MoneySpendLedger{}).Run("cid", map[string]string{})
 	if spend.Status != report.StatusError || !strings.HasPrefix(spend.Observed, MoneyWriteRefusal) {
 		t.Fatalf("setup: an over-max_amount spend is refused: %+v", spend)
@@ -352,7 +352,7 @@ func TestStepCodes_HTTP_MoneyPathRefusalsRecordNothing(t *testing.T) {
 	ledger := &scenario.MoneySpendLedger{}
 	var third report.StepResult
 	for i := 0; i < 3; i++ {
-		third = HTTPStep("spend", "POST", srv.URL+"/order", nil, `{"source_amount": 10}`, 200, nil, nil, nil, false,
+		third = HTTPStep("spend", "POST", srv.URL+"/order", nil, `{"pay_amount": 10}`, 200, nil, nil, nil, false,
 			orderAllow(), ledger).Run("cid", map[string]string{})
 	}
 	if third.Status != report.StatusError || !strings.Contains(third.Observed, "max_per_run") || atomic.LoadInt32(n) != 2 {
@@ -374,7 +374,7 @@ func TestStepCodes_HTTP_MoneyPathRefusalsRecordNothing(t *testing.T) {
 		t.Fatalf("setup: an unreachable step to a resolved order path is refused: %+v", uResolved)
 	}
 	assertNoCodes(t, "unreachable: resolved-path refusal", uResolved)
-	uSpend := UnreachableHTTPStep("u", "POST", gone+"/order", nil, `{"source_amount": 999}`, orderAllow(), &scenario.MoneySpendLedger{}).
+	uSpend := UnreachableHTTPStep("u", "POST", gone+"/order", nil, `{"pay_amount": 999}`, orderAllow(), &scenario.MoneySpendLedger{}).
 		Run("cid", map[string]string{})
 	if uSpend.Status != report.StatusError || !strings.HasPrefix(uSpend.Observed, MoneyWriteRefusal) {
 		t.Fatalf("setup: an unreachable step's over-max_amount spend is refused: %+v", uSpend)
@@ -383,7 +383,7 @@ func TestStepCodes_HTTP_MoneyPathRefusalsRecordNothing(t *testing.T) {
 	uLedger := &scenario.MoneySpendLedger{}
 	var uThird report.StepResult
 	for i := 0; i < 3; i++ {
-		uThird = UnreachableHTTPStep("u", "POST", gone+"/order", nil, `{"source_amount": 10}`, orderAllow(), uLedger).
+		uThird = UnreachableHTTPStep("u", "POST", gone+"/order", nil, `{"pay_amount": 10}`, orderAllow(), uLedger).
 			Run("cid", map[string]string{})
 	}
 	if uThird.Status != report.StatusError || !strings.Contains(uThird.Observed, "max_per_run") {

@@ -20,12 +20,12 @@ import (
 //	money_writes:
 //	  allow:
 //	    - method: POST                       # an HTTP entry: no `engine`, or `engine: http`
-//	      path: /api/v1/trading/quote
+//	      path: /api/v1/pay/quote
 //	      spends: false
 //	    - method: POST
-//	      path: /api/v1/trading/order
+//	      path: /api/v1/pay/order
 //	      spends: true                       # bounded, per request and per run
-//	      amount_field: source_amount
+//	      amount_field: pay_amount
 //	      max_amount: 25
 //	      max_per_run: 4
 //	    - method: GET                        # a GET of a money-word path (spends must be false)
@@ -35,8 +35,8 @@ import (
 //	      op: consume
 //	      queue: reply.inbox
 //	    - engine: mcp                        # one tool of one target (omit target = targets.mcp)
-//	      target: trading
-//	      tool: get_positions
+//	      target: ledger
+//	      tool: get_balances
 //	    - engine: db                         # a chain `db` step (omit target = targets.database)
 //	      target: ledger
 //	    - engine: logs                       # a chain `logs` step

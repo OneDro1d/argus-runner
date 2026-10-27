@@ -42,7 +42,7 @@ func TestListen_WaitBounds(t *testing.T) {
 		t.Errorf("121s must be refused with the listen bound: %v", errs)
 	}
 	// a foreign queue keeps 30 s
-	foreign := `{"type":"amqp","name":"take","op":"consume","url_env":"BROKER_URL","queue":"msgbus.agent.hop","wait":"31s"}`
+	foreign := `{"type":"amqp","name":"take","op":"consume","url_env":"BROKER_URL","queue":"msgbus.agent.alpha","wait":"31s"}`
 	errs = lsValidate(t, []string{foreign}, "- step take: broker accepts\n")
 	if !find(errs, "more than the 30s bound on an amqp consume from a queue this chain did not create") {
 		t.Errorf("31s on a foreign queue must be refused: %v", errs)

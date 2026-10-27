@@ -68,7 +68,7 @@ func (h *hopServer) received(substr string) bool {
 	return false
 }
 
-var quoteOnly = scenario.MoneyWriteAllowlist{{Method: "POST", Path: "/api/v1/trading/quote", Spends: false}}
+var quoteOnly = scenario.MoneyWriteAllowlist{{Method: "POST", Path: "/api/v1/pay/quote", Spends: false}}
 
 func wantRedirectRefusal(t *testing.T, res report.StepResult) {
 	t.Helper()
@@ -95,12 +95,12 @@ func TestRedirect_NoList_ToAnOrderPathIsNotSent(t *testing.T) {
 
 // (b) a list allowing only POST quote: a 307 to POST order carries the method and the body.
 func TestRedirect_307_ToANotAllowedPathIsNotSentWithItsBody(t *testing.T) {
-	srv := newHopServer(t, map[string][2]string{"/api/v1/trading/quote": {"307", "/api/v1/trading/order"}})
-	step := HTTPStep("quote", "POST", srv.ts.URL+"/api/v1/trading/quote", nil, `{"amount": 5}`, 0, nil, nil, nil, false,
+	srv := newHopServer(t, map[string][2]string{"/api/v1/pay/quote": {"307", "/api/v1/pay/order"}})
+	step := HTTPStep("quote", "POST", srv.ts.URL+"/api/v1/pay/quote", nil, `{"amount": 5}`, 0, nil, nil, nil, false,
 		quoteOnly, &scenario.MoneySpendLedger{}, WithMoneyHandling(true))
 	res := step.Run("cid", map[string]string{})
 	t.Logf("(b) status=%s observed=%q server received=%q", res.Status, res.Observed, srv.got())
-	if srv.received("/api/v1/trading/order") {
+	if srv.received("/api/v1/pay/order") {
 		t.Errorf("(b) the server received the redirected request: %q", srv.got())
 	}
 	wantRedirectRefusal(t, res)
@@ -136,34 +136,34 @@ func TestRedirect_ToAnAllowedPathOnTheSameHostIsFollowed(t *testing.T) {
 
 // A 303 after an allowed POST turns into a GET; a GET path an entry allows is followed.
 func TestRedirect_303AfterAnAllowedPostToAnAllowedGetIsFollowed(t *testing.T) {
-	srv := newHopServer(t, map[string][2]string{"/api/v1/trading/quote": {"303", "/api/v1/trading/result"}})
+	srv := newHopServer(t, map[string][2]string{"/api/v1/pay/quote": {"303", "/api/v1/pay/result"}})
 	allow := scenario.MoneyWriteAllowlist{
-		{Method: "POST", Path: "/api/v1/trading/quote", Spends: false},
-		{Method: "GET", Path: "/api/v1/trading/result", Spends: false},
+		{Method: "POST", Path: "/api/v1/pay/quote", Spends: false},
+		{Method: "GET", Path: "/api/v1/pay/result", Spends: false},
 	}
-	step := HTTPStep("quote", "POST", srv.ts.URL+"/api/v1/trading/quote", nil, `{"a":1}`, 200, nil, nil, nil, false,
+	step := HTTPStep("quote", "POST", srv.ts.URL+"/api/v1/pay/quote", nil, `{"a":1}`, 200, nil, nil, nil, false,
 		allow, &scenario.MoneySpendLedger{}, WithMoneyHandling(true))
 	res := step.Run("cid", map[string]string{})
-	if res.Status != "passed" || !srv.received("GET /api/v1/trading/result") {
+	if res.Status != "passed" || !srv.received("GET /api/v1/pay/result") {
 		t.Fatalf("a 303 to an allowed GET was not followed: %s %s %q", res.Status, res.Observed, srv.got())
 	}
 }
 
 // A hop whose matched entry spends is refused by name, whatever the method.
 func TestRedirect_ToASpendingEntryIsNotSent(t *testing.T) {
-	srv := newHopServer(t, map[string][2]string{"/api/v1/trading/quote": {"307", "/api/v1/trading/order"}})
+	srv := newHopServer(t, map[string][2]string{"/api/v1/pay/quote": {"307", "/api/v1/pay/order"}})
 	allow := scenario.MoneyWriteAllowlist{
-		{Method: "POST", Path: "/api/v1/trading/quote", Spends: false},
-		{Method: "POST", Path: "/api/v1/trading/order", Spends: true, AmountField: "amount", MaxAmount: 10, MaxPerRun: 5},
+		{Method: "POST", Path: "/api/v1/pay/quote", Spends: false},
+		{Method: "POST", Path: "/api/v1/pay/order", Spends: true, AmountField: "amount", MaxAmount: 10, MaxPerRun: 5},
 	}
-	step := HTTPStep("quote", "POST", srv.ts.URL+"/api/v1/trading/quote", nil, `{"amount": 5}`, 0, nil, nil, nil, false,
+	step := HTTPStep("quote", "POST", srv.ts.URL+"/api/v1/pay/quote", nil, `{"amount": 5}`, 0, nil, nil, nil, false,
 		allow, &scenario.MoneySpendLedger{}, WithMoneyHandling(true))
 	res := step.Run("cid", map[string]string{})
 	wantRedirectRefusal(t, res)
 	if !strings.Contains(res.Observed, "a spending request is never re-sent on a redirect") {
 		t.Errorf("the refusal does not say a spend is never re-sent: %s", res.Observed)
 	}
-	if srv.received("/api/v1/trading/order") {
+	if srv.received("/api/v1/pay/order") {
 		t.Errorf("a spending request was re-sent on a redirect: %q", srv.got())
 	}
 }

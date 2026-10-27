@@ -37,7 +37,7 @@ type MoneyWriteAllow struct {
 	Method string `json:"method"`
 	Path   string `json:"path"`
 	Spends bool   `json:"spends"`
-	// AmountField is a dotted path into the resolved JSON request body (e.g. "source_amount",
+	// AmountField is a dotted path into the resolved JSON request body (e.g. "pay_amount",
 	// "order.amount") — required, and consulted, only when Spends is true.
 	AmountField string `json:"amount_field,omitempty"`
 	// MaxAmount is the per-request ceiling, in the field's own units. Required (> 0) when Spends.

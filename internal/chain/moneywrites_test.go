@@ -22,7 +22,7 @@ import (
 func orderAllow() scenario.MoneyWriteAllowlist {
 	return scenario.MoneyWriteAllowlist{{
 		Method: "POST", Path: "/order", Spends: true,
-		AmountField: "source_amount", MaxAmount: 25, MaxPerRun: 2,
+		AmountField: "pay_amount", MaxAmount: 25, MaxPerRun: 2,
 	}}
 }
 
@@ -34,7 +34,7 @@ func TestHTTPStep_SpendOverMaxAmountNotSent(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	step := HTTPStep("spend", "POST", ts.URL+"/order", nil, `{"source_amount": 999}`, 200, nil, nil, nil, false,
+	step := HTTPStep("spend", "POST", ts.URL+"/order", nil, `{"pay_amount": 999}`, 200, nil, nil, nil, false,
 		orderAllow(), &scenario.MoneySpendLedger{})
 	res := step.Run("cid", map[string]string{})
 
@@ -77,7 +77,7 @@ func TestHTTPStep_NonNumericAmountFieldNotSent(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	step := HTTPStep("spend", "POST", ts.URL+"/order", nil, `{"source_amount": "10"}`, 200, nil, nil, nil, false,
+	step := HTTPStep("spend", "POST", ts.URL+"/order", nil, `{"pay_amount": "10"}`, 200, nil, nil, nil, false,
 		orderAllow(), &scenario.MoneySpendLedger{})
 	res := step.Run("cid", map[string]string{})
 
@@ -97,7 +97,7 @@ func TestHTTPStep_UnderCapIsSent(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	step := HTTPStep("spend", "POST", ts.URL+"/order", nil, `{"source_amount": 10}`, 200, nil, nil, nil, false,
+	step := HTTPStep("spend", "POST", ts.URL+"/order", nil, `{"pay_amount": 10}`, 200, nil, nil, nil, false,
 		orderAllow(), &scenario.MoneySpendLedger{})
 	res := step.Run("cid", map[string]string{})
 
@@ -105,7 +105,7 @@ func TestHTTPStep_UnderCapIsSent(t *testing.T) {
 		t.Fatalf("status = %q, observed %q, want passed", res.Status, res.Observed)
 	}
 	var got map[string]any
-	if err := json.Unmarshal(body, &got); err != nil || got["source_amount"] != float64(10) {
+	if err := json.Unmarshal(body, &got); err != nil || got["pay_amount"] != float64(10) {
 		t.Fatalf("the SUT did not receive the request under cap: body=%q err=%v", body, err)
 	}
 }
@@ -122,9 +122,9 @@ func TestHTTPStep_MaxPerRunEnforcedAcrossTwoSteps(t *testing.T) {
 
 	ledger := &scenario.MoneySpendLedger{} // orderAllow's max_per_run is 2
 	allow := orderAllow()
-	step1 := HTTPStep("s1", "POST", ts.URL+"/order", nil, `{"source_amount": 5}`, 200, nil, nil, nil, false, allow, ledger)
-	step2 := HTTPStep("s2", "POST", ts.URL+"/order", nil, `{"source_amount": 5}`, 200, nil, nil, nil, false, allow, ledger)
-	step3 := HTTPStep("s3", "POST", ts.URL+"/order", nil, `{"source_amount": 5}`, 200, nil, nil, nil, false, allow, ledger)
+	step1 := HTTPStep("s1", "POST", ts.URL+"/order", nil, `{"pay_amount": 5}`, 200, nil, nil, nil, false, allow, ledger)
+	step2 := HTTPStep("s2", "POST", ts.URL+"/order", nil, `{"pay_amount": 5}`, 200, nil, nil, nil, false, allow, ledger)
+	step3 := HTTPStep("s3", "POST", ts.URL+"/order", nil, `{"pay_amount": 5}`, 200, nil, nil, nil, false, allow, ledger)
 
 	if r := step1.Run("cid", nil); r.Status != "passed" {
 		t.Fatalf("step1: %q %q", r.Status, r.Observed)
@@ -165,7 +165,7 @@ func TestHTTPStep_NilAllowlistAndLedgerBehaveAsBefore(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	step := HTTPStep("plain", "POST", ts.URL+"/order", nil, `{"source_amount": 999999}`, 200, nil, nil, nil, false,
+	step := HTTPStep("plain", "POST", ts.URL+"/order", nil, `{"pay_amount": 999999}`, 200, nil, nil, nil, false,
 		nil, nil)
 	res := step.Run("cid", map[string]string{})
 	if res.Status != "passed" {

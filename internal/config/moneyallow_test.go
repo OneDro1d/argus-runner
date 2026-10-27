@@ -11,7 +11,7 @@ import (
 
 const allowHead = "project:\n  name: p\nmoney_handling: true\n"
 const allowTargets = "targets:\n  http:\n    base_url: http://sut.invalid\n" +
-	"  mcp_targets:\n    trading:\n      base_url: http://mcp.invalid/mcp\n" +
+	"  mcp_targets:\n    ledger:\n      base_url: http://mcp.invalid/mcp\n" +
 	"  database_targets:\n    ledger:\n      type: postgres\n      jdbc_url: jdbc:postgresql://db.invalid:5432/ledger\n"
 
 func loadAllow(t *testing.T, allowYAML string) (*Config, error) {
@@ -21,14 +21,14 @@ func loadAllow(t *testing.T, allowYAML string) (*Config, error) {
 
 func TestMoneyAllow_EveryEntryKindLoadsAndConverts(t *testing.T) {
 	c, err := loadAllow(t, ""+
-		"    - method: POST\n      path: /api/v1/trading/quote\n      spends: false\n"+
+		"    - method: POST\n      path: /api/v1/pay/quote\n      spends: false\n"+
 		"    - method: GET\n      path: /api/v1/orders/{id}\n      spends: false\n"+
 		"    - method: POST\n      path: /api/v1/orders/{id}/fill\n      spends: true\n      amount_field: amount\n      max_amount: 5\n      max_per_run: 2\n"+
 		"    - engine: http\n      method: GET\n      path: /api/v1/quotes\n      spends: false\n"+
 		"    - engine: amqp\n      op: consume\n      queue: reply.inbox\n"+
 		"    - engine: amqp\n      op: publish\n      exchange: \"\"\n      routing_key: q.direct\n"+
 		"    - engine: amqp\n      op: queue_unbind\n      queue: q\n      exchange: x\n      routing_key: k\n"+
-		"    - engine: mcp\n      target: trading\n      tool: get_positions\n"+
+		"    - engine: mcp\n      target: ledger\n      tool: get_balances\n"+
 		"    - engine: mcp\n      tool: ping\n"+
 		"    - engine: db\n      target: ledger\n"+
 		"    - engine: db\n"+
@@ -47,7 +47,7 @@ func TestMoneyAllow_EveryEntryKindLoadsAndConverts(t *testing.T) {
 	if al[5].Op != "publish" || al[5].Exchange != "" || al[5].RoutingKey != "q.direct" || al[5].Engine != "amqp" {
 		t.Errorf("default-exchange publish: %+v", al[5])
 	}
-	if al[7].Engine != "mcp" || al[7].Target != "trading" || al[7].Tool != "get_positions" || al[7].Method != "" || al[7].Path != "" {
+	if al[7].Engine != "mcp" || al[7].Target != "ledger" || al[7].Tool != "get_balances" || al[7].Method != "" || al[7].Path != "" {
 		t.Errorf("mcp entry: %+v", al[7])
 	}
 	if al[11].Engine != "logs" {
@@ -56,7 +56,7 @@ func TestMoneyAllow_EveryEntryKindLoadsAndConverts(t *testing.T) {
 }
 
 func TestMoneyAllow_LoadTimeRefusalsNamedWithTheEntryIndex(t *testing.T) {
-	ok0 := "    - method: POST\n      path: /api/v1/trading/quote\n      spends: false\n"
+	ok0 := "    - method: POST\n      path: /api/v1/pay/quote\n      spends: false\n"
 	for _, tc := range []struct{ name, entry, want string }{
 		{"unknown engine", "    - engine: kafka\n      op: consume\n",
 			`money_writes.allow[1]: engine "kafka" is not one of http, amqp, mcp, db, logs`},
@@ -78,7 +78,7 @@ func TestMoneyAllow_LoadTimeRefusalsNamedWithTheEntryIndex(t *testing.T) {
 			`money_writes.allow[1]: op: publish requires a non-empty routing_key`},
 		{"a tool on an amqp entry", "    - engine: amqp\n      op: consume\n      queue: q\n      tool: t\n",
 			`money_writes.allow[1]: op: consume does not use tool`},
-		{"mcp with no tool", "    - engine: mcp\n      target: trading\n",
+		{"mcp with no tool", "    - engine: mcp\n      target: ledger\n",
 			`money_writes.allow[1]: an mcp entry requires tool`},
 		{"mcp undeclared target", "    - engine: mcp\n      target: nowhere\n      tool: t\n",
 			`money_writes.allow[1]: target "nowhere" is not declared under targets.mcp_targets`},
@@ -153,7 +153,7 @@ func TestMoneyAllow_ADuplicateDoesNotRefuseDifferentMethodsOrPaths(t *testing.T)
 
 // The strict-key node must accept the new keys and still refuse a mistyped one.
 func TestMoneyAllow_StrictNodeAcceptsNewKeysAndRefusesAMistypedOne(t *testing.T) {
-	if _, err := loadAllow(t, "    - engine: mcp\n      target: trading\n      tool: get_positions\n"); err != nil {
+	if _, err := loadAllow(t, "    - engine: mcp\n      target: ledger\n      tool: get_balances\n"); err != nil {
 		t.Fatalf("the strict node refused a new key: %v", err)
 	}
 	for _, key := range []string{"engin", "routing_keys", "tools", "targt", "exchnage", "qeue"} {

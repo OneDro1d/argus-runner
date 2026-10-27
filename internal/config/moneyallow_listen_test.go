@@ -53,7 +53,7 @@ func TestMoneyAllow_StreamListenMalformedEntriesAreRefusedByName(t *testing.T) {
 			`money_writes.allow[1]: stream is a field of an engine entry`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := loadAllow(t, "    - method: POST\n      path: /api/v1/trading/quote\n      spends: false\n"+tc.entry)
+			_, err := loadAllow(t, "    - method: POST\n      path: /api/v1/pay/quote\n      spends: false\n"+tc.entry)
 			if err == nil || !contains(err.Error(), tc.want) {
 				t.Errorf("want %q, got %v", tc.want, err)
 			}
@@ -87,7 +87,7 @@ func TestMoneyAllow_ListenAndQueueBindMalformedEntriesAreRefusedByName(t *testin
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// entry 0 is a valid HTTP entry so the index in the message is 1
-			_, err := loadAllow(t, "    - method: POST\n      path: /api/v1/trading/quote\n      spends: false\n"+tc.entry)
+			_, err := loadAllow(t, "    - method: POST\n      path: /api/v1/pay/quote\n      spends: false\n"+tc.entry)
 			if err == nil || !contains(err.Error(), tc.want) {
 				t.Errorf("want %q, got %v", tc.want, err)
 			}

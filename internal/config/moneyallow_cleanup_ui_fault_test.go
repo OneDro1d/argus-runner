@@ -44,7 +44,7 @@ func TestMoneyAllowCleanupUIFault_EachKindLoadsAndConverts(t *testing.T) {
 }
 
 func TestMoneyAllowCleanupUIFault_LoadTimeRefusalsNamedWithTheEntryIndex(t *testing.T) {
-	ok0 := "    - method: POST\n      path: /api/v1/trading/quote\n      spends: false\n"
+	ok0 := "    - method: POST\n      path: /api/v1/pay/quote\n      spends: false\n"
 	for _, tc := range []struct{ name, entry, want string }{
 		{"cleanup with no form", "    - engine: cleanup\n",
 			`money_writes.allow[1]: a cleanup entry requires form (one of sql, bash)`},

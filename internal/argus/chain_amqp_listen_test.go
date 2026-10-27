@@ -66,7 +66,7 @@ func TestListenChain_TheQueueIsDeletedWhenTheChainFails(t *testing.T) {
 func TestListenChain_APreflightRefusalOfALaterStepCreatesNothing(t *testing.T) {
 	f := &argusFakeBroker{outcome: amqpengine.Outcome{OK: true}}
 	// the consume asks 90s of a queue that is not the listen's: refused before the listen is ever built
-	foreign := `{"type":"amqp","name":"take","op":"consume","url_env":"BROKER_URL","queue":"msgbus.agent.hop","wait":"90s"}`
+	foreign := `{"type":"amqp","name":"take","op":"consume","url_env":"BROKER_URL","queue":"msgbus.agent.alpha","wait":"90s"}`
 	res := runListenChain(t, "tr-lc3", f, listenClaims, listenStepJSON, publishJSON, foreign)
 	if res.Status != "failed" || res.Failure == nil || !strings.Contains(res.Failure.Observed, "`wait` must be a positive Go duration of at most 30s") ||
 		!strings.Contains(res.Failure.Observed, "preflight") {

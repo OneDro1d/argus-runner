@@ -479,14 +479,14 @@ func TestMasking_TheSavedValueIsNeverSerialisedIntoAReport(t *testing.T) {
 // so an amount_field that arrives inside a spliced object is judged like any other.
 func TestMoneyGuard_JudgesTheSplicedBody(t *testing.T) {
 	allow := scenario.MoneyWriteAllowlist{{Method: "POST", Path: "/write", Spends: true,
-		AmountField: "order.source_amount", MaxAmount: 25, MaxPerRun: 5}}
+		AmountField: "order.pay_amount", MaxAmount: 25, MaxPerRun: 5}}
 
 	for _, c := range []struct {
 		name, reply string
 		sent        bool
 	}{
-		{"over max_amount inside the spliced object", `{"doc":{"source_amount":999,"x":1}}`, false},
-		{"under max_amount inside the spliced object", `{"doc":{"source_amount":10,"x":1}}`, true},
+		{"over max_amount inside the spliced object", `{"doc":{"pay_amount":999,"x":1}}`, false},
+		{"under max_amount inside the spliced object", `{"doc":{"pay_amount":10,"x":1}}`, true},
 		{"no amount_field inside the spliced object", `{"doc":{"x":1}}`, false},
 	} {
 		srv := newRecorder(t, c.reply)

@@ -132,8 +132,8 @@ func dialerFor(f *fakeBroker) (BrokerDialer, *[]string) {
 func publishSpec() AMQPSpec {
 	return AMQPSpec{
 		Op: "publish", URLEnv: "MSGBUS_ARGUS_TEST_URL",
-		Exchange: "msgbus.inbox", RoutingKey: "inbox.agent.hop",
-		Envelope: &AMQPEnvelope{ToInbox: "agent.hop", FromAgentID: "argus-test", Intent: "ASK", Prompt: "argus-test: hello"},
+		Exchange: "msgbus.inbox", RoutingKey: "inbox.agent.alpha",
+		Envelope: &AMQPEnvelope{ToInbox: "agent.alpha", FromAgentID: "argus-test", Intent: "ASK", Prompt: "argus-test: hello"},
 	}
 }
 
@@ -185,7 +185,7 @@ func TestAMQPStep_AcceptedPublish(t *testing.T) {
 }
 
 func TestAMQPStep_RefusedPublish406(t *testing.T) {
-	out := amqpengine.Outcome{OK: false, Code: 406, Text: "PRECONDITION_FAILED - user_id property set to 'hop' but authenticated user was 'argus-test'"}
+	out := amqpengine.Outcome{OK: false, Code: 406, Text: "PRECONDITION_FAILED - user_id property set to 'alpha' but authenticated user was 'argus-test'"}
 	t.Run("passes `broker refuses with 406`", func(t *testing.T) {
 		sr := runOne(t, publishSpec(), refuses406, &fakeBroker{outcome: out})
 		if sr.Status != "passed" {
@@ -222,14 +222,14 @@ func TestAMQPStep_EnvelopeReachingTheBroker(t *testing.T) {
 		t.Fatalf("want one publish, got %d", len(f.publishes))
 	}
 	p := f.publishes[0]
-	if p.exchange != "msgbus.inbox" || p.routingKey != "inbox.agent.hop" {
+	if p.exchange != "msgbus.inbox" || p.routingKey != "inbox.agent.alpha" {
 		t.Fatalf("exchange/routing key: %q %q", p.exchange, p.routingKey)
 	}
 	m, err := amqpengine.DecodeEnvelope(p.body, p.props.Headers)
 	if err != nil {
 		t.Fatalf("the body must decode as a msgbus envelope: %v", err)
 	}
-	if m.Prompt != "argus-test: hello" || m.ToInbox != "agent.hop" || m.FromAgentID != "argus-test" || m.Intent != envelope.IntentAsk {
+	if m.Prompt != "argus-test: hello" || m.ToInbox != "agent.alpha" || m.FromAgentID != "argus-test" || m.Intent != envelope.IntentAsk {
 		t.Fatalf("envelope fields: %+v", m)
 	}
 	if m.Kind != envelope.KindMessage || m.Source != envelope.SourceMCP || m.OriginTrust != envelope.TrustAgent ||
@@ -271,10 +271,10 @@ func TestAMQPStep_UserIDOnlyWhenGiven(t *testing.T) {
 	}
 	g := &fakeBroker{outcome: amqpengine.Outcome{OK: true}}
 	spec := publishSpec()
-	spec.UserID = "hop"
+	spec.UserID = "alpha"
 	runOne(t, spec, accepts, g)
 	onlyPublish(t, g)
-	if g.publishes[0].props.UserID != "hop" {
+	if g.publishes[0].props.UserID != "alpha" {
 		t.Fatalf("user-id must be set when the step gives one: %q", g.publishes[0].props.UserID)
 	}
 }
@@ -316,8 +316,8 @@ func TestAMQPStep_RawBody(t *testing.T) {
 func TestAMQPStep_OtherOps(t *testing.T) {
 	t.Run("consume", func(t *testing.T) {
 		f := &fakeBroker{outcome: amqpengine.Outcome{Code: 403, Text: "ACCESS_REFUSED"}}
-		sr := runOne(t, AMQPSpec{Op: "consume", URLEnv: "X", Queue: "msgbus.agent.hop", Wait: time.Second}, refuses403, f)
-		if sr.Status != "passed" || len(f.consumes) != 1 || f.consumes[0] != "msgbus.agent.hop" || len(f.publishes) != 0 {
+		sr := runOne(t, AMQPSpec{Op: "consume", URLEnv: "X", Queue: "msgbus.agent.alpha", Wait: time.Second}, refuses403, f)
+		if sr.Status != "passed" || len(f.consumes) != 1 || f.consumes[0] != "msgbus.agent.alpha" || len(f.publishes) != 0 {
 			t.Fatalf("consume: %+v %+v", sr, f)
 		}
 	})

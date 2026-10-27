@@ -305,11 +305,11 @@ check clean up what it declared.
 ```json
 {"steps":[
   {"type":"amqp","name":"spoof","op":"publish","url_env":"MSGBUS_ARGUS_TEST_URL",
-   "exchange":"msgbus.inbox","routing_key":"inbox.agent.hop","user_id":"hop",
-   "envelope":{"to_inbox":"agent.hop","from_agent_id":"argus-test","intent":"INFORM",
+   "exchange":"msgbus.inbox","routing_key":"inbox.agent.alpha","user_id":"alpha",
+   "envelope":{"to_inbox":"agent.alpha","from_agent_id":"argus-test","intent":"INFORM",
                "prompt":"argus-test: ${correlation_id}"}},
-  {"type":"amqp","name":"read-hop","op":"consume","url_env":"MSGBUS_ARGUS_TEST_URL",
-   "queue":"msgbus.agent.hop","wait":"5s"},
+  {"type":"amqp","name":"read-alpha","op":"consume","url_env":"MSGBUS_ARGUS_TEST_URL",
+   "queue":"msgbus.agent.alpha","wait":"5s"},
   {"type":"amqp","name":"declare","op":"declare_queue","url_env":"MSGBUS_ARGUS_TEST_URL",
    "queue":"msgbus.agent.probe"}
 ]}
@@ -319,7 +319,7 @@ check clean up what it declared.
 ## EXPECT
 ### Runnable
 - step spoof: broker refuses with 406
-- step read-hop: broker refuses with 403
+- step read-alpha: broker refuses with 403
 - step declare: broker refuses with 403
 ```
 

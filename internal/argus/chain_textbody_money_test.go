@@ -10,7 +10,7 @@ package argus
 // What the guard does with a string body today: the body is the JSON text `"hello"`; EvaluateSpendAmount
 // parses it, finds a string where it needs an object holding amount_field, and refuses (fail-closed). With
 // the text form the bytes on the wire are `hello`, but the guard must still be shown the string, not the
-// text: `{"source_amount": 5}` as text would otherwise read as an object under the limit and be sent.
+// text: `{"pay_amount": 5}` as text would otherwise read as an object under the limit and be sent.
 
 import (
 	"io"
@@ -28,7 +28,7 @@ import (
 func tbOrderAllow(spends bool) scenario.MoneyWriteAllowlist {
 	a := scenario.MoneyWriteAllow{Method: "POST", Path: "/order", Spends: spends}
 	if spends {
-		a.AmountField, a.MaxAmount, a.MaxPerRun = "source_amount", 25, 5
+		a.AmountField, a.MaxAmount, a.MaxPerRun = "pay_amount", 25, 5
 	}
 	return scenario.MoneyWriteAllowlist{a}
 }
@@ -68,9 +68,9 @@ func TestChainTextBody_MoneyGuard_StringBodiesOnASpendingRouteAreRefusedNeverSen
 	}{
 		{"JSON string, no header (today's quoted form)", "", `"hello"`},
 		{"JSON string under text/plain (the new text form)", textPlain, `"hello"`},
-		{"text that reads as a JSON object UNDER the limit", textPlain, `"{\"source_amount\": 5}"`},
-		{"text that reads as a JSON object OVER the limit", textPlain, `"{\"source_amount\": 999}"`},
-		{"form-encoded text", `{"Content-Type":"application/x-www-form-urlencoded"}`, `"source_amount=5"`},
+		{"text that reads as a JSON object UNDER the limit", textPlain, `"{\"pay_amount\": 5}"`},
+		{"text that reads as a JSON object OVER the limit", textPlain, `"{\"pay_amount\": 999}"`},
+		{"form-encoded text", `{"Content-Type":"application/x-www-form-urlencoded"}`, `"pay_amount=5"`},
 		{"JSON string under application/json", `{"Content-Type":"application/json"}`, `"hello"`},
 		{"empty text", textPlain, `""`},
 	}
@@ -94,7 +94,7 @@ func TestChainTextBody_MoneyGuard_StringBodiesOnASpendingRouteAreRefusedNeverSen
 // The control the table above leans on: the guard still lets a readable object through, in the same harness,
 // so "refused" is the guard's decision about the TEXT and not a harness that refuses everything.
 func TestChainTextBody_MoneyGuard_ControlAnObjectUnderTheLimitIsSent(t *testing.T) {
-	hit, got, status, observed := tbRun(t, tbOrderAllow(true), "", `{"source_amount": 5}`)
+	hit, got, status, observed := tbRun(t, tbOrderAllow(true), "", `{"pay_amount": 5}`)
 	t.Logf("MONEY | control: object under the limit | hit=%v status=%s observed=%.80s got=%s", hit, status, observed, got)
 	if !hit || status != "passed" {
 		t.Fatalf("an object under max_amount must be sent: hit=%v %q / %q", hit, status, observed)

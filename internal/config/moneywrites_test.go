@@ -22,7 +22,7 @@ func writeMoneyWritesConfig(t *testing.T, body string) string {
 
 func TestMoneyWrites_RefusedWithoutMoneyHandling(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\n"+
-		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/trading/quote\n      spends: false\n"+
+		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/pay/quote\n      spends: false\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	_, err := Load(p)
 	if err == nil {
@@ -48,13 +48,13 @@ func TestMoneyWrites_EmptyAllowRefused(t *testing.T) {
 // owner's, so a GET entry is accepted — but only as spends: false (a GET has no body to cap).
 func TestMoneyWrites_GETMethodIsAcceptedOnlyAsSpendsFalse(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
-		"money_writes:\n  allow:\n    - method: GET\n      path: /api/v1/trading/quote\n      spends: false\n"+
+		"money_writes:\n  allow:\n    - method: GET\n      path: /api/v1/pay/quote\n      spends: false\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	if _, err := Load(p); err != nil {
 		t.Fatalf("a GET entry with spends: false was refused: %v", err)
 	}
 	p = writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
-		"money_writes:\n  allow:\n    - method: GET\n      path: /api/v1/trading/quote\n      spends: true\n"+
+		"money_writes:\n  allow:\n    - method: GET\n      path: /api/v1/pay/quote\n      spends: true\n"+
 		"      amount_field: a\n      max_amount: 1\n      max_per_run: 1\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	if _, err := Load(p); err == nil {
@@ -64,7 +64,7 @@ func TestMoneyWrites_GETMethodIsAcceptedOnlyAsSpendsFalse(t *testing.T) {
 
 func TestMoneyWrites_SpendsTrueMissingAmountFieldRefused(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
-		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/trading/order\n      spends: true\n"+
+		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/pay/order\n      spends: true\n"+
 		"      max_amount: 25\n      max_per_run: 4\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	if _, err := Load(p); err == nil {
@@ -74,8 +74,8 @@ func TestMoneyWrites_SpendsTrueMissingAmountFieldRefused(t *testing.T) {
 
 func TestMoneyWrites_SpendsTrueMissingMaxAmountRefused(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
-		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/trading/order\n      spends: true\n"+
-		"      amount_field: source_amount\n      max_per_run: 4\n"+
+		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/pay/order\n      spends: true\n"+
+		"      amount_field: pay_amount\n      max_per_run: 4\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	if _, err := Load(p); err == nil {
 		t.Fatal("spends: true with no max_amount was accepted")
@@ -84,8 +84,8 @@ func TestMoneyWrites_SpendsTrueMissingMaxAmountRefused(t *testing.T) {
 
 func TestMoneyWrites_SpendsTrueMissingMaxPerRunRefused(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
-		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/trading/order\n      spends: true\n"+
-		"      amount_field: source_amount\n      max_amount: 25\n"+
+		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/pay/order\n      spends: true\n"+
+		"      amount_field: pay_amount\n      max_amount: 25\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	if _, err := Load(p); err == nil {
 		t.Fatal("spends: true with no max_per_run was accepted")
@@ -94,7 +94,7 @@ func TestMoneyWrites_SpendsTrueMissingMaxPerRunRefused(t *testing.T) {
 
 func TestMoneyWrites_SpendsFalseWithLimitFieldsRefused(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
-		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/trading/quote\n      spends: false\n"+
+		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/pay/quote\n      spends: false\n"+
 		"      max_amount: 25\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	if _, err := Load(p); err == nil {
@@ -104,7 +104,7 @@ func TestMoneyWrites_SpendsFalseWithLimitFieldsRefused(t *testing.T) {
 
 func TestMoneyWrites_PathWithQueryStringRefused(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
-		"money_writes:\n  allow:\n    - method: POST\n      path: \"/api/v1/trading/order?x=1\"\n      spends: false\n"+
+		"money_writes:\n  allow:\n    - method: POST\n      path: \"/api/v1/pay/order?x=1\"\n      spends: false\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	if _, err := Load(p); err == nil {
 		t.Fatal("a path carrying a query string was accepted")
@@ -113,7 +113,7 @@ func TestMoneyWrites_PathWithQueryStringRefused(t *testing.T) {
 
 func TestMoneyWrites_PathWithWildcardRefused(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
-		"money_writes:\n  allow:\n    - method: POST\n      path: \"/api/v1/trading/*\"\n      spends: false\n"+
+		"money_writes:\n  allow:\n    - method: POST\n      path: \"/api/v1/pay/*\"\n      spends: false\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	if _, err := Load(p); err == nil {
 		t.Fatal("a wildcard path was accepted")
@@ -123,9 +123,9 @@ func TestMoneyWrites_PathWithWildcardRefused(t *testing.T) {
 func TestMoneyWrites_ValidBlockAccepted(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: true\n"+
 		"money_writes:\n  allow:\n"+
-		"    - method: POST\n      path: /api/v1/trading/quote\n      spends: false\n"+
-		"    - method: POST\n      path: /api/v1/trading/order\n      spends: true\n"+
-		"      amount_field: source_amount\n      max_amount: 25\n      max_per_run: 4\n"+
+		"    - method: POST\n      path: /api/v1/pay/quote\n      spends: false\n"+
+		"    - method: POST\n      path: /api/v1/pay/order\n      spends: true\n"+
+		"      amount_field: pay_amount\n      max_amount: 25\n      max_per_run: 4\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	c, err := Load(p)
 	if err != nil {
@@ -135,8 +135,8 @@ func TestMoneyWrites_ValidBlockAccepted(t *testing.T) {
 	if len(al) != 2 {
 		t.Fatalf("MoneyWriteAllowlist() = %d entries, want 2", len(al))
 	}
-	if al[1].Method != "POST" || al[1].Path != "/api/v1/trading/order" || !al[1].Spends ||
-		al[1].AmountField != "source_amount" || al[1].MaxAmount != 25 || al[1].MaxPerRun != 4 {
+	if al[1].Method != "POST" || al[1].Path != "/api/v1/pay/order" || !al[1].Spends ||
+		al[1].AmountField != "pay_amount" || al[1].MaxAmount != 25 || al[1].MaxPerRun != 4 {
 		t.Errorf("second entry did not convert correctly: %+v", al[1])
 	}
 }
@@ -156,7 +156,7 @@ func TestMoneyWrites_AbsentBlockIsNilAllowlist(t *testing.T) {
 // item 1's "not valid without money_handling" also holds for money_handling: false explicitly.
 func TestMoneyWrites_RefusedWithMoneyHandlingExplicitlyFalse(t *testing.T) {
 	p := writeMoneyWritesConfig(t, "project:\n  name: p\nmoney_handling: false\n"+
-		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/trading/quote\n      spends: false\n"+
+		"money_writes:\n  allow:\n    - method: POST\n      path: /api/v1/pay/quote\n      spends: false\n"+
 		"targets:\n  http:\n    base_url: http://sut.invalid\n")
 	if _, err := Load(p); err == nil {
 		t.Fatal("money_writes with money_handling: false was accepted")
@@ -167,15 +167,15 @@ func TestMoneyWrites_RefusedWithMoneyHandlingExplicitlyFalse(t *testing.T) {
 
 func TestValidate_MoneyWritesExemptsAnAllowedWriteAndCatchesALiteralOverspend(t *testing.T) {
 	dir := t.TempDir()
-	writeScenario(t, dir, "MW-ALLOWED", "POST `http://sut.invalid/api/v1/trading/quote`")
-	writeMoneyScenarioWithBody(t, dir, "MW-OVERSPEND", "POST", "http://sut.invalid/api/v1/trading/order",
-		`{"source_amount": 999}`)
-	writeMoneyScenarioWithBody(t, dir, "MW-UNLISTED", "POST", "http://sut.invalid/api/v1/trading/rebalance", "{}")
+	writeScenario(t, dir, "MW-ALLOWED", "POST `http://sut.invalid/api/v1/pay/quote`")
+	writeMoneyScenarioWithBody(t, dir, "MW-OVERSPEND", "POST", "http://sut.invalid/api/v1/pay/order",
+		`{"pay_amount": 999}`)
+	writeMoneyScenarioWithBody(t, dir, "MW-UNLISTED", "POST", "http://sut.invalid/api/v1/pay/rebalance", "{}")
 
 	c := &Config{MoneyHandling: true, MoneyWrites: &MoneyWritesConfig{Allow: []MoneyWriteAllowEntry{
-		{Method: "POST", Path: "/api/v1/trading/quote", Spends: boolPtr(false)},
-		{Method: "POST", Path: "/api/v1/trading/order", Spends: boolPtr(true),
-			AmountField: "source_amount", MaxAmount: 25, MaxPerRun: 4},
+		{Method: "POST", Path: "/api/v1/pay/quote", Spends: boolPtr(false)},
+		{Method: "POST", Path: "/api/v1/pay/order", Spends: boolPtr(true),
+			AmountField: "pay_amount", MaxAmount: 25, MaxPerRun: 4},
 	}}}
 	c.Project.Name = "p"
 	c.Targets.HTTP = &HTTPTarget{BaseURL: "http://sut.invalid"}

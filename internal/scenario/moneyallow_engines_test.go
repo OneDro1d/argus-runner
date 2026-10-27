@@ -26,10 +26,10 @@ func TestAMQP_EachOpIsAllowedByItsEntryAndRefusedByANearMiss(t *testing.T) {
 		near   []string // step field sets that must NOT match
 	}
 	for _, tc := range []c{
-		{"publish", `,"exchange":"msgbus.inbox","routing_key":"inbox.agent.hop"`,
-			MoneyWriteAllow{Engine: "amqp", Op: "publish", Exchange: "msgbus.inbox", RoutingKey: "inbox.agent.hop"},
+		{"publish", `,"exchange":"msgbus.inbox","routing_key":"inbox.agent.alpha"`,
+			MoneyWriteAllow{Engine: "amqp", Op: "publish", Exchange: "msgbus.inbox", RoutingKey: "inbox.agent.alpha"},
 			[]string{`,"exchange":"msgbus.inbox","routing_key":"inbox.agent.other"`,
-				`,"exchange":"msgbus.other","routing_key":"inbox.agent.hop"`,
+				`,"exchange":"msgbus.other","routing_key":"inbox.agent.alpha"`,
 				`,"exchange":"msgbus.inbox"`}},
 		{"consume", `,"queue":"reply.inbox"`,
 			MoneyWriteAllow{Engine: "amqp", Op: "consume", Queue: "reply.inbox"},
@@ -111,7 +111,7 @@ func TestAMQP_AChainMixingAnAllowedConsumeAndAnUnlistedPublishIsRefusedForThePub
 	al := MoneyWriteAllowlist{{Engine: "amqp", Op: "consume", Queue: "reply.inbox"}}
 	s := chainOf(
 		amqpStep("read", "consume", `,"queue":"reply.inbox"`),
-		amqpStep("send", "publish", `,"exchange":"msgbus.inbox","routing_key":"inbox.agent.hop"`),
+		amqpStep("send", "publish", `,"exchange":"msgbus.inbox","routing_key":"inbox.agent.alpha"`),
 	)
 	v := MoneyGuardViolations(s, al)
 	if len(v) != 1 || !strings.HasPrefix(v[0], `chain step send is a "amqp" step`) {
@@ -142,27 +142,27 @@ func mcpStep(name, fields string) string {
 
 func TestMCP_ChainStepByTargetAndTool(t *testing.T) {
 	al := MoneyWriteAllowlist{
-		{Engine: "mcp", Target: "trading", Tool: "get_positions"},
+		{Engine: "mcp", Target: "ledger", Tool: "get_balances"},
 		{Engine: "mcp", Tool: "ping"},
 	}
 	for _, tc := range []struct {
 		name, step string
 		want       bool
 	}{
-		{"named target + tool", mcpStep("a", `,"target":"trading","tool":"get_positions"`), true},
+		{"named target + tool", mcpStep("a", `,"target":"ledger","tool":"get_balances"`), true},
 		{"the unnamed target", mcpStep("a", `,"tool":"ping"`), true},
-		{"another tool on the named target", mcpStep("a", `,"target":"trading","tool":"place_order"`), false},
-		{"the tool on another target", mcpStep("a", `,"target":"other","tool":"get_positions"`), false},
-		{"the named tool with no target", mcpStep("a", `,"tool":"get_positions"`), false},
-		{"the unnamed entry's tool on a named target", mcpStep("a", `,"target":"trading","tool":"ping"`), false},
-		{"case differs", mcpStep("a", `,"target":"trading","tool":"Get_Positions"`), false},
-		{"no tool", mcpStep("a", `,"target":"trading"`), false},
-		{"a tool built at run time", mcpStep("a", `,"target":"trading","tool":"${saved.t}"`), false},
-		{"a target built at run time", mcpStep("a", `,"target":"${T}","tool":"get_positions"`), false},
+		{"another tool on the named target", mcpStep("a", `,"target":"ledger","tool":"post_entry"`), false},
+		{"the tool on another target", mcpStep("a", `,"target":"other","tool":"get_balances"`), false},
+		{"the named tool with no target", mcpStep("a", `,"tool":"get_balances"`), false},
+		{"the unnamed entry's tool on a named target", mcpStep("a", `,"target":"ledger","tool":"ping"`), false},
+		{"case differs", mcpStep("a", `,"target":"ledger","tool":"Get_Balances"`), false},
+		{"no tool", mcpStep("a", `,"target":"ledger"`), false},
+		{"a tool built at run time", mcpStep("a", `,"target":"ledger","tool":"${saved.t}"`), false},
+		{"a target built at run time", mcpStep("a", `,"target":"${T}","tool":"get_balances"`), false},
 		// the endpoint rule: a step that sets its own server_url is NEVER matched
 		{"server_url set, unnamed entry", mcpStep("a", `,"server_url":"https://elsewhere.example/mcp","tool":"ping"`), false},
 		{"server_url set (even unresolved), unnamed entry", mcpStep("a", `,"server_url":"${MCP_URL}","tool":"ping"`), false},
-		{"server_url beside a target", mcpStep("a", `,"target":"trading","server_url":"https://elsewhere.example/mcp","tool":"get_positions"`), false},
+		{"server_url beside a target", mcpStep("a", `,"target":"ledger","server_url":"https://elsewhere.example/mcp","tool":"get_balances"`), false},
 	} {
 		v := MoneyGuardViolations(chainOf(tc.step), al)
 		if (len(v) == 0) != tc.want {
@@ -172,7 +172,7 @@ func TestMCP_ChainStepByTargetAndTool(t *testing.T) {
 			t.Errorf("%s: the base sentence must lead the refusal: %v", tc.name, v)
 		}
 	}
-	if v := MoneyGuardViolations(chainOf(mcpStep("a", `,"target":"trading","tool":"get_positions"`)), nil); len(v) != 1 {
+	if v := MoneyGuardViolations(chainOf(mcpStep("a", `,"target":"ledger","tool":"get_balances"`)), nil); len(v) != 1 {
 		t.Errorf("without a list an mcp step must be refused as before: %v", v)
 	}
 }
@@ -184,7 +184,7 @@ func mcpScenario(target, payload, trigURL string) *Scenario {
 
 func TestMCP_TaggedScenarioIsAllowedByItsEntryAndRefusedWithout(t *testing.T) {
 	al := MoneyWriteAllowlist{
-		{Engine: "mcp", Target: "trading", Tool: "get_positions"},
+		{Engine: "mcp", Target: "ledger", Tool: "get_balances"},
 		{Engine: "mcp", Tool: "ping"},
 	}
 	for _, tc := range []struct {
@@ -192,15 +192,15 @@ func TestMCP_TaggedScenarioIsAllowedByItsEntryAndRefusedWithout(t *testing.T) {
 		s    *Scenario
 		want bool
 	}{
-		{"named target + tool", mcpScenario("trading", `{"tool":"get_positions","args":{}}`, "${MCP_URL}"), true},
-		{"another tool", mcpScenario("trading", `{"tool":"place_order","args":{}}`, "${MCP_URL}"), false},
-		{"another target", mcpScenario("other", `{"tool":"get_positions"}`, "${MCP_URL}"), false},
+		{"named target + tool", mcpScenario("ledger", `{"tool":"get_balances","args":{}}`, "${MCP_URL}"), true},
+		{"another tool", mcpScenario("ledger", `{"tool":"post_entry","args":{}}`, "${MCP_URL}"), false},
+		{"another target", mcpScenario("other", `{"tool":"get_balances"}`, "${MCP_URL}"), false},
 		{"unnamed target, no endpoint of its own", mcpScenario("", `{"tool":"ping"}`, ""), true},
 		{"unnamed target but a TRIGGER url (the runner uses it)", mcpScenario("", `{"tool":"ping"}`, "`https://elsewhere.example/mcp`"), false},
 		{"unnamed target but the in-tree ${MCP_URL} shape", mcpScenario("", `{"tool":"ping"}`, "${MCP_URL}"), false},
-		{"a payload server_url", mcpScenario("trading", `{"tool":"get_positions","server_url":"https://elsewhere.example/mcp"}`, "${MCP_URL}"), false},
-		{"an unreadable payload", mcpScenario("trading", `not json`, "${MCP_URL}"), false},
-		{"no tool", mcpScenario("trading", `{"args":{}}`, "${MCP_URL}"), false},
+		{"a payload server_url", mcpScenario("ledger", `{"tool":"get_balances","server_url":"https://elsewhere.example/mcp"}`, "${MCP_URL}"), false},
+		{"an unreadable payload", mcpScenario("ledger", `not json`, "${MCP_URL}"), false},
+		{"no tool", mcpScenario("ledger", `{"args":{}}`, "${MCP_URL}"), false},
 	} {
 		v := MoneyGuardViolations(tc.s, al)
 		if (len(v) == 0) != tc.want {
@@ -210,7 +210,7 @@ func TestMCP_TaggedScenarioIsAllowedByItsEntryAndRefusedWithout(t *testing.T) {
 			t.Errorf("%s: the base sentence must lead the refusal: %v", tc.name, v)
 		}
 	}
-	if v := MoneyGuardViolations(mcpScenario("trading", `{"tool":"get_positions"}`, "${MCP_URL}"), nil); len(v) != 1 {
+	if v := MoneyGuardViolations(mcpScenario("ledger", `{"tool":"get_balances"}`, "${MCP_URL}"), nil); len(v) != 1 {
 		t.Errorf("without a list an mcp scenario must be refused as before: %v", v)
 	}
 }

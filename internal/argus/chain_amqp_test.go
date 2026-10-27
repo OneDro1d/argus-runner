@@ -97,11 +97,11 @@ func withFakeBroker(t *testing.T, f *argusFakeBroker) {
 }
 
 const spoofTrigger = `{"steps":[{"type":"amqp","name":"spoof","op":"publish","url_env":"MSGBUS_ARGUS_TEST_URL",` +
-	`"exchange":"msgbus.inbox","routing_key":"inbox.agent.hop","user_id":"hop",` +
-	`"envelope":{"to_inbox":"agent.hop","from_agent_id":"argus-test","intent":"DECISION_REQUEST","prompt":"argus-test: ${correlation_id}"}}]}`
+	`"exchange":"msgbus.inbox","routing_key":"inbox.agent.alpha","user_id":"alpha",` +
+	`"envelope":{"to_inbox":"agent.alpha","from_agent_id":"argus-test","intent":"DECISION_REQUEST","prompt":"argus-test: ${correlation_id}"}}]}`
 
 func TestAMQPChain_SpoofRefusedAndEnvelopeResolved(t *testing.T) {
-	f := &argusFakeBroker{outcome: amqpengine.Outcome{Code: 406, Text: "PRECONDITION_FAILED - user_id property set to 'hop'"}}
+	f := &argusFakeBroker{outcome: amqpengine.Outcome{Code: 406, Text: "PRECONDITION_FAILED - user_id property set to 'alpha'"}}
 	withFakeBroker(t, f)
 	s := scenario.Parse(chainRunMD("", spoofTrigger, "### Runnable\n- step spoof: broker refuses with 406\n"))
 	res := runChainScenario(&config.Config{}, s, "tr-amqp-e2e", "testkit/ui")
@@ -118,10 +118,10 @@ func TestAMQPChain_SpoofRefusedAndEnvelopeResolved(t *testing.T) {
 	if m.Prompt != "argus-test: tr-amqp-e2e" {
 		t.Fatalf("${correlation_id} must resolve in the prompt: %q", m.Prompt)
 	}
-	if m.Intent != envelope.IntentDecisionRequest || m.ToInbox != "agent.hop" || m.FromAgentID != "argus-test" || m.CorrelationID != "tr-amqp-e2e" {
+	if m.Intent != envelope.IntentDecisionRequest || m.ToInbox != "agent.alpha" || m.FromAgentID != "argus-test" || m.CorrelationID != "tr-amqp-e2e" {
 		t.Fatalf("envelope: %+v", m)
 	}
-	if f.props[0].UserID != "hop" {
+	if f.props[0].UserID != "alpha" {
 		t.Fatalf("user_id prop: %q", f.props[0].UserID)
 	}
 	if got := res.Steps[0].AssertionsEnforced; len(got) != 1 || got[0] != "broker refuses with 406" {

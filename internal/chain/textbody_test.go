@@ -18,7 +18,7 @@ import (
 // The money guard is shown a text body as a JSON STRING, so a spending route is refused text it cannot read
 // as an object, INCLUDING text that happens to be a JSON object under the limit.
 func TestHTTPStep_TextBodyOnASpendingRoute_IsRefusedWithTheGuardsOwnWords(t *testing.T) {
-	for _, text := range []string{`hello`, `{"source_amount": 5}`, `source_amount=5`, ``} {
+	for _, text := range []string{`hello`, `{"pay_amount": 5}`, `pay_amount=5`, ``} {
 		var hit atomic.Bool
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hit.Store(true)
@@ -37,10 +37,10 @@ func TestHTTPStep_TextBodyOnASpendingRoute_IsRefusedWithTheGuardsOwnWords(t *tes
 	}
 }
 
-// MUTATION CONTROL for the above: had the guard been shown the raw text, `{"source_amount": 5}` would have
+// MUTATION CONTROL for the above: had the guard been shown the raw text, `{"pay_amount": 5}` would have
 // been judged an object under the limit. This pins that the two forms differ, so the test above can fail.
 func TestGuardViewOfText_IsAJSONStringNeverTheText(t *testing.T) {
-	text := `{"source_amount": 5}`
+	text := `{"pay_amount": 5}`
 	if msg := scenario.EvaluateSpendAmount(&orderAllow()[0], text); msg != "" {
 		t.Fatalf("setup: the raw text should read as an object under the limit, got %q", msg)
 	}
@@ -58,9 +58,9 @@ func TestHTTPStep_WithoutTextBody_AnObjectUnderTheLimitIsStillSent(t *testing.T)
 		w.WriteHeader(200)
 	}))
 	defer ts.Close()
-	step := HTTPStep("spend", "POST", ts.URL+"/order", nil, `{"source_amount": 5}`, 200, nil, nil, nil, false,
+	step := HTTPStep("spend", "POST", ts.URL+"/order", nil, `{"pay_amount": 5}`, 200, nil, nil, nil, false,
 		orderAllow(), &scenario.MoneySpendLedger{}, WithTextBody(false))
-	if res := step.Run("cid", nil); res.Status != "passed" || got != `{"source_amount": 5}` {
+	if res := step.Run("cid", nil); res.Status != "passed" || got != `{"pay_amount": 5}` {
 		t.Fatalf("%q / %q, received %q", res.Status, res.Observed, got)
 	}
 }

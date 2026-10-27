@@ -29,7 +29,7 @@ import (
 //   - an HTTP request whose path names a money verb, EVEN ON A GET: order, quote, swap, rebalance,
 //     claim. A GET can still act — a quote endpoint prices against live liquidity, and some APIs
 //     create on GET. Config and withdrawal paths are deliberately NOT in this list: a GET of either is
-//     a read (the live Shop kit checks `GET /api/v1/trading/config` and `/user/withdrawal-pin`), and
+//     a read (a kit may check `GET /api/v1/config` or `/user/withdrawal-settings`), and
 //     every WRITE to them is already refused by GET-only.
 //   - every engine whose effect cannot be read off the file: an MCP tool call, an AMQP op (publish and
 //     declare write; consume removes a message another consumer was owed), a database step, a logs

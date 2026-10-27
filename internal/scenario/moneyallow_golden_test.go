@@ -11,13 +11,13 @@ import (
 // decodes it. The literal below was produced by, and first asserted against, the base commit
 // 91b6833d779dc9b0a029d97aa89df3a468f68e06 (before any change).
 
-const goldenTodayShapedAllowJSON = `[{"method":"POST","path":"/api/v1/trading/quote","spends":false},` +
-	`{"method":"POST","path":"/api/v1/trading/order","spends":true,"amount_field":"source_amount","max_amount":25,"max_per_run":4}]`
+const goldenTodayShapedAllowJSON = `[{"method":"POST","path":"/api/v1/pay/quote","spends":false},` +
+	`{"method":"POST","path":"/api/v1/pay/order","spends":true,"amount_field":"pay_amount","max_amount":25,"max_per_run":4}]`
 
 func TestMoneyWriteAllow_TodayShapedListSerialisesByteIdentically(t *testing.T) {
 	al := MoneyWriteAllowlist{
-		{Method: "POST", Path: "/api/v1/trading/quote", Spends: false},
-		{Method: "POST", Path: "/api/v1/trading/order", Spends: true, AmountField: "source_amount", MaxAmount: 25, MaxPerRun: 4},
+		{Method: "POST", Path: "/api/v1/pay/quote", Spends: false},
+		{Method: "POST", Path: "/api/v1/pay/order", Spends: true, AmountField: "pay_amount", MaxAmount: 25, MaxPerRun: 4},
 	}
 	got, err := json.Marshal(al)
 	if err != nil {

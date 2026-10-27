@@ -9,34 +9,34 @@ import (
 // resolved-body spend check, the per-run ledger, and the validation-time literal-amount check.
 
 func orderEntry() MoneyWriteAllow {
-	return MoneyWriteAllow{Method: "POST", Path: "/api/v1/trading/order", Spends: true,
-		AmountField: "source_amount", MaxAmount: 25, MaxPerRun: 4}
+	return MoneyWriteAllow{Method: "POST", Path: "/api/v1/pay/order", Spends: true,
+		AmountField: "pay_amount", MaxAmount: 25, MaxPerRun: 4}
 }
 
 func quoteEntry() MoneyWriteAllow {
-	return MoneyWriteAllow{Method: "POST", Path: "/api/v1/trading/quote", Spends: false}
+	return MoneyWriteAllow{Method: "POST", Path: "/api/v1/pay/quote", Spends: false}
 }
 
 // ── the pure matcher (spec item 5) ──────────────────────────────────────────────────────────────
 
 func TestMoneyWriteAllowlist_ExactMatch(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry(), quoteEntry()}
-	e := al.Match("POST", "https://sut.example/api/v1/trading/order")
-	if e == nil || e.Path != "/api/v1/trading/order" {
+	e := al.Match("POST", "https://sut.example/api/v1/pay/order")
+	if e == nil || e.Path != "/api/v1/pay/order" {
 		t.Fatalf("exact match failed: %+v", e)
 	}
 }
 
 func TestMoneyWriteAllowlist_WrongMethodDoesNotMatch(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	if e := al.Match("PUT", "https://sut.example/api/v1/trading/order"); e != nil {
+	if e := al.Match("PUT", "https://sut.example/api/v1/pay/order"); e != nil {
 		t.Fatalf("PUT matched an entry declared for POST: %+v", e)
 	}
 }
 
 func TestMoneyWriteAllowlist_MethodIsCaseInsensitive(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	if e := al.Match("post", "https://sut.example/api/v1/trading/order"); e == nil {
+	if e := al.Match("post", "https://sut.example/api/v1/pay/order"); e == nil {
 		t.Fatal("lowercase \"post\" did not match a POST entry — method should be case-insensitive")
 	}
 }
@@ -50,11 +50,11 @@ func TestMoneyWriteAllowlist_ExactMatchOnly_NearMissesRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name, url string
 	}{
-		{"prefix (extra path segment after)", "https://sut.example/api/v1/trading/order/123"},
-		{"suffix (extra characters before, same tail)", "https://sut.example/api/v1/trading/xorder"},
-		{"suffix (declared path is a suffix of a longer one)", "https://sut.example/api/v1/trading/orders"},
-		{"trailing slash", "https://sut.example/api/v1/trading/order/"},
-		{"wrong case", "https://sut.example/API/v1/trading/ORDER"},
+		{"prefix (extra path segment after)", "https://sut.example/api/v1/pay/order/123"},
+		{"suffix (extra characters before, same tail)", "https://sut.example/api/v1/pay/xorder"},
+		{"suffix (declared path is a suffix of a longer one)", "https://sut.example/api/v1/pay/orders"},
+		{"trailing slash", "https://sut.example/api/v1/pay/order/"},
+		{"wrong case", "https://sut.example/API/v1/pay/ORDER"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if e := al.Match("POST", tc.url); e != nil {
@@ -68,7 +68,7 @@ func TestMoneyWriteAllowlist_ExactMatchOnly_NearMissesRefused(t *testing.T) {
 // only, so a request that hits the declared path with extra query params must still match.
 func TestMoneyWriteAllowlist_QueryStringOnRequestIsStripped(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	e := al.Match("POST", "https://sut.example/api/v1/trading/order?idempotency_key=abc")
+	e := al.Match("POST", "https://sut.example/api/v1/pay/order?idempotency_key=abc")
 	if e == nil {
 		t.Fatal("a request URL carrying a query string did not match its bare declared path — the query must be stripped before comparing")
 	}
@@ -76,7 +76,7 @@ func TestMoneyWriteAllowlist_QueryStringOnRequestIsStripped(t *testing.T) {
 
 func TestMoneyWriteAllowlist_ConfigVarPlaceholderStripped(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	e := al.Match("POST", "${INGESTION_URL}/api/v1/trading/order")
+	e := al.Match("POST", "${INGESTION_URL}/api/v1/pay/order")
 	if e == nil {
 		t.Fatal("a leading ${VAR} base-URL placeholder was not stripped before matching")
 	}
@@ -84,7 +84,7 @@ func TestMoneyWriteAllowlist_ConfigVarPlaceholderStripped(t *testing.T) {
 
 func TestMoneyWriteAllowlist_EmptyAllowlistNeverMatches(t *testing.T) {
 	var al MoneyWriteAllowlist
-	if e := al.Match("POST", "https://sut.example/api/v1/trading/order"); e != nil {
+	if e := al.Match("POST", "https://sut.example/api/v1/pay/order"); e != nil {
 		t.Fatalf("a nil allowlist matched: %+v", e)
 	}
 }
@@ -93,7 +93,7 @@ func TestMoneyWriteAllowlist_EmptyAllowlistNeverMatches(t *testing.T) {
 
 func TestMoneyGuardViolations_AllowedWriteIsExempt(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	s := httpScenario("POST", "https://sut.example/api/v1/trading/order", naCleanup)
+	s := httpScenario("POST", "https://sut.example/api/v1/pay/order", naCleanup)
 	if v := MoneyGuardViolations(s, al); len(v) != 0 {
 		t.Fatalf("an allowlisted POST was refused: %v", v)
 	}
@@ -101,7 +101,7 @@ func TestMoneyGuardViolations_AllowedWriteIsExempt(t *testing.T) {
 
 func TestMoneyGuardViolations_UnlistedWriteStillRefused(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()} // only /order is listed
-	s := httpScenario("POST", "https://sut.example/api/v1/trading/rebalance", naCleanup)
+	s := httpScenario("POST", "https://sut.example/api/v1/pay/rebalance", naCleanup)
 	v := MoneyGuardViolations(s, al)
 	if len(v) == 0 {
 		t.Fatal("an unlisted POST to a money-verb path was allowed")
@@ -121,7 +121,7 @@ func TestMoneyGuardViolations_ChainGETPlusAllowedPOSTAllowed(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
 	s := &Scenario{Tags: []string{ChainTag}, Cleanup: naCleanup, Trigger: Trigger{Payload: `{"steps":[` +
 		`{"type":"http","name":"a","method":"GET","url":"https://sut.example/health"},` +
-		`{"type":"http","name":"b","method":"POST","url":"https://sut.example/api/v1/trading/order"}]}`}}
+		`{"type":"http","name":"b","method":"POST","url":"https://sut.example/api/v1/pay/order"}]}`}}
 	if v := MoneyGuardViolations(s, al); len(v) != 0 {
 		t.Fatalf("a chain mixing a GET and an allowlisted POST was refused: %v", v)
 	}
@@ -131,7 +131,7 @@ func TestMoneyGuardViolations_ChainWithAnUnlistedPOSTRefused(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()} // /order only — NOT /rebalance
 	s := &Scenario{Tags: []string{ChainTag}, Cleanup: naCleanup, Trigger: Trigger{Payload: `{"steps":[` +
 		`{"type":"http","name":"a","method":"GET","url":"https://sut.example/health"},` +
-		`{"type":"http","name":"b","method":"POST","url":"https://sut.example/api/v1/trading/rebalance"}]}`}}
+		`{"type":"http","name":"b","method":"POST","url":"https://sut.example/api/v1/pay/rebalance"}]}`}}
 	v := MoneyGuardViolations(s, al)
 	if len(v) == 0 {
 		t.Fatal("a chain step POSTing to an UNLISTED path was allowed")
@@ -142,21 +142,21 @@ func TestMoneyGuardViolations_ChainWithAnUnlistedPOSTRefused(t *testing.T) {
 
 func TestEvaluateSpendAmount_UnderCapPasses(t *testing.T) {
 	e := orderEntry()
-	if msg := EvaluateSpendAmount(&e, `{"source_amount": 10}`); msg != "" {
+	if msg := EvaluateSpendAmount(&e, `{"pay_amount": 10}`); msg != "" {
 		t.Fatalf("an under-cap amount was refused: %q", msg)
 	}
 }
 
 func TestEvaluateSpendAmount_AtCapPasses(t *testing.T) {
 	e := orderEntry()
-	if msg := EvaluateSpendAmount(&e, `{"source_amount": 25}`); msg != "" {
+	if msg := EvaluateSpendAmount(&e, `{"pay_amount": 25}`); msg != "" {
 		t.Fatalf("an amount exactly at max_amount was refused: %q", msg)
 	}
 }
 
 func TestEvaluateSpendAmount_OverCapRefused(t *testing.T) {
 	e := orderEntry()
-	msg := EvaluateSpendAmount(&e, `{"source_amount": 25.01}`)
+	msg := EvaluateSpendAmount(&e, `{"pay_amount": 25.01}`)
 	if msg == "" || !strings.Contains(msg, "25.01") || !strings.Contains(msg, "25") {
 		t.Fatalf("an over-cap amount was not refused by name: %q", msg)
 	}
@@ -173,10 +173,10 @@ func TestEvaluateSpendAmount_MissingFieldRefused(t *testing.T) {
 func TestEvaluateSpendAmount_NonNumericFieldRefused(t *testing.T) {
 	e := orderEntry()
 	for _, body := range []string{
-		`{"source_amount": "10"}`, // a numeric-LOOKING string is still not a JSON number
-		`{"source_amount": true}`,
-		`{"source_amount": null}`,
-		`{"source_amount": [1,2]}`,
+		`{"pay_amount": "10"}`, // a numeric-LOOKING string is still not a JSON number
+		`{"pay_amount": true}`,
+		`{"pay_amount": null}`,
+		`{"pay_amount": [1,2]}`,
 		`not json at all`,
 	} {
 		if msg := EvaluateSpendAmount(&e, body); msg == "" {
@@ -249,7 +249,7 @@ func TestMoneySpendLedger_SharedAcrossTwoScenarios(t *testing.T) {
 func TestMoneySpendLedger_DifferentEntriesHaveSeparateBudgets(t *testing.T) {
 	order := orderEntry()
 	other := orderEntry()
-	other.Path = "/api/v1/trading/order2"
+	other.Path = "/api/v1/pay/order2"
 	l := &MoneySpendLedger{}
 	for i := 0; i < 4; i++ {
 		l.Reserve(&order)
@@ -276,8 +276,8 @@ func TestMoneySpendLedger_NilLedgerAlwaysReserves(t *testing.T) {
 
 func TestMoneyWriteAmountViolations_LiteralOverCapRefused(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	s := httpScenario("POST", "https://sut.example/api/v1/trading/order", naCleanup)
-	s.Trigger.Payload = `{"source_amount": 999}`
+	s := httpScenario("POST", "https://sut.example/api/v1/pay/order", naCleanup)
+	s.Trigger.Payload = `{"pay_amount": 999}`
 	v := MoneyWriteAmountViolations(s, al)
 	if len(v) == 0 {
 		t.Fatal("a literal amount over max_amount was not caught at validation time")
@@ -286,8 +286,8 @@ func TestMoneyWriteAmountViolations_LiteralOverCapRefused(t *testing.T) {
 
 func TestMoneyWriteAmountViolations_LiteralUnderCapPasses(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	s := httpScenario("POST", "https://sut.example/api/v1/trading/order", naCleanup)
-	s.Trigger.Payload = `{"source_amount": 5}`
+	s := httpScenario("POST", "https://sut.example/api/v1/pay/order", naCleanup)
+	s.Trigger.Payload = `{"pay_amount": 5}`
 	if v := MoneyWriteAmountViolations(s, al); len(v) != 0 {
 		t.Fatalf("a literal amount under max_amount was refused: %v", v)
 	}
@@ -296,8 +296,8 @@ func TestMoneyWriteAmountViolations_LiteralUnderCapPasses(t *testing.T) {
 // A body carrying ANY "${…}" placeholder is left to execution — validation must not guess.
 func TestMoneyWriteAmountViolations_TemplatedBodyLeftToExecution(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	s := httpScenario("POST", "https://sut.example/api/v1/trading/order", naCleanup)
-	s.Trigger.Payload = `{"source_amount": ${AMOUNT}}`
+	s := httpScenario("POST", "https://sut.example/api/v1/pay/order", naCleanup)
+	s.Trigger.Payload = `{"pay_amount": ${AMOUNT}}`
 	if v := MoneyWriteAmountViolations(s, al); len(v) != 0 {
 		t.Fatalf("a templated body was checked at validation time (should be deferred to execution): %v", v)
 	}
@@ -306,7 +306,7 @@ func TestMoneyWriteAmountViolations_TemplatedBodyLeftToExecution(t *testing.T) {
 func TestMoneyWriteAmountViolations_ChainStepLiteralOverCapRefused(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
 	s := &Scenario{Tags: []string{ChainTag}, Cleanup: naCleanup, Trigger: Trigger{Payload: `{"steps":[` +
-		`{"type":"http","name":"spend","method":"POST","url":"https://sut.example/api/v1/trading/order","body":{"source_amount":999}}]}`}}
+		`{"type":"http","name":"spend","method":"POST","url":"https://sut.example/api/v1/pay/order","body":{"pay_amount":999}}]}`}}
 	v := MoneyWriteAmountViolations(s, al)
 	if len(v) == 0 || !strings.Contains(strings.Join(v, " "), "spend") {
 		t.Fatalf("a chain step's literal over-cap amount was not caught, or not named: %v", v)
@@ -314,8 +314,8 @@ func TestMoneyWriteAmountViolations_ChainStepLiteralOverCapRefused(t *testing.T)
 }
 
 func TestMoneyWriteAmountViolations_EmptyAllowlistNoop(t *testing.T) {
-	s := httpScenario("POST", "https://sut.example/api/v1/trading/order", naCleanup)
-	s.Trigger.Payload = `{"source_amount": 999999}`
+	s := httpScenario("POST", "https://sut.example/api/v1/pay/order", naCleanup)
+	s.Trigger.Payload = `{"pay_amount": 999999}`
 	if v := MoneyWriteAmountViolations(s, nil); len(v) != 0 {
 		t.Fatalf("an empty allowlist produced a violation: %v", v)
 	}
@@ -329,7 +329,7 @@ func TestMoneyWriteAmountViolations_EmptyAllowlistNoop(t *testing.T) {
 
 func TestMoneyGuardViolations_SpendingTriggerWithLoadRefused(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	s := httpScenario("POST", "https://sut.example/api/v1/trading/order", naCleanup)
+	s := httpScenario("POST", "https://sut.example/api/v1/pay/order", naCleanup)
 	s.Load = &LoadProfile{Users: 5}
 	v := MoneyGuardViolations(s, al)
 	if len(v) != 1 || !strings.Contains(v[0], "## LOAD") {
@@ -339,7 +339,7 @@ func TestMoneyGuardViolations_SpendingTriggerWithLoadRefused(t *testing.T) {
 
 func TestMoneyGuardViolations_SpendingTriggerWithStatus2Refused(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	s := httpScenario("POST", "https://sut.example/api/v1/trading/order", naCleanup)
+	s := httpScenario("POST", "https://sut.example/api/v1/pay/order", naCleanup)
 	s.ExpectRunnable = []string{"status=202", "status2=409"}
 	v := MoneyGuardViolations(s, al)
 	if len(v) != 1 || !strings.Contains(v[0], "status2") {
@@ -350,7 +350,7 @@ func TestMoneyGuardViolations_SpendingTriggerWithStatus2Refused(t *testing.T) {
 // Controls: the rule is about SPENDING requests that fire more than once — nothing wider.
 func TestMoneyGuardViolations_SpendingTriggerFiredOnceAllowed(t *testing.T) {
 	al := MoneyWriteAllowlist{orderEntry()}
-	s := httpScenario("POST", "https://sut.example/api/v1/trading/order", naCleanup)
+	s := httpScenario("POST", "https://sut.example/api/v1/pay/order", naCleanup)
 	s.ExpectRunnable = []string{"status=202"}
 	if v := MoneyGuardViolations(s, al); len(v) != 0 {
 		t.Fatalf("a spending TRIGGER that fires once was refused: %v", v)
@@ -359,7 +359,7 @@ func TestMoneyGuardViolations_SpendingTriggerFiredOnceAllowed(t *testing.T) {
 
 func TestMoneyGuardViolations_NonSpendingTriggerWithLoadAllowed(t *testing.T) {
 	al := MoneyWriteAllowlist{quoteEntry()}
-	s := httpScenario("POST", "https://sut.example/api/v1/trading/quote", naCleanup)
+	s := httpScenario("POST", "https://sut.example/api/v1/pay/quote", naCleanup)
 	s.Load = &LoadProfile{Users: 5}
 	if v := MoneyGuardViolations(s, al); len(v) != 0 {
 		t.Fatalf("a spends: false TRIGGER under LOAD was refused — the once-only rule is for spending requests only: %v", v)
